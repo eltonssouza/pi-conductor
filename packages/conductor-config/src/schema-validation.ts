@@ -10,6 +10,14 @@
  * in typebox -- this module's job is narrower (one internal config shape, no external protocol) and
  * a plain TS type-guard function is proportionate; not a library-grounded requirement, a small
  * design call in the spirit of ADR 0002 §1.3's "don't build more than the phase needs".
+ *
+ * T12 fix (found by conductor-cli's Gate 5 doctor tests, docs/conductor/gate3-fase1-addendum.md
+ * secure default 10 / OWASP ASVS V6.4): error messages for provider.model/provider.thinkingLevel
+ * never interpolate the raw value (see describeUnknown below) -- assertNoRawSecrets
+ * (secret-detection.ts) only runs inside writeConfig, never on the read path, so a hand-edited
+ * config.json whose provider.model is both secret-shaped and structurally invalid (e.g. missing the
+ * required "/" separator) must not leak that value through the exception every caller -- doctor,
+ * `conductor config show/get`, or any future one -- ultimately reads the failure from.
  */
 
 import { ConfigValidationError } from "./errors.ts";
@@ -23,6 +31,25 @@ const PROVIDER_MODEL_SHAPE = /^[^/\s]+\/[^/\s]+$/;
 
 function fail(message: string): never {
 	throw new ConfigValidationError(message);
+}
+
+/**
+ * Describes an unexpected value for an error message WITHOUT ever echoing a string's raw content
+ * (T12, gate3-fase1-addendum.md secure default 10 / OWASP ASVS V6.4 -- "no secret in a log or error
+ * response"). Used only for provider.model/provider.thinkingLevel: the two "genuinely free-text"
+ * fields secret-detection.ts already treats as where a hand-typed secret could plausibly land
+ * (FREE_TEXT_ENTROPY_CHECKED_PATHS) -- a place a user could paste a raw API key. assertNoRawSecrets
+ * only runs inside writeConfig, never on the read path (readConfig -> doctor / config show / get),
+ * so a hand-edited config.json that fails THIS function's structural check first (e.g. a
+ * secret-shaped provider.model missing the required "/" separator) must not leak that value via
+ * the exception every caller ultimately reads the failure from. Non-string values are safe to echo
+ * as-is: a secret cannot hide inside `JSON.stringify(5)` or `JSON.stringify(undefined)`.
+ */
+function describeUnknown(value: unknown): string {
+	if (typeof value === "string") {
+		return `a string of length ${value.length}`;
+	}
+	return JSON.stringify(value);
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -85,9 +112,11 @@ export function assertValidConfigShape(value: unknown): asserts value is Conduct
 	}
 	const provider = value.provider;
 	if (typeof provider.model !== "string" || !PROVIDER_MODEL_SHAPE.test(provider.model)) {
-		fail(`config.provider.model must be a "provider/modelId" identifier, got ${JSON.stringify(provider.model)}`);
+		fail(`config.provider.model must be a "provider/modelId" identifier, got ${describeUnknown(provider.model)}`);
 	}
 	if (provider.thinkingLevel !== undefined && typeof provider.thinkingLevel !== "string") {
-		fail("config.provider.thinkingLevel must be a string when present");
+		fail(
+			`config.provider.thinkingLevel must be a string when present, got ${describeUnknown(provider.thinkingLevel)}`,
+		);
 	}
 }

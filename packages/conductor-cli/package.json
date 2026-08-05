@@ -1,0 +1,29 @@
+{
+	"name": "@conductor/cli",
+	"version": "0.0.0",
+	"private": true,
+	"description": "The `conductor` binary: init/doctor/config/chat over @conductor/config, @conductor/project and @conductor/runtime (docs/adr/0002-fase1-cli-foundation.md §3.1 point 4, §7).",
+	"type": "module",
+	"main": "./src/index.ts",
+	"types": "./src/index.ts",
+	"bin": {
+		"conductor": "./bin/conductor.js"
+	},
+	"scripts": {
+		"test": "vitest --run"
+	},
+	"dependencies": {
+		"@conductor/config": "0.0.0",
+		"@conductor/project": "0.0.0",
+		"@earendil-works/pi-coding-agent": "^0.83.0"
+	},
+	"devDependencies": {
+		"@types/node": "24.12.4",
+		"@vitest/coverage-v8": "4.1.9",
+		"typescript": "5.9.3",
+		"vitest": "4.1.9"
+	},
+	"engines": {
+		"node": ">=22.19.0"
+	}
+}

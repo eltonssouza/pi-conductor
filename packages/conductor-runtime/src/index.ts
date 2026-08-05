@@ -7,6 +7,12 @@ export {
 	type PermissionGateOptions,
 } from "./permission-gate.ts";
 export {
+	buildFase1SystemPrompt,
+	ConductorResourceLoader,
+	type ConductorResourceLoaderOptions,
+	type Fase1ProjectConfig,
+} from "./resource-loader.ts";
+export {
 	type ConductorSession,
 	type CreateConductorSessionOptions,
 	createConductorSession,

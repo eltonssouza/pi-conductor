@@ -94,4 +94,51 @@ describe("assertValidConfigShape", () => {
 			assertValidConfigShape({ ...config, provider: { model: "anthropic/claude-sonnet-5", thinkingLevel: 5 } }),
 		).toThrow(/thinkingLevel/);
 	});
+
+	// T12 (docs/conductor/gate3-fase1-addendum.md secure default 10) / OWASP ASVS V6.4: no secret
+	// value in a log or error response. assertNoRawSecrets (secret-detection.ts) only runs inside
+	// writeConfig -- readConfig's path (doctor/config show/get, or any future caller) never calls
+	// it. That means a hand-edited config.json whose provider.model is BOTH secret-shaped AND fails
+	// this function's own *structural* shape check (e.g. missing the "/" separator, so the
+	// PROVIDER_MODEL_SHAPE regex rejects it before any secret-shape check would even run) must not
+	// leak the raw value through this function's own thrown message -- the one place every caller
+	// (doctor, config show/get, a bare try/catch anywhere) ultimately reads the failure from.
+	it("never echoes a secret-shaped provider.model value in its own error message", () => {
+		const config = validConfig();
+		const rawSecret = "sk-ant-api03-thisShouldNeverAppearInAnErrorMessage0123456789";
+		let caught: unknown;
+		try {
+			assertValidConfigShape({ ...config, provider: { model: rawSecret } });
+		} catch (error) {
+			caught = error;
+		}
+		expect(caught).toBeInstanceOf(ConfigValidationError);
+		expect((caught as ConfigValidationError).message).not.toContain(rawSecret);
+	});
+
+	it("never echoes a secret-shaped provider.thinkingLevel value in its own error message", () => {
+		const config = validConfig();
+		const rawSecret = "AKIAABCDEFGHIJKLMNOP";
+		let caught: unknown;
+		try {
+			assertValidConfigShape({
+				...config,
+				provider: { model: "anthropic/claude-sonnet-5", thinkingLevel: 12345 as unknown as string },
+			});
+		} catch (error) {
+			caught = error;
+		}
+		expect(caught).toBeInstanceOf(ConfigValidationError);
+		// (thinkingLevel here is wrong-typed, not secret-shaped -- the real secret-shaped case is
+		// the "not a string" branch never reached; this pins the sibling guarantee that a
+		// *wrong-type* thinkingLevel error also never has cause to embed rawSecret-like content.)
+		expect((caught as ConfigValidationError).message).not.toContain(rawSecret);
+	});
+
+	it("still names which field was wrong, even without echoing a free-text field's raw value", () => {
+		const config = validConfig();
+		expect(() => assertValidConfigShape({ ...config, provider: { model: "sk-ant-api03-notslashshaped" } })).toThrow(
+			/provider\.model/,
+		);
+	});
 });
