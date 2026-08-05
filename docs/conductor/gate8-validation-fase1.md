@@ -222,6 +222,27 @@ gap is specifically in the deterministic, documented "reject known prefixes wher
 guarantee, which has a demonstrated, reproducible counterexample independent of entropy.
 
 **Which requirement it violates:** T11 (`gate3-fase1-addendum.md`, P1) / secure default 8; ADR 0002
+
+---
+
+## 9. Closure — both defects fixed (commit `6aa52289a`)
+
+Independently re-verified by the orchestrator, not accepted on the fixer's report alone:
+
+- **T14:** `transcript.ts`'s `summarizeEntryForTranscript()` now funnels every line through
+  `sanitizeForTerminal()` before it reaches `Text` — the same sink discipline `confirm.ts` already
+  had. RED confirmed first (a CSI clear-screen sequence reached the fake terminal's write stream),
+  then GREEN. 6 new tests, `conductor-cli` now 122/122.
+- **T11:** `matchesKnownSecretPrefix()`'s patterns changed from `^...$` full-anchor to a leading
+  `\b` word-boundary with no trailing anchor — catches a prefix anywhere in the string without
+  false-positiving on ordinary words (`"desk-lamp-..."` stays clean). Re-reproduced live by the
+  orchestrator against the built CLI: `conductor config set provider.model
+  "anthropic/sk-ant-api03-FAKE..."` now refuses (exit 1); `"anthropic/claude-opus-4"` still
+  succeeds. `conductor-config` now 98/98.
+- `npm run check` green; full 392-test suite (cli 122, config 98, runtime 88, project 84)
+  independently re-run by the orchestrator, all green.
+
+**No open defects remain from this Gate 8 pass. Fase 1 (`plano_desenvolvimento.md` §8) is CLOSED.**
 §8.2 explicitly claims this ADR's implementation *"excede a mitigação pedida"* (exceeds what T11 asked
 for) — the live counterexample shows the deterministic half of the defense has a real, if narrow, hole.
 
