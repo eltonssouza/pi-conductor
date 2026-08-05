@@ -117,3 +117,25 @@ auto-decision policy (technical, not a sign-off):
 deliverables (ADR, matrix, gaps, threat model, discovery) and its exit criterion are done and
 verified; two entregáveis remain explicitly open and are queued, not forgotten, at the top of the
 continuation marker (`.cdt/auto/pi-conductor-fase0.continue.json`).
+
+---
+
+## 8. Closure — both open entregáveis backfilled (`/cdt-auto --continue`, same demand)
+
+Commits `ced8df8d8` (custom-tool PoC, `conductor_note`) and `9eea4a57d` (CLI/RPC channel PoC via
+Pi's own `RpcClient`, spawning the real built CLI subprocess). Independently re-verified by the
+orchestrator, not taken on the builder's report alone:
+
+- `git log` on `feature/fase0-descoberta-arquitetural` confirms both commits exist with the
+  claimed diffs.
+- `cd packages/conductor-poc && npx vitest run` re-run directly: **8 test files, 48 tests, all
+  green** (the prior 40 unchanged, 8 new: 7 for `conductor_note`, 1 for the RPC channel).
+- `src/permission-gate.ts:104-122` read directly (not via the builder's quote): confirms the
+  claimed behavior exactly — `conductor_note` gets its own validate-then-approve branch, and the
+  final fallback (`no policy declared for tool "${event.toolName}" — fail closed`) still catches
+  every other tool name, custom or built-in, unchanged from before this backfill. A custom tool is
+  not implicitly trusted.
+
+**Entregáveis now 7 of 7 delivered and substantive.** Exit criterion 7 of 7 bullets solidly met
+(the "executar testes" bullet remains mechanistic-only by explicit, documented choice — see §7 —
+not a gap, a scoped decision). **Fase 0 (`plano_desenvolvimento.md` §8) is CLOSED.**
