@@ -1,12 +1,15 @@
+import { join } from "node:path";
 import type { Model } from "@earendil-works/pi-ai";
-import type {
-	AgentSession,
-	CreateAgentSessionResult,
-	InlineExtension,
+import {
+	type AgentSession,
+	type CreateAgentSessionResult,
+	createAgentSession,
+	DefaultResourceLoader,
+	type InlineExtension,
 	ModelRuntime,
 	SessionManager,
 } from "@earendil-works/pi-coding-agent";
-import type { PermissionGateDecision } from "./permission-gate.ts";
+import { createPermissionGateExtension, type PermissionGateDecision } from "./permission-gate.ts";
 
 /**
  * Thin wiring for a Conductor-governed AgentSession (ADR 0001 §2: build against the stable
@@ -45,6 +48,55 @@ export interface ConductorSession {
 	dispose(): void;
 }
 
-export async function createConductorSession(_options: CreateConductorSessionOptions): Promise<ConductorSession> {
-	throw new Error("not implemented");
+export async function createConductorSession(options: CreateConductorSessionOptions): Promise<ConductorSession> {
+	const agentDir = options.agentDir ?? join(options.workspaceRoot, ".conductor-agent");
+
+	const modelRuntime =
+		options.modelRuntime ??
+		(await ModelRuntime.create({
+			authPath: join(agentDir, "auth.json"),
+			modelsPath: join(agentDir, "models.json"),
+			allowModelNetwork: false,
+		}));
+
+	const permissionGate = createPermissionGateExtension({
+		workspaceRoot: options.workspaceRoot,
+		additionalProtectedPaths: options.additionalProtectedPaths,
+		approvalTimeoutMs: options.approvalTimeoutMs,
+		onDecision: options.onDecision,
+	});
+
+	const resourceLoader = new DefaultResourceLoader({
+		cwd: options.workspaceRoot,
+		agentDir,
+		// Gate 3 secure default (item 5, §7): no third-party extensions/skills/prompts/themes in
+		// the Fase 0 TCB — only this first-party permission-gate extension (plus, in tests,
+		// extraExtensions such as a scripted fake model provider) is ever loaded.
+		noExtensions: true,
+		noSkills: true,
+		noPromptTemplates: true,
+		noThemes: true,
+		noContextFiles: true,
+		extensionFactories: [permissionGate, ...(options.extraExtensions ?? [])],
+	});
+	await resourceLoader.reload();
+
+	const sessionManager =
+		options.sessionManager ?? SessionManager.create(options.workspaceRoot, join(agentDir, "sessions"));
+
+	const { session, extensionsResult }: CreateAgentSessionResult = await createAgentSession({
+		cwd: options.workspaceRoot,
+		agentDir,
+		modelRuntime,
+		model: options.model,
+		tools: ["read", "write", "edit", "bash"],
+		resourceLoader,
+		sessionManager,
+	});
+
+	return {
+		session,
+		extensionsResult,
+		dispose: () => session.dispose(),
+	};
 }

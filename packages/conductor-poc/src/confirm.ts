@@ -17,10 +17,39 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 export const DEFAULT_APPROVAL_TIMEOUT_MS = 30_000;
 
 export async function confirmOrDeny(
-	_ctx: Pick<ExtensionContext, "ui" | "hasUI">,
-	_title: string,
-	_message: string,
-	_timeoutMs: number = DEFAULT_APPROVAL_TIMEOUT_MS,
+	ctx: Pick<ExtensionContext, "ui" | "hasUI">,
+	title: string,
+	message: string,
+	timeoutMs: number = DEFAULT_APPROVAL_TIMEOUT_MS,
 ): Promise<boolean> {
-	throw new Error("not implemented");
+	if (!ctx.hasUI) {
+		return false;
+	}
+
+	return await new Promise<boolean>((resolvePromise) => {
+		let settled = false;
+
+		const timer = setTimeout(() => {
+			if (settled) return;
+			settled = true;
+			resolvePromise(false);
+		}, timeoutMs);
+		// Don't let this timer keep the process alive on its own (matters for CLI/test runs).
+		timer.unref?.();
+
+		ctx.ui
+			.confirm(title, message, { timeout: timeoutMs })
+			.then((result) => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timer);
+				resolvePromise(result === true);
+			})
+			.catch(() => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timer);
+				resolvePromise(false);
+			});
+	});
 }

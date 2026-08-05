@@ -2,6 +2,7 @@ export { confirmOrDeny, DEFAULT_APPROVAL_TIMEOUT_MS } from "./confirm.ts";
 export { evaluatePolicyFailClosed, type PolicyDecision } from "./fail-closed.ts";
 export {
 	createPermissionGateExtension,
+	type NamedInlineExtension,
 	type PermissionGateDecision,
 	type PermissionGateOptions,
 } from "./permission-gate.ts";

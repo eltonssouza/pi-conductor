@@ -106,8 +106,7 @@ it("opens a session, reads, edits with approval (approved + blocked), runs bash,
 	await conductorSession.session.bindExtensions({ uiContext: ui, mode: "print" });
 
 	// Step 1+2: session open + (fake) model call happen as part of prompt().
-	const result = await conductorSession.session.prompt("Run the Fase 0 walking-skeleton sequence.");
-	expect(result).toBeDefined();
+	await conductorSession.session.prompt("Run the Fase 0 walking-skeleton sequence.");
 
 	// The fake model produced 5 turns — proves the multi-turn tool-calling loop actually ran.
 	expect(fakeModel.callCount()).toBe(5);

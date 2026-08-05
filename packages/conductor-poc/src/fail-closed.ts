@@ -20,7 +20,12 @@ export interface PolicyDecision {
  * propagating — this function itself never throws.
  */
 export async function evaluatePolicyFailClosed(
-	_evaluate: () => Promise<PolicyDecision> | PolicyDecision,
+	evaluate: () => Promise<PolicyDecision> | PolicyDecision,
 ): Promise<PolicyDecision> {
-	throw new Error("not implemented");
+	try {
+		return await evaluate();
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		return { block: true, reason: `policy evaluation error — fail closed: ${message}` };
+	}
 }
