@@ -649,5 +649,249 @@ não escrito). Se o Gate 4 expuser uma fronteira nova (ex.: onde o Command
 Classifier ou o Redaction Pipeline moram como pacote, se o audit trail reusa o
 `SessionManager` JSONL ou um store próprio), **voltar a este Gate 3** antes de
 avançar. As 6 lacunas do §5 devem voltar ao Gate 2 antes do Gate 5 (test-first).
+
+---
+
+## 9. Reconciliação pontual pós-Gate 4 — duas fronteiras novas (T28–T29)
+
+**Gatilho.** O ADR 0003 (Gate 4) §13.3 devolveu a este Gate 3, pelo protocolo
+iterativo (CLAUDE.md Gate 4 + §8 acima), **duas fronteiras de confiança novas** que
+a arquitetura expôs e que o STRIDE T17–T27 não cobria. **Escopo: SOMENTE estas
+duas.** Não re-litiga T1–T27, não repete o passe STRIDE product-wide. O DFD, a
+regra-mãe fail-closed, R1–R10 e todos os residuais declarados **permanecem válidos
+e herdados**.
+
+**Grounding desta rodada (honesto de saída).** Consultas rodadas de
+`C:\development\source\projects\conductor` via `cdt library "<pergunta>" --gate 3`
+(backend saudável, 2267 chunks). **A biblioteca NÃO tem capítulo dedicado a
+trust-on-first-use** (consulta top 0.609, retornou material genérico de
+trust-boundary); o **análogo mais próximo** é o pinning por **content-hash de
+recurso não-controlado** — Subresource Integrity / lockfile — em **Penetration
+Testing §14.5/§14.9** ("the CDN script won't execute if tampered with";
+"dependencies pinned via lockfile", top 0.596–0.598). Reportado, **não forçado** —
+mesma disciplina do T5/T17. Para a completude de mediação da costura de redação a
+cobertura é **forte e direta** (§13.12/§14.12/§22.12 + §2.12, abaixo).
+
+---
+
+### T28 — `PolicyTrustStore` envenenado / "esquecido" (fronteira nova, ADR §5.3/§13.3-1)
+**STRIDE:** Tampering + Spoofing (de autoridade) + Elevation · **Elemento:** S3′
+(o ledger de trust-on-first-use, novo store de confiança) · **Prob:** Média ·
+**Impacto:** Crítico · **Prio:** **P2** (o vetor de *escrita-por-ferramenta* já é
+fechado pelo tratamento T26-like; o residual novo é a **semântica de leitura** e o
+acesso-direto-a-disco — mas um fail-**open** de leitura elevaria a P1, daí a regra
+R11 abaixo ser obrigatória).
+
+**Superfície (as três perguntas do Gate 4).**
+- **Onde mora?** Arquivo persistente dentro de `.conductor/` (ADR §5.3), não
+  processo-em-memória. É a escolha correta para a *semântica* de TOFU — "aprova uma
+  vez, permanece confiado até o conteúdo mudar" é exatamente o `known_hosts` do SSH
+  (arquivo persistente pinando um hash). O custo dessa escolha: **um arquivo
+  persistente é atacável em disco** — não existe TOFU persistente sem um store
+  persistente para envenenar. A alternativa (ledger só-em-memória, re-prompt a cada
+  sessão) removeria a superfície de disco mas quebraria a persistência do pin e
+  aumentaria a fricção → usuário confia em tudo (o anti-padrão do §2.2). A escolha
+  do ADR (persistente + protegido) é defensável; o preço é este T28.
+- **Quem pode escrevê-lo?** SÓ o canal fora-de-banda (`conductor policy trust`,
+  simétrico a `config set` — BR-4). Via ferramenta, ele é **protected-path**
+  (write/edit hard-block **E** bash-`critical` pelo classifier, §3.2 sinal 8), 0600,
+  gitignored. Isto é o tratamento T26 (audit trail) aplicado idêntico — e **fecha o
+  vetor de escrita**: um agente sob injeção não consegue "aprovar a própria política
+  hostil" gravando um hash no ledger. **É o T18 por outra porta, e a porta está
+  trancada do mesmo jeito que a do audit trail.** *Confirmado.*
+- **O que acontece se corromper/faltar?** É a **metade que o ADR §5.3 não modelou**
+  — ele descreveu a proteção de *escrita*, mas é **silente sobre a semântica de
+  leitura**. Um atacante que não consegue *inserir* um hash pode tentar **corromper
+  o arquivo** (JSON inválido) ou **apagar um entry** para forçar um re-prompt que um
+  fluxo `--yes`/headless auto-responda, ou explorar um bug onde "falha ao carregar o
+  store" resolva para "confiado por omissão". A resposta **tem que** espelhar o
+  loader de `policy.json` (§5.1): `absent | invalid | não-contém-o-hash` → os três
+  colapsam em **`isTrusted() === false`** (grants ignorados, só defaults). **Corromper
+  ou apagar o TrustStore torna comandos MENOS permissivos, nunca mais** — a "perda de
+  memória" é fail-**closed** (nega grant), jamais "confiado por omissão". Um
+  `PolicyTrustStore.isTrusted()` (contrato ADR §16) que **lance** numa leitura ruim,
+  ou devolva `true` por default, é uma regressão de segurança — R11 abaixo o proíbe.
+
+**Mitigação.** (i) **R11** (nova, abaixo) fixa a semântica de leitura fail-closed;
+(ii) o TrustStore entra **nominalmente** em `defaultProtectedPaths(workspaceRoot)`
+ao lado de `config.json`/`policy.json`/`audit.jsonl` (o ADR afirma isto de forma
+genérica em §5.3 — o **nome de arquivo exato** tem que ser enumerado, como o
+`audit.jsonl` foi em §7, senão a proteção é aspiracional); (iii) a **cerimônia de
+pin** (`conductor policy trust`) DEVE **exibir ao humano os grants concretos que o
+`policy.json` conferiria** (quais comandos auto-aprovaria, quais destinos de rede
+consentiria) **antes** de fixar o hash — pinar às cegas é aprovação-teatro, primo do
+T14/T17 §3.2-nota-▼; é a "multi-party authorization" onde a segunda parte precisa
+*ver o que autoriza*; (iv) **residual declarado, com paridade ao audit trail:** o
+TrustStore da Fase 2 é *protegido + fail-closed na leitura*, **não** tamper-evident
+por cripto — um atacante com **acesso direto ao disco** (fora do loop do agente)
+pode envenená-lo exatamente como pode editar o `audit.jsonl` (R3/T25 residual). É o
+**mesmo** residual, e o ADR **tem que declará-lo com a mesma honestidade** (§5.3 não
+o declara hoje). Cripto-integridade do ledger de trust = **Fase 4**, junto do
+hash-chain do audit.
+
+*Grounding:* **Secure and Reliable Systems Design §3.12/§3.13** (herdado do T18 —
+"the reachable authority has never been enumerated"; "require multi-party
+authorization" — o pin informado É a segunda parte; "route privileged access through
+an audit trail" — o *valor* do TrustStore pressupõe que o auditado/confiado não o
+controla, o que justifica ser protected-path). **Security Engineering Principles
+§2.9/§2.2** (erro/incerteza **nega**; secure-by-default — a "perda de memória" do
+store cai para o lado seguro). **Penetration Testing §14.5/§14.9** (o análogo TOFU:
+pinar por content-hash e **rejeitar no mismatch** — um hash desconhecido/alterado
+não é honrado; é a mesma direção do §5.2 "policy.json alterado → grants-ignorados").
+**Secure Code Review §3.3/§3.5** (um novo store que porteia grants **é** uma nova
+trust boundary — "bugs cluster at trust boundaries" — logo herda a disciplina de
+proteção do audit). Cobertura TOFU dedicada: **ausente** (declarado acima).
+
+---
+
+### T29 — Costura de redação no write-path do `SessionManager` do Pi: sink parcial / regressão silenciosa (fronteira nova, ADR §6.3/§13.3-2)
+**STRIDE:** Information disclosure · **Elemento:** S5/sink #3 (session JSONL), agora
+numa **dependência externa (Pi) que o Conductor não possui** · **Prob:** Média ·
+**Impacto:** Alto · **Prio:** **P2** (é o refinamento de T21/T22 — cuja direção
+"redigir-antes-de-persistir" já é vinculante por R6 — para o caso do sink **fora do
+nosso controle**; sem o guard de R12 abaixo, reabre T21, que é **P1**).
+
+**A fronteira, precisamente.** O ADR §6.3 escolheu um "transform de redação fino no
+write-path" que redige tool-inputs/results **antes** de chegarem ao `SessionManager`.
+A direção está certa (é R6/GAP-E). O que a fronteira nova adiciona é uma questão de
+**completude de mediação num sink que não é nosso**:
+- **Múltiplos pontos de escrita.** Se o `SessionManager` do Pi persistir a partir de
+  **mais de um** ponto interno, e o transform estiver costurado em **um** deles, os
+  outros são um **sink esquecido** — o T21/T14 literal ("cada sink se defende
+  sozinho"), agora numa dependência de terceiro. Colocar o redator em *N* pontos
+  identificados-à-mão é exatamente a postura frágil "per-endpoint": **"every new
+  route is a fresh chance to omit"** (Penetration Testing §13.12). A propriedade só é
+  robusta quando **garantida por construção** ("guaranteed by generation"), não por
+  colocação manual em cada ponto.
+- **Regressão silenciosa no upgrade do Pi.** Uma versão futura do Pi pode mudar
+  *como* escreve a sessão e o transform **silenciosamente para de ser chamado** — sem
+  erro, sem teste vermelho, só segredo em claro no disco. O Pi é um componente que
+  **"changes without a build of yours ever running"** (Penetration Testing §14.12) —
+  é a definição do risco. É também uma **trust boundary transitiva "que ninguém
+  desenhou"** (Secure Code Review §3.13).
+
+**Resolução exigida (dupla, ambas vinculantes).**
+1. **Choke no handoff que o Conductor POSSUI, não nos pontos de escrita do Pi.** A
+   redação tem que rodar no **único ponto onde o código do Conductor entrega o
+   objeto de sessão ao Pi** (redigir-antes-do-handoff), de modo que o objeto que o Pi
+   recebe **já esteja redigido** — assim, quantos pontos de escrita internos o Pi
+   tenha, e mude quantas vezes mudar, ele nunca recebe segredo em claro. O choke passa
+   a ser o **handoff (nosso)**, não o **sink (dele)**. Isto transforma "colocação
+   manual em N sinks externos" em "um choke por construção na nossa borda" — o
+   *"guaranteed by generation"* do §13.12. **Se** não existir um handoff único
+   (o Pi captura tool-I/O por conta própria, sem passar pela nossa borda), então a
+   completude **não pode** ser afirmada por construção e o ponto de integração
+   **abre, sim, uma travessia não modelada** — este é o veredito condicional que o
+   §13.3-2 pediu (ver abaixo). Descobrir qual das duas formas o Pi tem é o residual
+   de Gate 6 que o ADR §6.3 já nomeou — **mas a decisão de segurança é: redigir na
+   nossa borda de handoff, não perseguir os sinks internos do Pi.**
+2. **Teste de regressão estrutural agnóstico ao caminho de código (canário).** Um
+   unit-test do transform prova **só o caminho que costuramos** — e "a completed trace
+   is evidence about that question and about nothing else … not a coverage claim"
+   (Secure Code Review §2.12). O que fecha T29 é um **teste de integração que assere
+   sobre o ARQUIVO FINAL, não sobre o caminho**: semear um **segredo-canário real**
+   (um sentinela com prefixo conhecido que o matcher `@conductor/secrets` **garante**
+   capturar, ex. um token fake `sk-…`) num fluxo de sessão **real**, dirigir o
+   `SessionManager` **de verdade** a persistir, então **ler o `.jsonl` resultante do
+   disco e afirmar que o canário NUNCA aparece em claro** — *independente de qual
+   caminho de código o Pi usou para escrever*. Esse teste fica **vermelho no instante
+   em que o segredo toca o disco**, seja por um segundo ponto de escrita que
+   esquecemos, seja por uma versão futura do Pi que mudou o write-path e furou o
+   transform. É o tripwire da regressão-silenciosa. Como o gatilho é uma **dependência
+   de terceiro que muda fora do nosso build**, o guard tem que ser **bloqueante em CI
+   e re-executado a cada upgrade do Pi** (Penetration Testing §22.12: "retesting …
+   guarding every confirmed finding are not optional"), com a versão do Pi **pinada no
+   lockfile**. É exatamente o mandato do **qa-guardian** (Gate 5/7): um `@regression`
+   sobre um invariante de segurança observável.
+3. **Defesa em profundidade** (herdada, R6): mesmo com (1)+(2), a redação continua a
+   rodar **também** no limite externo dos outros 5 sinks — o session JSONL não é
+   exceção, é o sink onde a garantia por-construção é mais frágil por ser externa.
+
+**Mitigação → R12** (nova, abaixo). *Grounding:* **Penetration Testing §13.12**
+("every new route is a fresh chance to omit"; propriedade robusta = "guaranteed by
+generation", não colocação por-ponto — top 0.647), **§14.12** (terceiro muda sem o
+seu build rodar — top 0.622), **§22.12** (retest/guard bloqueante não é opcional —
+top 0.614). **Secure Code Review §2.12** (um trace de um caminho **não é** claim de
+cobertura — justifica asserir sobre o arquivo, não sobre o caminho — top 0.594),
+**§3.13** (boundaries transitivas "que ninguém desenhou"). **OWASP ASVS V6.4/V7.1**
+(segredo não pode virar material persistido — herdado de T21/T22). Direção
+"redigir-antes-de-persistir" herdada de R6/GAP-E, **inalterada**; T29 só endurece a
+*completude* quando o sink é externo.
+
+---
+
+### Regras vinculantes novas para o Gate 4/5/6 (estendem R1–R10)
+
+- **R11 (`PolicyTrustStore` — leitura fail-closed + protegido + pin informado +
+  residual declarado).** O ledger de trust-on-first-use: (a) **leitura fail-closed** —
+  `absent | invalid | hash-ausente` colapsam em `isTrusted=false` (grants ignorados);
+  nunca lança, nunca `true` por default; corromper/apagar o store torna a sessão
+  **menos** permissiva, nunca mais. (b) **protected-path nominal** — o arquivo entra
+  em `defaultProtectedPaths` por nome, com write/edit hard-block + bash-`critical`,
+  0600, gitignored (tratamento T26). (c) **pin informado** — `conductor policy trust`
+  exibe os grants concretos que o `policy.json` conferiria **antes** de fixar o hash.
+  (d) **residual declarado** — sem cripto-integridade na Fase 2; acesso-direto-a-disco
+  fora do loop pode envenená-lo, **paridade com o audit trail (R3)**; cripto = Fase 4.
+  (T28)
+- **R12 (redação do session JSONL — choke no handoff próprio + guard canário
+  agnóstico ao caminho).** (a) A redação roda no **único handoff Conductor→Pi**
+  (redigir-antes-do-handoff), não espalhada pelos pontos de escrita internos do Pi; o
+  objeto entregue ao Pi já está redigido. (b) Se **não** houver handoff único, a
+  completude **não** pode ser afirmada por construção — declarar como travessia não
+  modelada e resolver no Gate 6 antes de reivindicar R6 para este sink. (c) **Guard de
+  regressão estrutural obrigatório**: teste de integração que semeia um segredo-canário
+  real, dirige o `SessionManager` real a persistir, lê o `.jsonl` do disco e afirma
+  ausência do canário **independente do caminho de código**; **bloqueante em CI**,
+  **re-executado a cada upgrade do Pi**, Pi **pinado no lockfile**. Sem (c), T21
+  reabre no upgrade silencioso. (T29)
+
+---
+
+### Veredito sobre a arquitetura do Gate 4 (resposta direta ao ADR §13.3)
+
+**A arquitetura do Gate 4 está OK — não precisa de re-arquitetura; precisa de duas
+adições vinculantes (R11, R12), ambas aditivas, não estruturais.**
+
+- **§13.3-1 (`PolicyTrustStore`) — CONFIRMADO que fecha o vetor de ESCRITA** (é o T18
+  por outra porta, e a porta está trancada idêntica à do audit trail: protected-path
+  + 0600 + gitignored + escrita só fora-de-banda). **Falta o que o ADR não modelou:**
+  a **semântica de leitura fail-closed** (R11a) e o **residual declarado + pin
+  informado** (R11c/d). Um `isTrusted()` fail-**open** reabriria T18 inteiro — por
+  isso R11a é obrigatória, não recomendação. Enumerar o **nome do arquivo** em
+  `defaultProtectedPaths` (R11b) é wiring de Gate 6.
+- **§13.3-2 (costura de redação no write-path) — CONFIRMADO que a DIREÇÃO não abre
+  travessia nova, CONDICIONAL a duas coisas:** a redação estar no **handoff que
+  possuímos** (não nos sinks internos do Pi, R12a) **e** existir o **guard canário
+  agnóstico ao caminho** (R12c). **Sem R12c, o ponto de integração ABRE, sim, uma
+  travessia não modelada** — a regressão silenciosa no upgrade do Pi — que nenhum
+  unit-test do transform pega. Com R12a+R12c, fechado. Descobrir a forma de escrita do
+  Pi continua residual de Gate 6 (ADR §6.3), mas a **decisão de segurança** está
+  travada aqui: chokar no handoff, provar por asserção-sobre-o-arquivo.
+
+**Sem novos findings críticos/altos não-mitigados.** T28/T29 são P2, ambos fechados
+por regra (R11/R12); os residuais (cripto do TrustStore; forma de escrita do Pi;
+acesso-direto-a-disco) são **declarados, não escondidos**, e herdam os residuais já
+aceitos da Fase 2 (R3 cripto / sem-sandbox). Nada bloqueia o avanço ao Gate 5 — que
+deve derivar, como test-first, o **teste-canário de R12c** e o **teste de leitura
+fail-closed do TrustStore de R11a** como casos explícitos.
+
+**Grounding desta reconciliação (livro+seção):**
+1. **TOFU / integridade do TrustStore (T28)** → **ausente como capítulo dedicado**
+   (top 0.609, genérico); análogo **Penetration Testing §14.5/§14.9** (content-hash
+   pin / lockfile — rejeitar no mismatch); herdados **Secure & Reliable §3.12/§3.13**
+   (multi-party auth, reachable authority) + **SE Principles §2.9/§2.2** (incerteza
+   nega) + **Secure Code Review §3.3/§3.5** (novo store = nova trust boundary).
+2. **Completude de mediação do sink externo (T29)** → **Penetration Testing §13.12**
+   (per-ponto = "fresh chance to omit" vs "guaranteed by generation" — top 0.647),
+   **§14.12** (terceiro muda sem seu build — 0.622), **§22.12** (guard bloqueante não
+   opcional — 0.614); **Secure Code Review §2.12** (trace ≠ claim de cobertura →
+   asserir sobre o arquivo — 0.594), **§3.13** (boundary transitiva não-desenhada);
+   **OWASP ASVS V6.4/V7.1** herdado.
+
+**Critério de saída desta rodada:** [x] duas fronteiras modeladas (T28/T29, STRIDE +
+prob×impacto + mitigação); [x] ADR §13.3 confirmado/ajustado ponto a ponto; [x] duas
+regras vinculantes novas (R11/R12) entregues ao Gate 4/5/6; [x] grounding por
+livro+seção, lacuna de TOFU reportada honestamente; [ ] aprovação do usuário
+(checkpoint do gate).
 </content>
 </invoke>
