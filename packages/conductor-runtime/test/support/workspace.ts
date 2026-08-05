@@ -15,7 +15,7 @@ export interface ScratchWorkspace {
 	cleanup(): void;
 }
 
-export function createScratchWorkspace(prefix = "conductor-poc-"): ScratchWorkspace {
+export function createScratchWorkspace(prefix = "conductor-runtime-"): ScratchWorkspace {
 	const created = mkdtempSync(join(tmpdir(), prefix));
 	// realpathSync matters on macOS, where tmpdir() itself is a symlink (/tmp -> /private/tmp):
 	// without this, workspaceRoot as passed to the policy would never equal what

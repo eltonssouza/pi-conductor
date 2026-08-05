@@ -1,8 +1,8 @@
 {
-	"name": "@conductor/poc",
+	"name": "@conductor/runtime",
 	"version": "0.0.0",
 	"private": true,
-	"description": "Fase-0 walking skeleton: Conductor's permission-gate extension composed on the Pi Agent/AgentSession runtime (docs/adr/0001-adopt-pi-as-runtime.md).",
+	"description": "Conductor's permission-gate + workspace-policy extension composed on the Pi Agent/AgentSession runtime (docs/adr/0001-adopt-pi-as-runtime.md); promoted from the Fase-0 walking skeleton (formerly packages/conductor-poc) per docs/adr/0002-fase1-cli-foundation.md §3.2.",
 	"type": "module",
 	"main": "./src/index.ts",
 	"types": "./src/index.ts",

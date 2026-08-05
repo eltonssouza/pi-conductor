@@ -72,10 +72,26 @@ export function isWithinRoot(candidateRealPath: string, rootRealPath: string): b
  * config directories that must never be reachable by write/edit/bash, independent of workspace
  * containment. Paths under the home directory do not need to exist to be protected — a tool must
  * not be able to *create* ~/.ssh either.
+ *
+ * When `workspaceRoot` is supplied, the list also includes `.conductor/config.json` and
+ * `.conductor/policy.json` *inside that workspace* (Fase-1 Gate 3 addendum T13 —
+ * docs/conductor/gate3-fase1-addendum.md §2 T13 / §3 secure default 9; docs/adr/0002-fase1-cli-foundation.md
+ * §7.4): those two files hold the very policy this gate enforces (allowedRoots, protected paths,
+ * provider consent). Because they live *inside* the workspace, workspace containment alone would
+ * leave them writable by the write/edit tools this same gate governs — a confused-deputy where a
+ * tool (possibly acting under prompt injection) widens its own authority by editing the file that
+ * restricts it. Folding this into `defaultProtectedPaths()` itself — rather than requiring every
+ * future caller (e.g. a future `conductor chat`) to remember to pass
+ * `.conductor/{config,policy}.json` via `additionalProtectedPaths`) — makes the protection
+ * secure-by-default: it cannot be omitted by a caller that forgets. The policy can still change, but
+ * only out-of-band (a human editor, or a dedicated `conductor config` CLI command that never runs
+ * through `pi.on("tool_call")` — ADR 0002 §7.3), never by the agent acting on itself. The
+ * `workspaceRoot`-less overload keeps returning exactly the home-directory list it always has, so
+ * existing callers (and this file's own unit tests) are unaffected.
  */
-export function defaultProtectedPaths(): string[] {
+export function defaultProtectedPaths(workspaceRoot?: string): string[] {
 	const home = homedir();
-	return [
+	const paths = [
 		join(home, ".ssh"),
 		join(home, ".aws"),
 		join(home, ".gnupg"),
@@ -84,6 +100,10 @@ export function defaultProtectedPaths(): string[] {
 		join(home, ".config"),
 		join(home, ".conductor", "credentials"),
 	];
+	if (workspaceRoot) {
+		paths.push(join(workspaceRoot, ".conductor", "config.json"), join(workspaceRoot, ".conductor", "policy.json"));
+	}
+	return paths;
 }
 
 /** Canonicalize a protected-path entry without requiring it to exist (see defaultProtectedPaths()). */
@@ -108,7 +128,10 @@ export function evaluateToolPath(rawPath: string, options: WorkspacePolicyOption
 	const workspaceReal = resolveRealPath(options.workspaceRoot, options.workspaceRoot);
 	const targetReal = resolveRealPath(rawPath, options.workspaceRoot);
 
-	const protectedRoots = [...defaultProtectedPaths(), ...(options.additionalProtectedPaths ?? [])];
+	const protectedRoots = [
+		...defaultProtectedPaths(options.workspaceRoot),
+		...(options.additionalProtectedPaths ?? []),
+	];
 	for (const protectedPath of protectedRoots) {
 		const protectedReal = realpathOfExistingAncestorOrLexical(protectedPath);
 		if (isWithinRoot(targetReal, protectedReal)) {

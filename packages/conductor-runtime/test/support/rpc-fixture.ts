@@ -38,8 +38,8 @@ export function resolvePiCliPath(): string {
 	return join(dirname(entryPath), "cli.js");
 }
 
-const STUB_PROVIDER = "conductor-poc-stub";
-const STUB_MODEL = "conductor-poc-stub-model";
+const STUB_PROVIDER = "conductor-runtime-stub";
+const STUB_MODEL = "conductor-runtime-stub-model";
 
 /**
  * Write a scratch models.json (docs/models.md "Minimal Example" shape) declaring one offline stub

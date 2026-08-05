@@ -95,6 +95,18 @@ describe("defaultProtectedPaths", () => {
 		}
 		expect(paths.some((p) => p.endsWith(join("conductor", "credentials")))).toBe(true);
 	});
+
+	it("does NOT include .conductor/config.json or .conductor/policy.json when no workspaceRoot is given (backward compatible)", () => {
+		const paths = defaultProtectedPaths();
+		expect(paths.some((p) => p.endsWith(join(".conductor", "config.json")))).toBe(false);
+		expect(paths.some((p) => p.endsWith(join(".conductor", "policy.json")))).toBe(false);
+	});
+
+	it("includes .conductor/config.json and .conductor/policy.json inside the given workspace root (T13)", () => {
+		const paths = defaultProtectedPaths(workspace.root);
+		expect(paths).toContain(join(workspace.root, ".conductor", "config.json"));
+		expect(paths).toContain(join(workspace.root, ".conductor", "policy.json"));
+	});
 });
 
 describe("evaluateToolPath", () => {
@@ -128,7 +140,7 @@ describe("evaluateToolPath", () => {
 	});
 
 	it("denies a symlink inside the workspace that resolves outside it", () => {
-		const outsideDir = createScratchWorkspace("conductor-poc-outside-");
+		const outsideDir = createScratchWorkspace("conductor-runtime-outside-");
 		try {
 			writeFileSync(join(outsideDir.root, "secret.txt"), "top secret");
 
@@ -146,5 +158,41 @@ describe("evaluateToolPath", () => {
 		} finally {
 			outsideDir.cleanup();
 		}
+	});
+
+	// T13 (gate3-fase1-addendum.md §2 T13, §3 secure default 9): .conductor/config.json and
+	// .conductor/policy.json hold the very policy this function enforces. A tool-driven write to
+	// either must be BLOCKED outright by workspace-policy alone — no additionalProtectedPaths wiring
+	// required from the caller — same rigor as the symlink-escape test above: a real scratch
+	// workspace, no mocking of fs, asserting both the verdict and the reason.
+	describe("protects .conductor/config.json and .conductor/policy.json (T13)", () => {
+		it("denies a write to .conductor/config.json inside the workspace, even though it is contained (defense in depth, no additionalProtectedPaths needed)", () => {
+			mkdirSync(join(workspace.root, ".conductor"), { recursive: true });
+			writeFileSync(join(workspace.root, ".conductor", "config.json"), JSON.stringify({ schema: 1 }));
+
+			const result = evaluateToolPath(join(".conductor", "config.json"), { workspaceRoot: workspace.root });
+
+			expect(result.allowed).toBe(false);
+			expect(result.reason).toMatch(/protected location/);
+		});
+
+		it("denies a write to .conductor/policy.json even when the file does not exist yet (protection does not require the target to already exist)", () => {
+			// Deliberately never created — mirrors defaultProtectedPaths()'s existing guarantee for
+			// ~/.ssh: a tool must not be able to CREATE the protected file either, not just edit one
+			// that already exists.
+			const result = evaluateToolPath(join(".conductor", "policy.json"), { workspaceRoot: workspace.root });
+
+			expect(result.allowed).toBe(false);
+			expect(result.reason).toMatch(/protected location/);
+		});
+
+		it("does not deny an unrelated file under .conductor/ (protection is scoped to config.json/policy.json, not the whole directory)", () => {
+			mkdirSync(join(workspace.root, ".conductor"), { recursive: true });
+			writeFileSync(join(workspace.root, ".conductor", "notes.txt"), "not policy");
+
+			const result = evaluateToolPath(join(".conductor", "notes.txt"), { workspaceRoot: workspace.root });
+
+			expect(result.allowed).toBe(true);
+		});
 	});
 });

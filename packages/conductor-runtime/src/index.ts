@@ -11,6 +11,7 @@ export {
 	type CreateConductorSessionOptions,
 	createConductorSession,
 } from "./session.ts";
+export { sanitizeForTerminal } from "./terminal-sanitize.ts";
 export {
 	type ConductorNoteRecord,
 	type ConductorNoteToolHandle,

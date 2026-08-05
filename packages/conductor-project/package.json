@@ -1,0 +1,21 @@
+{
+	"name": "@conductor/project",
+	"version": "0.0.0",
+	"private": true,
+	"description": "Project stack detection (type/technologies/evidence) and profile enrichment (frameworks/languages/datastores/build/testing/tooling/libraries) from a target project's manifests. Ported from conductor-main/conductor/detect.py (docs/adr/0002-fase1-cli-foundation.md §5.1). Pure function, no config I/O — that boundary belongs to @conductor/config.",
+	"type": "module",
+	"main": "./src/index.ts",
+	"types": "./src/index.ts",
+	"scripts": {
+		"test": "vitest --run"
+	},
+	"devDependencies": {
+		"@types/node": "24.12.4",
+		"@vitest/coverage-v8": "4.1.9",
+		"typescript": "5.9.3",
+		"vitest": "4.1.9"
+	},
+	"engines": {
+		"node": ">=22.19.0"
+	}
+}
