@@ -22,8 +22,6 @@
  * handling on every external call, degrade rather than throw).
  */
 
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import {
 	ConfigNotFoundError,
 	ConfigParseError,
@@ -31,15 +29,13 @@ import {
 	getConfigSummary,
 	readConfig,
 } from "@conductor/config";
-
-const execFileAsync = promisify(execFile);
+import { DEFAULT_GIT_STATUS_TIMEOUT_MS, getGitStatus, resolveTimeoutMs } from "../git-status.ts";
 
 /** Mirrors this monorepo's own `engines.node` floor (every package.json here declares the same
  * value) -- ADR 0002 §7.2 item 2 grounds this the same way: "same engines.node as every Pi
  * package.json", not a value read from any per-project config (there is nothing project-specific
  * about the runtime this CLI itself needs). */
 const MIN_NODE_VERSION = "22.19.0";
-const DEFAULT_GIT_COMMAND_TIMEOUT_MS = 5000;
 
 /**
  * Quality-baseline category 4 ("no hardcoded assumptions" -- timeouts externalized): the git-check
@@ -47,11 +43,13 @@ const DEFAULT_GIT_COMMAND_TIMEOUT_MS = 5000;
  * being a code-only constant, so a slow/unusual environment (a network filesystem, a huge repo) is
  * not stuck with a value baked into the binary. Exported for direct, deterministic unit testing
  * (rather than only indirectly through a real, potentially-flaky timing-based integration test).
+ * Delegates to git-status.ts's shared `resolveTimeoutMs` (round B2 extracted the underlying git
+ * subprocess calls into that module so `commands/chat`'s status line can reuse them) -- this
+ * wrapper's name, signature, and env-var contract are unchanged so existing callers/tests of this
+ * exact function keep working.
  */
 export function resolveGitTimeoutMs(rawEnvValue: string | undefined): number {
-	if (rawEnvValue === undefined) return DEFAULT_GIT_COMMAND_TIMEOUT_MS;
-	const parsed = Number(rawEnvValue);
-	return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_GIT_COMMAND_TIMEOUT_MS;
+	return resolveTimeoutMs(rawEnvValue, DEFAULT_GIT_STATUS_TIMEOUT_MS);
 }
 
 export type CheckStatus = "pass" | "warn" | "fail" | "skip";
@@ -142,26 +140,15 @@ function checkNodeVersion(): DoctorCheck {
 async function checkGitRepo(cwd: string): Promise<DoctorCheck> {
 	const name = "git repository state";
 	const timeout = resolveGitTimeoutMs(process.env.CONDUCTOR_DOCTOR_GIT_TIMEOUT_MS);
-	try {
-		const { stdout: statusOut } = await execFileAsync("git", ["status", "--porcelain"], { cwd, timeout });
-		const { stdout: branchOut } = await execFileAsync("git", ["branch", "--show-current"], { cwd, timeout });
-		const branch = branchOut.trim() || "(detached HEAD)";
-		const dirty = statusOut.trim().length > 0;
-		return {
-			name,
-			status: dirty ? "warn" : "pass",
-			message: `branch "${branch}"${dirty ? ", working tree dirty" : ", working tree clean"}`,
-		};
-	} catch (error) {
-		const message = describeError(error);
-		if (/not a git repository/i.test(message)) {
-			return { name, status: "warn", message: "not a git repository -- informational only, this is not required" };
-		}
-		if (/ENOENT/.test(message)) {
-			return { name, status: "warn", message: "git executable not found on PATH -- informational only" };
-		}
-		return { name, status: "warn", message: `could not determine git state: ${message}` };
+	const status = await getGitStatus(cwd, timeout);
+	if (status.kind === "unavailable") {
+		return { name, status: "warn", message: status.reason };
 	}
+	return {
+		name,
+		status: status.kind === "dirty" ? "warn" : "pass",
+		message: `branch "${status.branch}"${status.kind === "dirty" ? ", working tree dirty" : ", working tree clean"}`,
+	};
 }
 
 function checkLibraryBackend(): DoctorCheck {

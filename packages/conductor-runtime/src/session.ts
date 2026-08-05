@@ -11,6 +11,7 @@ import {
 	type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { createPermissionGateExtension, type PermissionGateDecision } from "./permission-gate.ts";
+import { ConductorResourceLoader, type Fase1ProjectConfig } from "./resource-loader.ts";
 
 /**
  * Thin wiring for a Conductor-governed AgentSession (ADR 0001 §2: build against the stable
@@ -52,6 +53,16 @@ export interface CreateConductorSessionOptions {
 	 */
 	customTools?: ToolDefinition[];
 	onDecision?: (decision: PermissionGateDecision) => void;
+	/**
+	 * When supplied, the resourceLoader is built through `ConductorResourceLoader` (resource-loader.ts,
+	 * ADR 0002 §4) instead of the inline `DefaultResourceLoader` below, so the session's system prompt
+	 * is the Fase 1 prompt built from real project config (ADR 0002 §7.4's "prompt customizado" exit
+	 * criterion) -- `conductor chat` (round B2) is the first caller that needs this. Omitted by every
+	 * other existing caller (round A's acceptance tests, conductor-cli's init/doctor/config, none of
+	 * which open a live session with a custom prompt), which keeps this option's absence exactly
+	 * equivalent to session.ts's behavior through round A/B1 -- additive, not a breaking change.
+	 */
+	config?: Fase1ProjectConfig;
 }
 
 export interface ConductorSession {
@@ -71,26 +82,41 @@ export async function createConductorSession(options: CreateConductorSessionOpti
 			allowModelNetwork: false,
 		}));
 
-	const permissionGate = createPermissionGateExtension({
-		workspaceRoot: options.workspaceRoot,
-		additionalProtectedPaths: options.additionalProtectedPaths,
-		approvalTimeoutMs: options.approvalTimeoutMs,
-		onDecision: options.onDecision,
-	});
-
-	const resourceLoader = new DefaultResourceLoader({
-		cwd: options.workspaceRoot,
-		agentDir,
-		// Gate 3 secure default (item 5, §7): no third-party extensions/skills/prompts/themes in
-		// the Fase 0 TCB — only this first-party permission-gate extension (plus, in tests,
-		// extraExtensions such as a scripted fake model provider) is ever loaded.
-		noExtensions: true,
-		noSkills: true,
-		noPromptTemplates: true,
-		noThemes: true,
-		noContextFiles: true,
-		extensionFactories: [permissionGate, ...(options.extraExtensions ?? [])],
-	});
+	// ADR 0002 §3.2/§4: when `config` is supplied, delegate resourceLoader construction to
+	// ConductorResourceLoader (round B2's `conductor chat` wiring) so the Fase 1 system prompt is
+	// injected. Otherwise, build the same inline DefaultResourceLoader this function has always
+	// built (round A/B1 behavior, byte-for-byte unchanged) — no custom prompt, plain permission-gate.
+	// Both branches produce the same secure defaults (Gate 3 item 5/§7): no third-party
+	// extensions/skills/prompts/themes in the TCB, only the first-party permission-gate (plus, in
+	// tests, extraExtensions such as a scripted fake model provider).
+	const resourceLoader = options.config
+		? new ConductorResourceLoader({
+				workspaceRoot: options.workspaceRoot,
+				agentDir,
+				config: options.config,
+				additionalProtectedPaths: options.additionalProtectedPaths,
+				approvalTimeoutMs: options.approvalTimeoutMs,
+				onDecision: options.onDecision,
+				extraExtensions: options.extraExtensions,
+			}).pi
+		: new DefaultResourceLoader({
+				cwd: options.workspaceRoot,
+				agentDir,
+				noExtensions: true,
+				noSkills: true,
+				noPromptTemplates: true,
+				noThemes: true,
+				noContextFiles: true,
+				extensionFactories: [
+					createPermissionGateExtension({
+						workspaceRoot: options.workspaceRoot,
+						additionalProtectedPaths: options.additionalProtectedPaths,
+						approvalTimeoutMs: options.approvalTimeoutMs,
+						onDecision: options.onDecision,
+					}),
+					...(options.extraExtensions ?? []),
+				],
+			});
 	await resourceLoader.reload();
 
 	const sessionManager =

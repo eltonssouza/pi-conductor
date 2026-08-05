@@ -17,6 +17,7 @@
  * convention instead, not forced onto a weak citation.)
  */
 
+import { runChat } from "./commands/chat.ts";
 import { runConfigGet, runConfigSet, runConfigShow } from "./commands/config.ts";
 import { doctorExitCode, formatDoctorReport, runDoctor } from "./commands/doctor.ts";
 import { describeInitOutcome, initExitCode, runInit } from "./commands/init.ts";
@@ -141,12 +142,7 @@ export async function runCli(argv: string[], io: CliIO): Promise<number> {
 			case "config":
 				return await runConfigCommand(rest, io);
 			case "chat":
-				// Round B2 fills this in (depends on @conductor/runtime's ConductorResourceLoader,
-				// built in round B1 -- see packages/conductor-runtime/src/resource-loader.ts).
-				io.stderr.write(
-					"conductor chat: not yet implemented (coming next -- see docs/adr/0002-fase1-cli-foundation.md §7.4)\n",
-				);
-				return 1;
+				return await runChat({ cwd: io.cwd, args: rest, stdout: io.stdout, stderr: io.stderr });
 			case "--help":
 			case "-h":
 				io.stdout.write(USAGE);

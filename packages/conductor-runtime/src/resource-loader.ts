@@ -1,5 +1,6 @@
+import type { InlineExtension } from "@earendil-works/pi-coding-agent";
 import { type CreateAgentSessionResult, DefaultResourceLoader } from "@earendil-works/pi-coding-agent";
-import { createPermissionGateExtension } from "./permission-gate.ts";
+import { createPermissionGateExtension, type PermissionGateDecision } from "./permission-gate.ts";
 
 /**
  * `ConductorResourceLoader` (docs/adr/0002-fase1-cli-foundation.md §4.1). Deliberately thin: on
@@ -24,15 +25,26 @@ import { createPermissionGateExtension } from "./permission-gate.ts";
  * satisfies this interface structurally, so no import edge (not even a type-only one, which would
  * still be a package.json dependency entry for the type-checker) is needed to use it here.
  *
- * Not yet wired into `createConductorSession`'s own resourceLoader construction (session.ts:81-93),
- * even though ADR 0002 §3.2 describes that as the eventual replacement ("substitui a construção
- * inline de DefaultResourceLoader em session.ts"). Nothing in round B1 (conductor-cli's
- * init/doctor/config) ever opens a live AgentSession, so there is no round-B1 caller for a
- * config-driven session yet; round B2 (`conductor chat`, the first real caller) is who actually
- * needs `createConductorSession` to accept a `config` and build its resourceLoader through this
- * class, and is the more proportionate place to make that (session.ts-signature-changing) edit --
- * changing it here with no exercising caller would risk round A's 78 already-green tests for a
- * capability nothing in this round uses. Flagged explicitly rather than silently deferred.
+ * Wired into `createConductorSession`'s own resourceLoader construction as of round B2
+ * (`conductor chat`, session.ts): when `CreateConductorSessionOptions.config` is supplied,
+ * `createConductorSession` builds its resourceLoader through this class instead of the inline
+ * `DefaultResourceLoader` it used through round A/B1 -- exactly the replacement ADR 0002 §3.2
+ * described ("substitui a construção inline de DefaultResourceLoader em session.ts"). The `config`
+ * option is additive and optional: every round A/B1 caller that does not pass it (the acceptance
+ * tests, `conductor-cli`'s init/doctor/config, none of which open a live session with a custom
+ * prompt) keeps its exact prior behavior byte-for-byte -- discovery-by-need (Outside-In Development
+ * -- Complete Professional Guide §3.3: "needs become roles become interfaces") applied to session.ts
+ * itself, not just to this class: round B1 named the caller that would need this and declined to
+ * build it speculatively; round B2 is that caller, so the extension point is added now, driven by
+ * its actual call site (chat.ts), not invented ahead of one.
+ *
+ * `onDecision`/`approvalTimeoutMs`/`extraExtensions` below exist for the same reason
+ * `CreateConductorSessionOptions` already exposes them: this class builds its own
+ * `createPermissionGateExtension(...)` call internally (it cannot share the one
+ * `createConductorSession` builds for its own inline-loader branch, since only one instance of the
+ * gate may ever be registered per resourceLoader), so every option that call needs must be threaded
+ * through here too -- otherwise a caller using the `config` path would silently lose observability
+ * (`onDecision`) or its configured approval timeout the moment it opted into a custom system prompt.
  */
 
 export interface Fase1ProjectConfig {
@@ -55,6 +67,12 @@ export interface ConductorResourceLoaderOptions {
 	config: Fase1ProjectConfig;
 	/** Passed through to the underlying permission-gate (same field CreateConductorSessionOptions exposes today). */
 	additionalProtectedPaths?: string[];
+	/** Passed through to the underlying permission-gate (same field CreateConductorSessionOptions exposes). */
+	approvalTimeoutMs?: number;
+	/** Observability hook -- same contract as `CreateConductorSessionOptions.onDecision`. Must never throw. */
+	onDecision?: (decision: PermissionGateDecision) => void;
+	/** Test-only: extra inline extensions -- same contract as `CreateConductorSessionOptions.extraExtensions`. */
+	extraExtensions?: InlineExtension[];
 }
 
 /**
@@ -94,7 +112,10 @@ export class ConductorResourceLoader {
 				createPermissionGateExtension({
 					workspaceRoot: options.workspaceRoot,
 					additionalProtectedPaths: options.additionalProtectedPaths,
+					approvalTimeoutMs: options.approvalTimeoutMs,
+					onDecision: options.onDecision,
 				}),
+				...(options.extraExtensions ?? []),
 			],
 		});
 	}

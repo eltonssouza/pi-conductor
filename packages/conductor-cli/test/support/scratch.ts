@@ -36,7 +36,14 @@ export function createScratchProject(prefix = "conductor-cli-"): ScratchProject 
 
 	return {
 		root,
-		cleanup: () => rmSync(root, { recursive: true, force: true }),
+		// maxRetries/retryDelay (Node's own documented rmSync options for exactly this case): round
+		// B2's chat tests are the first in this package to open real file handles (SessionManager's
+		// synchronous fd writes, ModelRuntime's auth/model file reads) and tear them down within
+		// milliseconds of the directory being created -- on Windows this occasionally races an
+		// EPERM/EBUSY from a handle (or an AV scanner) that has not released the directory yet. A
+		// few short retries resolves the same transient race Node's own docs describe, at zero cost
+		// on platforms/runs where it never happens.
+		cleanup: () => rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }),
 		write: (relPath, content) => {
 			const p = resolve(relPath);
 			mkdirSync(dirname(p), { recursive: true });

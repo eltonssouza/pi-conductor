@@ -122,16 +122,31 @@ describe("conductor config (end-to-end)", () => {
 	});
 });
 
-describe("conductor chat (placeholder)", () => {
-	it("prints a clear not-yet-implemented message instead of doing nothing silently", async () => {
-		const { io, stderr } = createCapturingIo(project.root);
+describe(
+	"conductor chat (end-to-end -- fail-fast paths only; the happy path needs an injectable " +
+		"terminal/model-runtime and is covered by test/commands/chat.test.ts instead, so this suite " +
+		"never blocks on a real TUI attached to the test process's stdio)",
+	() => {
+		it("points the user at `conductor init` when no .conductor/config.json exists yet", async () => {
+			const { io, stderr } = createCapturingIo(project.root);
 
-		const code = await runCli(["chat"], io);
+			const code = await runCli(["chat"], io);
 
-		expect(code).not.toBe(0);
-		expect(stderr()).toMatch(/not yet implemented/i);
-	});
-});
+			expect(code).not.toBe(0);
+			expect(stderr()).toMatch(/conductor init/);
+		});
+
+		it("rejects an unrecognized argument instead of silently ignoring it", async () => {
+			await runCli(["init"], createCapturingIo(project.root).io);
+			const { io, stderr } = createCapturingIo(project.root);
+
+			const code = await runCli(["chat", "--bogus"], io);
+
+			expect(code).not.toBe(0);
+			expect(stderr()).toMatch(/unrecognized argument/);
+		});
+	},
+);
 
 describe("conductor (no command / unknown command)", () => {
 	it("prints usage and exits non-zero with no command", async () => {

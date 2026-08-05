@@ -1,18 +1,10 @@
 /**
- * A scripted, fully offline model provider for tests.
- *
- * Registered via the *public* `ModelRuntime.registerProvider()` API (same primitive
- * pi.registerProvider() uses under the hood — see
- * packages/coding-agent/examples/extensions/custom-provider-anthropic/index.ts for the pattern
- * this is adapted from). No network I/O of any kind: `streamSimple` synthesizes the assistant
- * message locally from a response script and returns it in a real AssistantMessageEventStream.
- *
- * This is deliberately a *small* reimplementation of the shape used internally by
- * packages/coding-agent/test/test-harness.ts's `createFauxStreamFn` (text + tool calls only, no
- * thinking blocks, no per-call delay) — that harness is private to coding-agent's own test suite
- * (imports `../src/...` and internal-only helpers such as AuthStorage that are not exported from
- * the package's public entrypoint), so a sibling package consuming only the public SDK surface
- * cannot import it directly and re-derives the minimum needed here instead.
+ * A scripted, fully offline model provider for tests -- adapted from
+ * packages/conductor-runtime/test/support/fake-model.ts (round A). Deliberately duplicated rather
+ * than imported across the package boundary: this package's tests should not reach into a sibling
+ * package's `test/` directory (not part of its public surface, and `test/support/scratch.ts`'s own
+ * header already documents this repo's convention of "each package keeps an independent copy on
+ * purpose"). No network I/O: `streamSimple` synthesizes the assistant message locally.
  */
 
 import {
@@ -39,18 +31,11 @@ export interface ScriptedResponse {
 export interface FakeModelHandle {
 	model: Model<"openai-completions">;
 	callCount(): number;
-	/** The `context.systemPrompt` the model received on its most recent call, if any (round B2:
-	 * proves a caller-supplied system prompt actually reached the model, not just the resourceLoader). */
 	lastSystemPrompt(): string | undefined;
 }
 
 let toolCallSeq = 0;
 
-/**
- * Register a scripted provider on `modelRuntime` and return its resolved Model. The provider
- * cycles through `responses` in order (clamped to the last one once exhausted), letting a test
- * script an exact multi-turn tool-calling sequence deterministically.
- */
 export function registerFakeModel(
 	modelRuntime: ModelRuntime,
 	providerId: string,
@@ -60,7 +45,7 @@ export function registerFakeModel(
 		throw new Error("registerFakeModel requires at least one scripted response");
 	}
 
-	const modelId = "conductor-fake-1";
+	const modelId = "conductor-cli-fake-1";
 	let callCount = 0;
 	let lastSystemPrompt: string | undefined;
 
@@ -71,7 +56,7 @@ export function registerFakeModel(
 		models: [
 			{
 				id: modelId,
-				name: "Conductor Fake Model",
+				name: "Conductor CLI Fake Model",
 				reasoning: false,
 				input: ["text"],
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
