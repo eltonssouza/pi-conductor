@@ -12,6 +12,11 @@ export {
 	createConductorSession,
 } from "./session.ts";
 export {
+	type ConductorNoteRecord,
+	type ConductorNoteToolHandle,
+	createConductorNoteTool,
+} from "./tools/conductor-note.ts";
+export {
 	defaultProtectedPaths,
 	evaluateToolPath,
 	isWithinRoot,

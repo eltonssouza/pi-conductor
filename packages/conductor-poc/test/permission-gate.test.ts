@@ -10,6 +10,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type {
 	BashToolCallEvent,
+	CustomToolCallEvent,
 	EditToolCallEvent,
 	ExtensionAPI,
 	ExtensionContext,
@@ -262,5 +263,95 @@ describe("permission-gate: tools with no declared policy", () => {
 
 		expect(result?.block).toBe(true);
 		expect(result?.reason).toMatch(/no policy declared/);
+	});
+
+	// Gap 2 backfill (gate8-validation.md §7 item 2): a custom tool must NOT be implicitly
+	// trusted just because it is "custom" — and the fact that ONE custom tool (conductor_note,
+	// below) has an explicit policy must not accidentally widen into a blanket allow for every
+	// custom tool name. This is the specific regression the orchestrator asked to have proven.
+	it("denies an unrelated/unregistered custom tool by default, even though conductor_note has an explicit policy", async () => {
+		const handler = makeHandler();
+		const ui = createTestUiContext({ confirmResult: true });
+
+		const event: CustomToolCallEvent = {
+			type: "tool_call",
+			toolCallId: "1",
+			toolName: "some_other_custom_tool_nobody_declared_a_policy_for",
+			input: {},
+		};
+		const result = await handler(event, fakeContext(ui, true));
+
+		expect(result?.block).toBe(true);
+		expect(result?.reason).toMatch(/no policy declared/);
+		// Never even asked — proves this isn't "deny by default but still silently prompt".
+		expect(ui.confirmCalls).toHaveLength(0);
+	});
+});
+
+describe("permission-gate: conductor_note (custom tool PoC, gate8-validation.md §7 item 2)", () => {
+	it("approves conductor_note when the user confirms, same as write/edit/bash", async () => {
+		const handler = makeHandler();
+		const ui = createTestUiContext({ confirmResult: true });
+
+		const event: CustomToolCallEvent = {
+			type: "tool_call",
+			toolCallId: "1",
+			toolName: "conductor_note",
+			input: { note: "Fase 0 gap-2 backfill" },
+		};
+		const result = await handler(event, fakeContext(ui, true));
+
+		expect(result).toBeUndefined();
+		expect(ui.confirmCalls).toHaveLength(1);
+		expect(decisions[0]).toMatchObject({ toolName: "conductor_note", allowed: true, requiredApproval: true });
+	});
+
+	it("blocks conductor_note when the user denies approval", async () => {
+		const handler = makeHandler();
+		const ui = createTestUiContext({ confirmResult: false });
+
+		const event: CustomToolCallEvent = {
+			type: "tool_call",
+			toolCallId: "1",
+			toolName: "conductor_note",
+			input: { note: "should not be recorded" },
+		};
+		const result = await handler(event, fakeContext(ui, true));
+
+		expect(result?.block).toBe(true);
+		expect(ui.confirmCalls).toHaveLength(1);
+		expect(decisions[0]).toMatchObject({ toolName: "conductor_note", allowed: false, requiredApproval: true });
+	});
+
+	it("blocks conductor_note when there is no UI to ask (fail closed)", async () => {
+		const handler = makeHandler();
+		const ui = createTestUiContext({ confirmResult: true });
+
+		const event: CustomToolCallEvent = {
+			type: "tool_call",
+			toolCallId: "1",
+			toolName: "conductor_note",
+			input: { note: "x" },
+		};
+		const result = await handler(event, fakeContext(ui, false));
+
+		expect(result?.block).toBe(true);
+		expect(ui.confirmCalls).toHaveLength(0);
+	});
+
+	it("fails closed WITHOUT prompting when 'note' is missing/empty/malformed (validated before approval, like path containment)", async () => {
+		const handler = makeHandler();
+		const ui = createTestUiContext({ confirmResult: true });
+
+		const event: CustomToolCallEvent = {
+			type: "tool_call",
+			toolCallId: "1",
+			toolName: "conductor_note",
+			input: { note: "" },
+		};
+		const result = await handler(event, fakeContext(ui, true));
+
+		expect(result?.block).toBe(true);
+		expect(ui.confirmCalls).toHaveLength(0);
 	});
 });

@@ -23,8 +23,16 @@ import { evaluateToolPath, type WorkspacePolicyOptions } from "./workspace-polic
  *      containment is not applied to bash's free-text `command` string — a command-risk
  *      classifier is explicitly deferred to Fase 2 (threat model §7: "Classificador de risco de
  *      comando ... Fase 2"), so approval is the sole control for this PoC.
- *   4. any other tool (grep/find/ls/custom/unknown): denied by default — fail-closed, no policy
- *      declared (plan invariant #7: "ferramenta sem permissão é negada").
+ *   4. conductor_note (Fase-0 custom-tool PoC, src/tools/conductor-note.ts; gate8-validation.md
+ *      §7 item 2): requires input validation (non-empty string) BEFORE approval, matching the
+ *      containment-before-approval pattern used for write/edit, then ctx.ui.confirm() approval
+ *      with the same fail-closed timeout as write/edit/bash. Registering a custom tool is not by
+ *      itself a reason to trust it more than a built-in with side effects.
+ *   5. any other tool (grep/find/ls/an unregistered custom tool/unknown): denied by default —
+ *      fail-closed, no policy declared (plan invariant #7: "ferramenta sem permissão é negada").
+ *      This is what proves item 4 doesn't widen into "custom tools are trusted": a custom tool
+ *      without its own explicit branch here still falls through to this default deny, exactly
+ *      like grep/find/ls do (see test/permission-gate.test.ts's "unrelated custom tool" test).
  *
  * The whole decision is wrapped in evaluatePolicyFailClosed (see fail-closed.ts), so an internal
  * error anywhere in this handler denies rather than allows.
@@ -47,7 +55,7 @@ export interface PermissionGateOptions extends WorkspacePolicyOptions {
 }
 
 function requiresApproval(toolName: string): boolean {
-	return toolName === "write" || toolName === "edit" || toolName === "bash";
+	return toolName === "write" || toolName === "edit" || toolName === "bash" || toolName === "conductor_note";
 }
 
 async function decideToolCall(
@@ -93,7 +101,24 @@ async function decideToolCall(
 			: { block: true, reason: "not approved (denied, or approval timed out — fail closed)" };
 	}
 
-	// Unknown/custom tool (grep, find, ls, or anything else): no policy declared, deny.
+	// conductor_note (Fase-0 custom-tool PoC — src/tools/conductor-note.ts). A custom tool gets no
+	// free pass just for being custom: it needs its own explicit branch here, same as every
+	// built-in above. Input is validated BEFORE approval is requested (mirrors write/edit's
+	// containment-before-approval ordering) — a malformed call never even reaches the human.
+	if (isToolCallEventType<"conductor_note", { note: unknown }>("conductor_note", event)) {
+		const note = event.input.note;
+		if (typeof note !== "string" || note.trim().length === 0) {
+			return { block: true, reason: "conductor_note requires a non-empty string 'note' — fail closed" };
+		}
+		const approved = await confirmOrDeny(ctx, "Approve conductor_note?", note, approvalTimeoutMs);
+		return approved
+			? { block: false }
+			: { block: true, reason: "not approved (denied, or approval timed out — fail closed)" };
+	}
+
+	// Unknown/custom tool (grep, find, ls, an unregistered custom tool, or anything else): no
+	// policy declared, deny. This is the fail-closed default every tool gets unless it has its own
+	// explicit branch above — proves a custom tool is never implicitly trusted.
 	return { block: true, reason: `no policy declared for tool "${event.toolName}" — fail closed` };
 }
 
