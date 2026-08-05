@@ -33,6 +33,42 @@ describe("matchesKnownSecretPrefix", () => {
 	it("does not flag a short human-typed word", () => {
 		expect(matchesKnownSecretPrefix("backend")).toBe(false);
 	});
+
+	// T11 bypass (docs/conductor/gate8-validation-fase1.md §6.2): the original patterns were
+	// anchored `^...$`, matching only when the ENTIRE field value equals the secret pattern -- so a
+	// known prefix embedded after a delimiter (e.g. a "provider/" segment) slipped through. The
+	// module's own header comment (and secret-detection.ts's own top-of-file intent) says a known
+	// prefix must be "rejected wherever it appears", not just when it is the whole value.
+	describe("known prefix embedded mid-string (T11 gate8-validation-fase1.md §6.2 bypass)", () => {
+		it("recognizes a known secret prefix embedded after a 'provider/' segment -- Gate 8's exact repro", () => {
+			expect(matchesKnownSecretPrefix("anthropic/sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAAAAAA")).toBe(true);
+		});
+
+		it("recognizes an OpenAI-style prefix embedded mid-string", () => {
+			expect(matchesKnownSecretPrefix("leaked in logs: sk-abcdefghijklmnopqrstuvwxyz0123456789")).toBe(true);
+		});
+
+		it("recognizes a GitHub PAT embedded mid-string", () => {
+			expect(matchesKnownSecretPrefix("token=ghp_abcdefghijklmnopqrstuvwxyz0123456789")).toBe(true);
+		});
+
+		it("still recognizes a known prefix at the very start of the string (no regression)", () => {
+			expect(matchesKnownSecretPrefix("sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789")).toBe(true);
+		});
+
+		it("does NOT flag an ordinary 'provider/model' identifier -- must not over-broaden into a false positive", () => {
+			expect(matchesKnownSecretPrefix("anthropic/claude-opus-4")).toBe(false);
+		});
+
+		it("does NOT flag a word that merely contains 'sk-' mid-word (not a token boundary) -- the generic OpenAI-style pattern is the risky one to over-broaden", () => {
+			// "desk-lamp-fixture-model" contains the literal substring "sk-" (from "de[sk-]lamp...")
+			// followed by 10+ identifier characters -- exactly the shape a naive unanchored substring
+			// search (bare `.test()` with the `^`/`$` anchors simply dropped) would misfire on. A real
+			// fix must require the prefix to start a fresh token (e.g. preceded by a non-identifier
+			// delimiter or start-of-string), not merely appear as a substring anywhere.
+			expect(matchesKnownSecretPrefix("desk-lamp-fixture-model")).toBe(false);
+		});
+	});
 });
 
 describe("looksHighEntropy", () => {
@@ -124,6 +160,19 @@ describe("assertNoRawSecrets", () => {
 			provider: { model: "sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789" },
 		});
 		expect(() => assertNoRawSecrets(config)).toThrow(ConfigValidationError);
+	});
+
+	it("throws when provider.model matches a known secret prefix EMBEDDED mid-string (T11 gate8-validation-fase1.md §6.2 bypass, Gate 8's exact repro)", () => {
+		const config = validConfig({
+			provider: { model: "anthropic/sk-ant-api03-FAKEFAKEFAKEFAKEFAKEFAKEFAKE" },
+		});
+		expect(() => assertNoRawSecrets(config)).toThrow(ConfigValidationError);
+		expect(() => assertNoRawSecrets(config)).toThrow(/provider\.model/);
+	});
+
+	it("does NOT throw for an ordinary provider.model identifier after the T11 embedded-prefix fix (no false-positive regression)", () => {
+		const config = validConfig({ provider: { model: "anthropic/claude-opus-4" } });
+		expect(() => assertNoRawSecrets(config)).not.toThrow();
 	});
 
 	it("throws when a field literally named apiKey holds a raw string instead of an envVar reference (T11)", () => {

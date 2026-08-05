@@ -122,3 +122,52 @@ describe("replayTranscript", () => {
 		expect(replayTranscript([])).toEqual([]);
 	});
 });
+
+/**
+ * T14 gap (gate3-fase1-addendum.md §2 T14; ADR 0002 §7.4, "o transcrito"; Gate 8 finding §6.1,
+ * docs/conductor/gate8-validation-fase1.md): `sanitizeForTerminal()` was wired into confirm.ts's
+ * approval-dialog sink only. This is the second sink the same ADR names -- the live chat transcript
+ * -- which funnels EVERY line through this module (`summarizeEntryForTranscript`/`replayTranscript`,
+ * both call sites in chat.ts: resume-replay at chat.ts:197-198 and live `message_end` at
+ * chat.ts:258-261) before wrapping it in a `Text` component that is confirmed (text.ts:66's own
+ * comment) to pass raw bytes through unmodified. Sanitizing once here, at the single funnel both
+ * call sites share, covers both without either caller having to remember to do it themselves --
+ * the same "sole sink" discipline confirm.ts already applies (terminal-sanitize.ts's own header).
+ */
+describe("summarizeEntryForTranscript / replayTranscript -- terminal sanitization (T14)", () => {
+	it("strips a real CSI clear-screen+cursor-home escape sequence from assistant text, preserving the plain text on either side", () => {
+		const malicious = "before\x1b[2J\x1b[Hafter";
+		const [line] = summarizeEntryForTranscript(assistantTextEntry(malicious));
+		expect(line).not.toContain("\x1b");
+		expect(line).not.toContain("\x1b[2J");
+		expect(line).not.toContain("\x1b[H");
+		expect(line).toContain("before");
+		expect(line).toContain("after");
+	});
+
+	it("strips an OSC sequence (forged terminal title) from a tool result's text, preserving the plain text", () => {
+		const malicious = "safe-prefix\x1b]0;Definitely Not Dangerous\x07safe-suffix";
+		const [line] = summarizeEntryForTranscript(toolResultEntry("bash", malicious));
+		expect(line).not.toContain("\x1b");
+		expect(line).not.toContain("\x07");
+		expect(line).toContain("safe-prefix");
+		expect(line).toContain("safe-suffix");
+	});
+
+	it("strips control bytes from a user-typed line too (defense in depth, even though the human typed it themselves)", () => {
+		const [line] = summarizeEntryForTranscript(userEntry("hello\x1b[2Kworld"));
+		expect(line).not.toContain("\x1b");
+	});
+
+	it("still preserves plain newlines and tabs (sanitization must not mangle ordinary multi-line tool output)", () => {
+		const [line] = summarizeEntryForTranscript(toolResultEntry("read", "line one\n\tindented line two"));
+		expect(line).toBe("[read result] line one\n\tindented line two");
+	});
+
+	it("sanitizes every line replayTranscript replays on --resume, not just live events", () => {
+		const entries = [assistantTextEntry("safe\x1b[2K\x1b[1Gunsafe")];
+		const [line] = replayTranscript(entries);
+		expect(line).not.toContain("\x1b");
+		expect(line).toBe("safeunsafe");
+	});
+});

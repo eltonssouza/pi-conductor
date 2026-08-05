@@ -17,8 +17,24 @@
  * skipped (return `undefined`) as not meaningful to a Fase 1 transcript reader; a fuller renderer is
  * out of scope here (ADR §7.4/§7.5's "thin, not a skeleton" framing, same posture as
  * ConductorResourceLoader's §4.2 scope table).
+ *
+ * T14 sanitization (gate3-fase1-addendum.md §2 T14; ADR 0002 §7.4, binding: "e o adapter que
+ * conductor-cli escreve para desenhar ctx.ui.confirm()/o transcrito ... devem escapar caracteres de
+ * controle C0/C1 e sequências CSI/OSC"): assistant text and tool-result text originate from the
+ * model/tool -- untrusted, per the same taint framing terminal-sanitize.ts's header already applies
+ * to confirm.ts's title/message. Gate 8 (docs/conductor/gate8-validation-fase1.md §6.1) found this
+ * module was NOT sanitizing before round B2 shipped: `confirmOrDeny()` protected the approval-dialog
+ * sink only, while this module fed raw, unsanitized text straight into `Text` (text.ts:66's own
+ * comment confirms `Text` passes control bytes through unmodified). Fixed by sanitizing every line
+ * this module ever returns, in one place -- both callers (resume-replay and live `message_end`) go
+ * through `summarizeEntryForTranscript`/`replayTranscript`, so neither caller can forget it, mirroring
+ * confirm.ts's own "single sink" discipline (Software Construction Practices - Complete Professional
+ * Guide §2.3/§2.8: validate/sanitize untrusted input at the boundary before it travels further --
+ * the library has no chapter on terminal-escape injection specifically, same honest gap
+ * terminal-sanitize.ts's own header already discloses).
  */
 
+import { sanitizeForTerminal } from "@conductor/runtime";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 
 const MAX_TOOL_RESULT_PREVIEW_CHARS = 200;
@@ -48,8 +64,14 @@ function summarizeToolCalls(content: unknown): string[] {
 }
 
 /** Formats one `SessionEntry` as zero or more transcript lines (a message can carry both text and
- * tool-call blocks, e.g. an assistant turn that explains itself then calls a tool). */
+ * tool-call blocks, e.g. an assistant turn that explains itself then calls a tool). Every returned
+ * line is sanitized (T14, see module header) -- this is the single funnel both the resume-replay and
+ * live-rendering callers share, so sanitization cannot be forgotten by either. */
 export function summarizeEntryForTranscript(entry: SessionEntry): string[] {
+	return rawSummarizeEntryForTranscript(entry).map(sanitizeForTerminal);
+}
+
+function rawSummarizeEntryForTranscript(entry: SessionEntry): string[] {
 	if (entry.type !== "message") return [];
 
 	const message = entry.message as { role?: string; content?: unknown; toolName?: string };

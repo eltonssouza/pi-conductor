@@ -39,18 +39,45 @@
 
 import { ConfigValidationError } from "./errors.ts";
 
+/**
+ * T11 bypass fix (docs/conductor/gate8-validation-fase1.md §6.2): these were previously anchored
+ * `^...$`, matching only when the value's ENTIRE (trimmed) content equaled the pattern -- so
+ * "anthropic/sk-ant-api03-..." (a known prefix embedded after a "provider/" segment) slipped past
+ * undetected, live-reproduced there via `conductor config set provider.model
+ * "anthropic/sk-ant-api03-..."`. Fixed with `\b` (word boundary) in place of `^`, and no trailing `$`,
+ * so a prefix is caught wherever it starts a fresh token in the string -- matching the module's own
+ * documented intent (header comment above: "rejected wherever it appears").
+ *
+ * `\b` (not a bare, unanchored substring search) is the deliberate part of the fix: a plain
+ * `.test()` with the anchors simply dropped would also fire on a known prefix appearing mid-word --
+ * e.g. the generic OpenAI-style `sk-` pattern would misfire on "desk-lamp-..." (the literal
+ * substring "sk-" inside "de[sk-]lamp", not a real prefix) -- exactly the "over-broadening into
+ * false positives on totally unrelated fields" risk this fix must avoid, since
+ * `matchesKnownSecretPrefix` runs unconditionally against every string field in the config, not only
+ * `provider.model` (see `assertNoRawSecrets` below). `\b` requires the prefix to begin right after a
+ * non-identifier character (or the start of the string) -- true for "anthropic/sk-ant-..." (preceded
+ * by `/`) and for a prefix at the very start (preceded by nothing), false for "desk-lamp-..." (the
+ * "sk-" there is preceded by "e", still inside the same word). Grounded in the same defensive-
+ * programming posture as this module's header comment (Software Construction Practices - Complete
+ * Professional Guide §2.3/§2.8: validate at the boundary, bad data can't travel far before being
+ * caught) -- the library has no chapter on secret-prefix regex design specifically, so the `\b`
+ * choice itself is an engineering call, not a library citation; it mirrors how real secret scanners
+ * (gitleaks/trufflehog-style rules) commonly word-boundary their short/generic prefixes for the same
+ * false-positive reason, named here as an industry convention, not a citation (same treatment this
+ * module's header already gives the entropy thresholds below).
+ */
 const KNOWN_SECRET_PREFIX_PATTERNS: RegExp[] = [
-	/^sk-ant-[A-Za-z0-9_-]{10,}$/, // Anthropic
-	/^sk-[A-Za-z0-9_-]{10,}$/, // OpenAI-style
-	/^ghp_[A-Za-z0-9]{20,}$/, // GitHub PAT (classic)
-	/^github_pat_[A-Za-z0-9_]{20,}$/, // GitHub PAT (fine-grained)
-	/^gho_[A-Za-z0-9]{20,}$/, // GitHub OAuth
-	/^glpat-[A-Za-z0-9_-]{15,}$/, // GitLab PAT
-	/^xox[baprs]-[A-Za-z0-9-]{10,}$/, // Slack
-	/^AKIA[A-Z0-9]{12,}$/, // AWS access key id
-	/^ASIA[A-Z0-9]{12,}$/, // AWS STS session key
-	/^AIza[A-Za-z0-9_-]{20,}$/, // Google API key
-	/^ya29\.[A-Za-z0-9_-]{10,}$/, // Google OAuth access token
+	/\bsk-ant-[A-Za-z0-9_-]{10,}/, // Anthropic
+	/\bsk-[A-Za-z0-9_-]{10,}/, // OpenAI-style
+	/\bghp_[A-Za-z0-9]{20,}/, // GitHub PAT (classic)
+	/\bgithub_pat_[A-Za-z0-9_]{20,}/, // GitHub PAT (fine-grained)
+	/\bgho_[A-Za-z0-9]{20,}/, // GitHub OAuth
+	/\bglpat-[A-Za-z0-9_-]{15,}/, // GitLab PAT
+	/\bxox[baprs]-[A-Za-z0-9-]{10,}/, // Slack
+	/\bAKIA[A-Z0-9]{12,}/, // AWS access key id
+	/\bASIA[A-Z0-9]{12,}/, // AWS STS session key
+	/\bAIza[A-Za-z0-9_-]{20,}/, // Google API key
+	/\bya29\.[A-Za-z0-9_-]{10,}/, // Google OAuth access token
 	/-----BEGIN [A-Z ]*PRIVATE KEY-----/, // PEM private key block
 ];
 

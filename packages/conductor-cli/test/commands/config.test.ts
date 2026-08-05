@@ -156,6 +156,33 @@ describe("runConfigSet", () => {
 		expect(readConfig(project.root).provider.model).toBe("anthropic/claude-sonnet-5"); // untouched
 	});
 
+	it(
+		"surfaces T11's rejection when a known secret prefix is EMBEDDED mid-string, not just when it is the whole value " +
+			"(docs/conductor/gate8-validation-fase1.md §6.2 -- live-reproduced there via `conductor config set " +
+			'provider.model "anthropic/sk-ant-api03-..."`, accepted and written to disk unredacted before this fix)',
+		async () => {
+			seedConfig();
+			const result = await runConfigSet({
+				cwd: project.root,
+				key: "provider.model",
+				rawValue: "anthropic/sk-ant-api03-FAKEFAKEFAKEFAKEFAKEFAKEFAKE",
+			});
+			expect(result.ok).toBe(false);
+			expect(readConfig(project.root).provider.model).toBe("anthropic/claude-sonnet-5"); // untouched
+		},
+	);
+
+	it("still allows an ordinary provider/model identifier after the T11 embedded-prefix fix (no false-positive regression)", async () => {
+		seedConfig();
+		const result = await runConfigSet({
+			cwd: project.root,
+			key: "provider.model",
+			rawValue: "anthropic/claude-opus-4",
+		});
+		expect(result.ok).toBe(true);
+		expect(readConfig(project.root).provider.model).toBe("anthropic/claude-opus-4");
+	});
+
 	it("fails clearly when not initialized yet (set requires an existing config to modify)", async () => {
 		const result = await runConfigSet({
 			cwd: project.root,
