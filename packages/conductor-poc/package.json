@@ -1,0 +1,25 @@
+{
+	"name": "@conductor/poc",
+	"version": "0.0.0",
+	"private": true,
+	"description": "Fase-0 walking skeleton: Conductor's permission-gate extension composed on the Pi Agent/AgentSession runtime (docs/adr/0001-adopt-pi-as-runtime.md).",
+	"type": "module",
+	"main": "./src/index.ts",
+	"types": "./src/index.ts",
+	"scripts": {
+		"test": "vitest --run"
+	},
+	"dependencies": {
+		"@earendil-works/pi-ai": "^0.83.0",
+		"@earendil-works/pi-coding-agent": "^0.83.0"
+	},
+	"devDependencies": {
+		"@types/node": "24.12.4",
+		"@vitest/coverage-v8": "4.1.9",
+		"typescript": "5.9.3",
+		"vitest": "4.1.9"
+	},
+	"engines": {
+		"node": ">=22.19.0"
+	}
+}
