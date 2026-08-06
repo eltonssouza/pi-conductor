@@ -281,6 +281,65 @@ describe("permission-gate: write / edit", () => {
 		expect(ui.confirmCalls).toHaveLength(0);
 	});
 
+	// Gate 8 (QA validation, Fase 4 "Gates e evidências") — ADR 0005 §9.1's binding decision: the WHOLE
+	// `.conductor/gates/` subtree is a protected-path so "the loop cannot forge its own sign-off via a
+	// normal write/edit tool call" (the invariant-#11 threat T40(c) this file's own R11(b) tests above
+	// already close for policy-trust.json). Confirmed at the lower `evaluateToolPath` unit level already
+	// (workspace-policy.test.ts), but — until this test — never through the REAL permission-gate
+	// tool_call handler a live session actually invokes, the same gap this file's own header names for
+	// R11(b) ("Gate 8 found this file was NOT in defaultProtectedPaths()... mirrors the T13 tests
+	// exactly"). Same pattern, new subtree: a demand's real GateState envelope, forged via `write` this
+	// time (not `edit`) to also prove the OTHER tool-call vector, never exercised for this subtree before.
+	it("blocks a tool-driven write to a demand's GateState file inside .conductor/gates/, even before the file exists (ADR 0005 §9.1)", async () => {
+		const handler = makeHandler();
+		const ui = createTestUiContext({ confirmResult: true });
+
+		const event: WriteToolCallEvent = {
+			type: "tool_call",
+			toolCallId: "1",
+			toolName: "write",
+			input: {
+				path: join(".conductor", "gates", "feature-fase4-gates-e-evidencias--deadbeef.json"),
+				content: JSON.stringify({
+					schemaVersion: 1,
+					demandId: "default",
+					repoId: "forged",
+					branch: "feature/fase4-gates-e-evidencias",
+					revision: 999,
+					checksum: "forged",
+					state: { gates: { 3: { gate: 3, status: "approved", evidence: [], approvals: [] } } },
+				}),
+			},
+		};
+		const result = await handler(event, fakeContext(ui, true));
+
+		expect(result?.block).toBe(true);
+		expect(result?.reason).toMatch(/protected location/);
+		expect(ui.confirmCalls).toHaveLength(0);
+	});
+
+	it("blocks a tool-driven edit to a demand's GateState .lock file inside .conductor/gates/ too (ADR 0005 §9.1: 'the .json files AND the .lock')", async () => {
+		mkdirSync(join(workspace.root, ".conductor", "gates"), { recursive: true });
+		writeFileSync(join(workspace.root, ".conductor", "gates", "feature-fase4--deadbeef.json.lock"), "{}");
+		const handler = makeHandler();
+		const ui = createTestUiContext({ confirmResult: true });
+
+		const event: EditToolCallEvent = {
+			type: "tool_call",
+			toolCallId: "1",
+			toolName: "edit",
+			input: {
+				path: join(".conductor", "gates", "feature-fase4--deadbeef.json.lock"),
+				edits: [{ oldText: "{}", newText: '{"pid":1,"acquiredAt":"forged"}' }],
+			},
+		};
+		const result = await handler(event, fakeContext(ui, true));
+
+		expect(result?.block).toBe(true);
+		expect(result?.reason).toMatch(/protected location/);
+		expect(ui.confirmCalls).toHaveLength(0);
+	});
+
 	// Same threat, the bash vector (T25's "one path authority, two callers" — command-classifier.ts's
 	// protected-path signal reuses the exact same evaluateToolPath/defaultProtectedPaths this edit
 	// test exercises, so this is the end-to-end proof for the OTHER caller, through the real gate).

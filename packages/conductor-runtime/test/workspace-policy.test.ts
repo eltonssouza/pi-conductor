@@ -196,6 +196,64 @@ describe("evaluateToolPath", () => {
 		});
 	});
 
+	// Fase 4 (ADR 0005 §9.1, gate3-addendum-fase4.md R28/T44): the GateState governance store is a
+	// NEW security boundary, not a new mechanism — the SAME defense-in-depth this describe block
+	// already proves for config.json/policy.json ("the store must not be directly writable by the
+	// very agent whose actions/approvals it records"). Reuse, not a new code path: this test only
+	// asserts that `.conductor/gates/` (the WHOLE subtree, files and `.lock` alike, per ADR §9.1
+	// "o subtree .conductor/gates/ inteiro") ends up in `defaultProtectedPaths()`'s deny-list —
+	// Gate 6 adds the one line to `defaultProtectedPaths()`; nothing here should require a second,
+	// bespoke check function of its own.
+	describe(".conductor/gates/ subtree is protected — the GateState governance store (Fase 4, ADR 0005 §9.1)", () => {
+		it("denies a write to a demand's GateState JSON file inside .conductor/gates/, even though it is contained within the workspace", () => {
+			mkdirSync(join(workspace.root, ".conductor", "gates"), { recursive: true });
+			writeFileSync(join(workspace.root, ".conductor", "gates", "feature-fase4--abcd1234.json"), "{}");
+
+			const result = evaluateToolPath(join(".conductor", "gates", "feature-fase4--abcd1234.json"), {
+				workspaceRoot: workspace.root,
+			});
+
+			expect(result.allowed).toBe(false);
+			expect(result.reason).toMatch(/protected location/);
+		});
+
+		it("denies a write to a GateState file that does not exist yet (protection does not require the target to already exist — a tool must not be able to CREATE it either)", () => {
+			const result = evaluateToolPath(join(".conductor", "gates", "never-created--00000000.json"), {
+				workspaceRoot: workspace.root,
+			});
+
+			expect(result.allowed).toBe(false);
+			expect(result.reason).toMatch(/protected location/);
+		});
+
+		it("denies a write to the lock file sitting alongside a GateState JSON in the SAME subtree (ADR §9.1: 'os arquivos <demand>.json E os .lock')", () => {
+			const result = evaluateToolPath(join(".conductor", "gates", "feature-fase4--abcd1234.json.lock"), {
+				workspaceRoot: workspace.root,
+			});
+
+			expect(result.allowed).toBe(false);
+			expect(result.reason).toMatch(/protected location/);
+		});
+
+		it("denies a write to a nested subdirectory under .conductor/gates/ too (the WHOLE subtree, not just its top-level files)", () => {
+			const result = evaluateToolPath(join(".conductor", "gates", "archive", "old-demand.json"), {
+				workspaceRoot: workspace.root,
+			});
+
+			expect(result.allowed).toBe(false);
+			expect(result.reason).toMatch(/protected location/);
+		});
+
+		it("does NOT deny an unrelated file elsewhere under .conductor/ (protection is scoped to the gates/ subtree, not the whole .conductor directory)", () => {
+			mkdirSync(join(workspace.root, ".conductor"), { recursive: true });
+			writeFileSync(join(workspace.root, ".conductor", "notes.txt"), "not a gate state");
+
+			const result = evaluateToolPath(join(".conductor", "notes.txt"), { workspaceRoot: workspace.root });
+
+			expect(result.allowed).toBe(true);
+		});
+	});
+
 	// FR-6 / Gate 8 loop-back (Gate 4 decision, journal 2026-08-06): the 44 real built-in skills live
 	// OUTSIDE any user workspaceRoot by construction (packaged with the CLI, resolved via
 	// import.meta.url -- conductor-cli's builtin-paths.ts), so a plain workspaceRoot check denies every

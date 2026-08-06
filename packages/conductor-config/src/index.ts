@@ -4,6 +4,7 @@ export {
 	type BuiltinRoleSpec,
 	findBuiltinRole,
 	gatesForBuiltinRole,
+	MANDATORY_GATES,
 	skillsForBuiltinRole,
 } from "./builtin-roles-data.ts";
 export { type ConfigSummary, getConfigSummary, summarizeConfig } from "./config-summary.ts";

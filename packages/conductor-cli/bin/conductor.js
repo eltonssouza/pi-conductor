@@ -27,6 +27,11 @@ runCli(process.argv.slice(2), {
 	cwd: process.cwd(),
 	stdout: { write: (chunk) => process.stdout.write(chunk) },
 	stderr: { write: (chunk) => process.stderr.write(chunk) },
+	// Gate 6 loop-back: real stdin/stdout, so `gate approve`/`gate calibrate` can detect a genuine
+	// interactive TTY (both `.isTTY`) and prompt for real (tty-confirm.ts's `resolveConfirmChannel`) --
+	// a non-interactive invocation (piped, CI, autonomous loop) still falls through to the headless,
+	// always-false channel unchanged.
+	tty: { stdin: process.stdin, stdout: process.stdout },
 })
 	.then((exitCode) => {
 		process.exitCode = exitCode;

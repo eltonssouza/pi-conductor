@@ -11,7 +11,7 @@
  * category 4 (no hardcoded timeouts) applies to both call sites independently, not just to doctor's.
  */
 
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -60,5 +60,36 @@ export async function getGitStatus(cwd: string, timeoutMs: number): Promise<GitS
 			return { kind: "unavailable", reason: "git executable not found on PATH -- informational only" };
 		}
 		return { kind: "unavailable", reason: `could not determine git state: ${message}` };
+	}
+}
+
+/**
+ * `gate-evidence.ts`'s `ResolveEvidenceRefContext.gitCommitExists` collaborator, for real (Fase 4
+ * "Gates e evidências", Gate 6 wiring closure): `resolveEvidenceRef` requires a SYNCHRONOUS
+ * `(repoRoot, sha) => boolean` (it never itself shells out — testable without a real git binary/repo
+ * state, per that file's own header) -- this is the one production implementation, `git rev-parse
+ * --verify <sha>^{commit}` bounded by the SAME timeout convention `getGitStatus` above already
+ * establishes, kept in this file rather than a third, drifting git-shelling-out module ("one path
+ * authority" — the same reasoning workspace-policy.ts already names for protected-paths checks,
+ * applied here to git subprocess calls).
+ *
+ * Fail-closed (R25(i)/BR-9 mirror, gate-evidence.ts's own contract): ANY failure -- an invalid/unknown
+ * sha, `repoRoot` not being a git repository at all, git missing from PATH, a timeout -- resolves to
+ * `false`, never throws upward and never defaults to `true`. `resolveEvidenceRef` itself also wraps
+ * every branch in a try/catch (belt-and-braces, not required for this to be safe on its own), but this
+ * function's own contract does not rely on that outer safety net.
+ */
+export function gitCommitExistsSync(repoRoot: string, sha: string, timeoutMs = DEFAULT_GIT_STATUS_TIMEOUT_MS): boolean {
+	try {
+		execFileSync("git", ["rev-parse", "--verify", `${sha}^{commit}`], {
+			cwd: repoRoot,
+			timeout: timeoutMs,
+			stdio: ["ignore", "ignore", "ignore"],
+		});
+		return true;
+	} catch {
+		// Invalid/unknown sha, not a git repository, git not on PATH, timeout -- all collapse to the same
+		// fail-closed "does not resolve" a caller cannot mistake for "resolved".
+		return false;
 	}
 }
