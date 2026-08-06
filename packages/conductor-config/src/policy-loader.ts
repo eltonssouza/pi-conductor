@@ -31,6 +31,8 @@
  * loadPolicyDocument already produces per source; tagging it with `kind` is the only addition.
  */
 
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import type { PolicySourceKind, PolicyTrustStore } from "./policy-trust-store.ts";
 
 export const POLICY_SCHEMA_VERSION = 1;
@@ -78,8 +80,76 @@ export type PolicyLoadResult =
  *     hash -> stays trusted; edited content -> different hash -> must be re-confirmed, never
  *     silently inherits the old grant).
  */
-export function loadPolicyDocument(_filePath: string): PolicyLoadResult {
-	throw new Error("not implemented");
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isStringArray(value: unknown): value is string[] {
+	return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
+function isValidAllowlist(value: unknown): value is PolicyAllowlistEntry[] {
+	if (!Array.isArray(value)) return false;
+	return value.every(
+		(item) =>
+			isPlainObject(item) && typeof item.pattern === "string" && (item.risk === "low" || item.risk === "medium"),
+	);
+}
+
+function isValidNetwork(value: unknown): value is PolicyNetworkEntry[] {
+	if (!Array.isArray(value)) return false;
+	return value.every((item) => isPlainObject(item) && typeof item.destination === "string");
+}
+
+/**
+ * Structural + shape validation of a parsed policy.json body. Returns null for anything that does
+ * not match -- the SAME treatment JSON.parse failure gets (edge case #2: "ignore the bad field and
+ * continue" is never an option), so the caller (loadPolicyDocument) can map both failure kinds to
+ * the identical `{ status: "invalid" }` outcome.
+ */
+function validatePolicyDocument(value: unknown): PolicyDocument | null {
+	if (!isPlainObject(value)) return null;
+	if (value.schema !== POLICY_SCHEMA_VERSION) return null;
+	if (value.protectedPaths !== undefined && !isStringArray(value.protectedPaths)) return null;
+	if (value.allowlist !== undefined && !isValidAllowlist(value.allowlist)) return null;
+	if (value.network !== undefined && !isValidNetwork(value.network)) return null;
+
+	const policy: PolicyDocument = { schema: 1 };
+	if (value.protectedPaths !== undefined) policy.protectedPaths = value.protectedPaths as string[];
+	if (value.allowlist !== undefined) policy.allowlist = value.allowlist as PolicyAllowlistEntry[];
+	if (value.network !== undefined) policy.network = value.network as PolicyNetworkEntry[];
+	return policy;
+}
+
+export function loadPolicyDocument(filePath: string): PolicyLoadResult {
+	try {
+		if (!existsSync(filePath)) return { status: "absent" };
+		if (!statSync(filePath).isFile()) {
+			return { status: "invalid", reason: `${filePath} is not a regular file` };
+		}
+
+		const raw = readFileSync(filePath); // raw bytes -- contentHash is computed over these, not over a re-serialized/normalized form
+		const contentHash = createHash("sha256").update(raw).digest("hex");
+
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(raw.toString("utf-8"));
+		} catch (error) {
+			return { status: "invalid", reason: `malformed JSON: ${(error as Error).message}` };
+		}
+
+		const policy = validatePolicyDocument(parsed);
+		if (!policy) {
+			return { status: "invalid", reason: "policy.json does not match the expected schema" };
+		}
+
+		return { status: "loaded", policy, contentHash };
+	} catch (error) {
+		// Any unexpected I/O error (permission denied, race between existsSync and readFileSync, ...)
+		// is treated as "invalid" rather than propagated -- loadPolicyDocument MUST NEVER throw.
+		return { status: "invalid", reason: `unexpected error reading policy.json: ${(error as Error).message}` };
+	}
 }
 
 /**
@@ -125,10 +195,67 @@ export interface EffectivePolicy {
  *     extended per ADR §16) -- a malformed source is never defeated by a majority of well-formed
  *     ones (ADR §5.2: "uma fonte ruim não é derrotada em votação por uma boa").
  */
+/**
+ * Trust-ordered intersection across every trusted, loaded source's grant list (R4): an item survives
+ * only if it appears (by `keyFn`) in EVERY list. Zero contributing lists (no trusted source at all)
+ * intersects to the empty set, not "no restriction" -- a grant needs at least one trusted source, and
+ * with zero of them there is nothing to grant. `keyFn` decides equality (structural, not reference)
+ * so a caller/test doing a deep-equal comparison sees plain-object entries, not survivors of a
+ * Set-of-objects identity check. Order of `lists` does not affect which items survive (set
+ * intersection is order-independent by definition) -- only surrounding narrative language ("project
+ * can never grant beyond user-global") depends on trust order, not this function's arithmetic.
+ */
+function intersectTrustOrdered<T>(lists: T[][], keyFn: (item: T) => string): T[] {
+	if (lists.length === 0) return [];
+	const [first, ...rest] = lists;
+	return first.filter((item) => {
+		const key = keyFn(item);
+		return rest.every((list) => list.some((candidate) => keyFn(candidate) === key));
+	});
+}
+
 export function mergePolicies(
-	_builtinDefaults: BuiltinPolicyDefaults,
-	_sources: PolicySource[],
-	_trustStore: PolicyTrustStore,
+	builtinDefaults: BuiltinPolicyDefaults,
+	sources: PolicySource[],
+	trustStore: PolicyTrustStore,
 ): EffectivePolicy {
-	throw new Error("not implemented");
+	const protectedPaths = new Set<string>(builtinDefaults.protectedPaths);
+	const trustedAllowlists: PolicyAllowlistEntry[][] = [];
+	const trustedNetworks: PolicyNetworkEntry[][] = [];
+	let denyAllPrivileged = false;
+
+	for (const source of sources) {
+		if (source.status === "invalid") {
+			// FR-23/ADR: a bad source is never outvoted by a majority of good ones -- this flag, once
+			// true, stays true regardless of what other sources in this same call say.
+			denyAllPrivileged = true;
+			continue;
+		}
+		if (source.status === "absent") {
+			continue; // FR-24: absent is not an error condition, and contributes neither restrictions nor grants.
+		}
+
+		// source.status === "loaded" from here on.
+		// Restrictions ALWAYS union, unconditional on trust (BR-5/FR-10) -- see this function's own
+		// doc comment above for why an untrusted/never-approved source still restricts.
+		for (const path of source.policy.protectedPaths ?? []) {
+			protectedPaths.add(path);
+		}
+
+		// Grants require BOTH loaded AND trusted-by-exact-contentHash (R3/T18) -- an untrusted source
+		// contributes NOTHING to the intersection below, not an empty list standing in for "no grants"
+		// (pushing an empty list would zero out every other source's grants too, which is wrong: the
+		// intersection is only over sources that actually got to vote).
+		if (trustStore.isTrusted(source.kind, source.contentHash)) {
+			trustedAllowlists.push(source.policy.allowlist ?? []);
+			trustedNetworks.push(source.policy.network ?? []);
+		}
+	}
+
+	return {
+		protectedPaths: Array.from(protectedPaths),
+		allowlist: intersectTrustOrdered(trustedAllowlists, (entry) => `${entry.pattern} ${entry.risk}`),
+		network: intersectTrustOrdered(trustedNetworks, (entry) => entry.destination),
+		denyAllPrivileged,
+	};
 }

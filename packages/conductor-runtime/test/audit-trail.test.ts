@@ -131,6 +131,40 @@ describe("audit-trail: FR-16 — every Permission Engine decision produces a dur
 	});
 });
 
+describe("audit-trail: quality-baseline categories 1/3 — appendAuditEntry rejects an entry whose timestamp is not a valid ISO-8601 string (fail-closed, R9's discipline extended to input validation)", () => {
+	it("throws and never writes anything to disk for a timestamp that is not ISO-8601 at all", () => {
+		const writer = createAuditTrailWriter(auditFilePath());
+
+		expect(() => writer.appendAuditEntry(sampleEntry({ timestamp: "not-a-timestamp" }))).toThrow(
+			/invalid ISO-8601 timestamp/,
+		);
+		expect(existsSync(auditFilePath())).toBe(false);
+	});
+
+	it("throws for an empty-string timestamp", () => {
+		const writer = createAuditTrailWriter(auditFilePath());
+
+		expect(() => writer.appendAuditEntry(sampleEntry({ timestamp: "" }))).toThrow(/invalid ISO-8601 timestamp/);
+	});
+
+	it("throws for a timestamp in a plausible-but-non-canonical date format (not the exact ISO-8601 round-trip isValidIsoTimestamp requires)", () => {
+		const writer = createAuditTrailWriter(auditFilePath());
+
+		// A common "looks like a date" shape that Date.parse accepts loosely but that does not
+		// round-trip through `new Date(value).toISOString() === value` -- proves the check is the
+		// stricter round-trip test, not merely "Date.parse doesn't throw".
+		expect(() => writer.appendAuditEntry(sampleEntry({ timestamp: "2026-08-05" }))).toThrow(
+			/invalid ISO-8601 timestamp/,
+		);
+	});
+
+	it("accepts a genuine ISO-8601 UTC timestamp without throwing (control case — the rejection above is about the value, not about throwing on every call)", () => {
+		const writer = createAuditTrailWriter(auditFilePath());
+
+		expect(() => writer.appendAuditEntry(sampleEntry({ timestamp: "2026-08-05T00:00:00.000Z" }))).not.toThrow();
+	});
+});
+
 describe("audit-trail: FR-17/T25 — the audit trail file is itself a protected path (proven against the REAL evaluateToolPath, no stub involved)", () => {
 	it("denies a write to .conductor/audit.jsonl inside the workspace, symmetrically to config.json/policy.json (T13 extended to the audit trail)", () => {
 		const result = evaluateToolPath(join(".conductor", "audit.jsonl"), { workspaceRoot: workspace.root });

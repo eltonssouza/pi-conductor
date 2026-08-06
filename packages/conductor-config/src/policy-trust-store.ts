@@ -48,6 +48,8 @@
  * grounding, not by manufacturing a fresh query for a rule nothing has changed about).
  */
 
+import { existsSync, readFileSync, statSync } from "node:fs";
+
 export type PolicySourceKind = "project" | "user-global";
 
 export const POLICY_TRUST_STORE_SCHEMA_VERSION = 1;
@@ -75,13 +77,95 @@ export interface PolicyTrustStore {
 	isTrusted(kind: PolicySourceKind, contentHash: string): boolean;
 }
 
+export interface PolicyTrustStoreOptions {
+	/**
+	 * Observability hook (Gate 6 quality-baseline categories 2/6: error handling + observability) --
+	 * invoked ONLY for a read failure that is NOT one of R11a's intentional fail-closed cases (file
+	 * absent, corrupted JSON, schema mismatch, hash-not-found are normal operation and stay silent).
+	 * A genuinely unexpected failure -- e.g. EACCES/permission-denied, or a race between the
+	 * existsSync/isFile checks and the actual read -- otherwise vanished into the same silent `[]`
+	 * as the expected cases, leaving an operator unable to tell "no trust file yet" apart from "the
+	 * trust store started throwing on every read". Depending on an injected callback rather than a
+	 * hardcoded logger keeps this module logging-library-agnostic (Pragmatic Programming Practices --
+	 * Complete Professional Guide §2.5, "depend on a tiny abstraction; logging changes don't touch
+	 * logic" -- cited at Gate 6 for this exact shape, mirrored from permission-gate.ts's own
+	 * `onDecision` hook). MUST NEVER throw on its own account: invoked inside its own try/catch, same
+	 * discipline as `onDecision` in permission-gate.ts ("observability must never affect the security
+	 * decision already made"). Never changes the fail-closed return value -- `isTrusted()` still
+	 * resolves to `false` whether or not `onError` is provided or itself throws.
+	 */
+	onError?: (error: unknown) => void;
+}
+
+function isTrustEntry(value: unknown): value is TrustEntry {
+	if (typeof value !== "object" || value === null) return false;
+	const entry = value as Record<string, unknown>;
+	return (
+		(entry.kind === "project" || entry.kind === "user-global") &&
+		typeof entry.contentHash === "string" &&
+		typeof entry.grantedAt === "string"
+	);
+}
+
+function isTrustStoreDocument(value: unknown): value is PolicyTrustStoreDocument {
+	if (typeof value !== "object" || value === null) return false;
+	const doc = value as Record<string, unknown>;
+	return (
+		doc.schema === POLICY_TRUST_STORE_SCHEMA_VERSION && Array.isArray(doc.trusted) && doc.trusted.every(isTrustEntry)
+	);
+}
+
+/**
+ * Read every trusted entry from `filePath`, collapsing EVERY failure mode (R11a: missing file,
+ * invalid JSON, schema mismatch, or any filesystem error -- permission denied, path is a directory,
+ * ...) to an empty list rather than propagating. A single try/catch wraps the entire read+parse+
+ * validate sequence on purpose: no matter which step fails, the ledger is empty, never partially
+ * trusted, never a thrown exception a careless caller could catch-and-treat-as-true.
+ *
+ * `onError` (Gate 6 quality-baseline, categories 2/6) fires only for the branch of that catch that
+ * is NOT one of R11a's intentional fail-closed cases: a `SyntaxError` from `JSON.parse` is corrupted
+ * JSON, already covered by name (module doc line 26, "invalid (corrupt JSON/schema)") and normal
+ * operation -- no signal needed. Anything else reaching this catch (permission denied, a race where
+ * the file is deleted/replaced between `existsSync`/`statSync` and the actual read, disk error, ...)
+ * is genuinely unexpected, so it is surfaced via the hook while the return value stays exactly the
+ * same empty list either way -- observability added, fail-closed behavior unchanged.
+ */
+function readTrustedEntries(filePath: string, onError?: (error: unknown) => void): TrustEntry[] {
+	try {
+		if (!existsSync(filePath)) return [];
+		if (!statSync(filePath).isFile()) return []; // a directory (or other non-file) at this path -- fail closed, not an error
+		const raw = readFileSync(filePath, "utf-8");
+		const parsed: unknown = JSON.parse(raw);
+		if (!isTrustStoreDocument(parsed)) return [];
+		return parsed.trusted;
+	} catch (error) {
+		if (!(error instanceof SyntaxError)) {
+			try {
+				onError?.(error);
+			} catch {
+				// Observability must never affect the fail-closed contract above (mirrors
+				// permission-gate.ts's onDecision hook: a broken caller-supplied callback cannot be
+				// allowed to propagate and change what isTrusted() resolves to).
+			}
+		}
+		return [];
+	}
+}
+
 /**
  * Load the trust-on-first-use ledger from `filePath`. Fail-closed on every read path (R11a): a
  * missing file, a file that is not valid JSON, a file that does not match PolicyTrustStoreDocument's
  * shape, or a filesystem error (permission denied, path is a directory, ...) all produce a
  * PolicyTrustStore whose isTrusted() always returns false -- never a thrown exception, never a
- * store that resolves to "trusted" for anything.
+ * store that resolves to "trusted" for anything. `options.onError` (optional) is notified only of
+ * the unexpected subset of those failures -- see `readTrustedEntries`'s doc comment -- and never
+ * changes this return-value contract.
  */
-export function loadPolicyTrustStore(_filePath: string): PolicyTrustStore {
-	throw new Error("not implemented");
+export function loadPolicyTrustStore(filePath: string, options: PolicyTrustStoreOptions = {}): PolicyTrustStore {
+	const entries = readTrustedEntries(filePath, options.onError);
+	return {
+		isTrusted(kind: PolicySourceKind, contentHash: string): boolean {
+			return entries.some((entry) => entry.kind === kind && entry.contentHash === contentHash);
+		},
+	};
 }

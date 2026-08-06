@@ -29,6 +29,8 @@
  *                       so it is a documented `it.todo` in the test file, never silently dropped.
  */
 
+import { redactSecrets as redactSecretsShared } from "@conductor/secrets";
+
 export const REDACTION_SINKS = [
 	"transcript",
 	"notify",
@@ -48,6 +50,26 @@ export type RedactionSink = (typeof REDACTION_SINKS)[number];
  */
 export const SECRET_SCAN_FAILED_PLACEHOLDER = "[REDACTED: secret-scan failed — content withheld]";
 
+export interface RedactionErrorOptions {
+	/**
+	 * Observability hook (Gate 6 quality-baseline categories 2/6: error handling + observability):
+	 * invoked when the underlying matcher throws and this function falls back to
+	 * SECRET_SCAN_FAILED_PLACEHOLDER. Unlike policy-trust-store.ts's `onError` (a mix of expected and
+	 * unexpected causes), EVERY invocation here is worth signaling -- there is no "this matcher
+	 * failure is normal operation" case for a secret scanner, so this fires on every fallback, not a
+	 * filtered subset. This is the more sensitive of the two Gate 6 silent-catch findings: a
+	 * redaction failure that nobody notices means a sink silently stops protecting secrets, so
+	 * staying quiet here is the wrong default. An injected callback (rather than a hardcoded logger)
+	 * keeps this shared primitive logging-library-agnostic -- Pragmatic Programming Practices --
+	 * Complete Professional Guide §2.5, "depend on a tiny abstraction; logging changes don't touch
+	 * logic" -- mirrored from permission-gate.ts's own `onDecision` hook. MUST NEVER throw on its own
+	 * account: invoked inside its own try/catch, same discipline as `onDecision`. Never changes the
+	 * fail-closed return value -- the placeholder is returned whether or not `onError` is provided or
+	 * itself throws.
+	 */
+	onError?: (error: unknown) => void;
+}
+
 /**
  * Wraps @conductor/secrets' redactSecrets with the fail-closed guarantee ADR §6.1 requires of this
  * package specifically (conductor-config's own consumer of the same matcher package reacts by
@@ -57,8 +79,41 @@ export const SECRET_SCAN_FAILED_PLACEHOLDER = "[REDACTED: secret-scan failed —
  * to over-redaction (a sink shows less) rather than under-redaction (a secret leaks because the
  * scanner broke).
  */
-export function redactSecrets(_text: string): string {
-	throw new Error("not implemented");
+export function redactSecrets(text: string, options: RedactionErrorOptions = {}): string {
+	try {
+		return redactSecretsShared(text);
+	} catch (error) {
+		try {
+			options.onError?.(error);
+		} catch {
+			// Observability must never affect the fail-closed contract above (mirrors
+			// permission-gate.ts's onDecision hook: a broken caller-supplied callback cannot be
+			// allowed to propagate and change what this function returns).
+		}
+		return SECRET_SCAN_FAILED_PLACEHOLDER;
+	}
+}
+
+/**
+ * Deep-walk an arbitrary JSON-shaped value, redacting every string leaf via redactSecrets and
+ * rebuilding every array/object level fresh (never mutating the input -- see this function's own
+ * doc comment below for the caller-facing contract). Non-string/array/object primitives (number,
+ * boolean, null, undefined) pass through unchanged; nothing here needs to know the difference
+ * between a Message, a CustomMessage, and a BashExecutionMessage -- the transform is structural, not
+ * type-specific, which is exactly what lets it sit at a single handoff point regardless of which
+ * concrete message shape passes through it.
+ */
+function deepRedact(value: unknown, options: RedactionErrorOptions): unknown {
+	if (typeof value === "string") return redactSecrets(value, options);
+	if (Array.isArray(value)) return value.map((item) => deepRedact(item, options));
+	if (value !== null && typeof value === "object") {
+		const result: Record<string, unknown> = {};
+		for (const [key, fieldValue] of Object.entries(value as Record<string, unknown>)) {
+			result[key] = deepRedact(fieldValue, options);
+		}
+		return result;
+	}
+	return value;
 }
 
 /**
@@ -78,6 +133,6 @@ export function redactSecrets(_text: string): string {
  * Review §2.12, "a completed trace is evidence about that question and about nothing else," cited at
  * gate3-addendum-fase2.md §9 for exactly this reason).
  */
-export function redactSessionEntryForPersistence<T>(_entry: T): T {
-	throw new Error("not implemented");
+export function redactSessionEntryForPersistence<T>(entry: T, options: RedactionErrorOptions = {}): T {
+	return deepRedact(entry, options) as T;
 }

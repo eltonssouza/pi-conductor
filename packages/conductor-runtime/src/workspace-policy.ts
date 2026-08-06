@@ -88,6 +88,13 @@ export function isWithinRoot(candidateRealPath: string, rootRealPath: string): b
  * through `pi.on("tool_call")` — ADR 0002 §7.3), never by the agent acting on itself. The
  * `workspaceRoot`-less overload keeps returning exactly the home-directory list it always has, so
  * existing callers (and this file's own unit tests) are unaffected.
+ *
+ * Fase 2 (ADR 0003 §7, gate3-addendum-fase2.md T25/T26/R9) extends the same reasoning to
+ * `.conductor/audit.jsonl`: the audit trail must be unerasable by the very agent whose actions it
+ * records, for the same confused-deputy reason as config.json/policy.json above. This closes the
+ * write/edit half of T25 by construction; the `bash` half (an agent cannot achieve via free-text
+ * shell what write/edit already can't) is the Command Classifier's job (command-classifier.ts
+ * signal 8, which calls this same function — "one path authority, two callers", ADR §3.3).
  */
 export function defaultProtectedPaths(workspaceRoot?: string): string[] {
 	const home = homedir();
@@ -101,7 +108,11 @@ export function defaultProtectedPaths(workspaceRoot?: string): string[] {
 		join(home, ".conductor", "credentials"),
 	];
 	if (workspaceRoot) {
-		paths.push(join(workspaceRoot, ".conductor", "config.json"), join(workspaceRoot, ".conductor", "policy.json"));
+		paths.push(
+			join(workspaceRoot, ".conductor", "config.json"),
+			join(workspaceRoot, ".conductor", "policy.json"),
+			join(workspaceRoot, ".conductor", "audit.jsonl"),
+		);
 	}
 	return paths;
 }

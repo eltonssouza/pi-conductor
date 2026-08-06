@@ -8,6 +8,7 @@ import type {
 import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
 import { confirmOrDeny, DEFAULT_APPROVAL_TIMEOUT_MS } from "./confirm.ts";
 import { evaluatePolicyFailClosed, type PolicyDecision } from "./fail-closed.ts";
+import { decide } from "./permission-engine.ts";
 import { evaluateToolPath, type WorkspacePolicyOptions } from "./workspace-policy.ts";
 
 /**
@@ -19,10 +20,17 @@ import { evaluateToolPath, type WorkspacePolicyOptions } from "./workspace-polic
  *   1. read: allowed only inside the workspace root; no approval prompt.
  *   2. write / edit: require BOTH workspace containment (protected-paths + real-path
  *      canonicalization) AND ctx.ui.confirm() approval with a fail-closed timeout.
- *   3. bash: requires ctx.ui.confirm() approval with a fail-closed timeout. Per-argument path
- *      containment is not applied to bash's free-text `command` string — a command-risk
- *      classifier is explicitly deferred to Fase 2 (threat model §7: "Classificador de risco de
- *      comando ... Fase 2"), so approval is the sole control for this PoC.
+ *   3. bash: routed through the Permission Engine's decide() (permission-engine.ts) — the Policy
+ *      Decision Point — which classifies the raw command (command-classifier.ts) BEFORE any
+ *      approval is requested (T23/T24, gate3-addendum-fase2.md): a "critical" tier command (a
+ *      protected-path/destructive target, a catastrophic pattern, or unanalyzable input) is
+ *      denied outright with NO approval path at all, human-available-or-not; a "low" tier command
+ *      (built-in or policy.json allowlist match) is allowed without a prompt, the same way the
+ *      `read` branch above never prompts for a contained read; "medium"/"high" still requires
+ *      ctx.ui.confirm() approval with the same fail-closed timeout as write/edit, now with the
+ *      risk tier surfaced in the prompt title. This file (the PEP) never re-derives the
+ *      classification itself — decide() is the single, authoritative source of that decision
+ *      (DRY: one home for the risk-tier knowledge; Pragmatic Programming Practices §1.2).
  *   4. conductor_note (Fase-0 custom-tool PoC, src/tools/conductor-note.ts; gate8-validation.md
  *      §7 item 2): requires input validation (non-empty string) BEFORE approval, matching the
  *      containment-before-approval pattern used for write/edit, then ctx.ui.confirm() approval
@@ -95,7 +103,23 @@ async function decideToolCall(
 	}
 
 	if (isToolCallEventType("bash", event)) {
-		const approved = await confirmOrDeny(ctx, "Approve bash command?", event.input.command, approvalTimeoutMs);
+		// T23/T24 (gate3-addendum-fase2.md; ADR 0003 §2-§4): decide() classifies event.input.command
+		// (command-classifier.ts) and returns one of three outcomes — see the module doc above.
+		// `yesFlagActive` is hardcoded false: no `--yes` CLI flag is wired to this gate yet (neither
+		// session.ts nor resource-loader.ts, the only two callers of createPermissionGateExtension,
+		// set one). This is safe by construction, not by omission: decide()'s critical-tier check
+		// runs unconditionally, BEFORE any --yes/isYesEligible logic is even reached, so wiring a
+		// real --yes flag in later cannot widen this into a bypass (isYesEligible's fail-closed
+		// 6-prong contract is exercised exhaustively in permission-engine.test.ts).
+		const result = decide("bash", event.input, { workspace: policyOptions, yesFlagActive: false });
+
+		if (result.outcome.kind === "deny") {
+			return { block: true, reason: result.outcome.reason };
+		}
+		if (result.outcome.kind === "allow") {
+			return { block: false };
+		}
+		const approved = await confirmOrDeny(ctx, result.outcome.title, result.outcome.message, approvalTimeoutMs);
 		return approved
 			? { block: false }
 			: { block: true, reason: "not approved (denied, or approval timed out — fail closed)" };

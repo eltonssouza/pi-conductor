@@ -12,6 +12,11 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { createPermissionGateExtension, type PermissionGateDecision } from "./permission-gate.ts";
 import { ConductorResourceLoader, type Fase1ProjectConfig } from "./resource-loader.ts";
+// Side-effecting import: installs the T29/R12c write-path redaction guard on SessionManager's shared
+// prototype (see session-redaction-guard.ts's own header) before this module's createConductorSession()
+// ever constructs a SessionManager below. This is the composition root for real (non-test) usage of
+// this package -- conductor-cli's chat command reaches SessionManager only through here.
+import "./session-redaction-guard.ts";
 
 /**
  * Thin wiring for a Conductor-governed AgentSession (ADR 0001 §2: build against the stable

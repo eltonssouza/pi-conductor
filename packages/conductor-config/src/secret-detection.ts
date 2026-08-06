@@ -3,6 +3,20 @@
  * contains a raw secret -- only a reference (env var name / keychain id / provider+model id).
  * Enforced on the write path, before any filesystem write happens (see write-config.ts).
  *
+ * GATE 6 (docs/adr/0003-fase2-security-architecture.md section 6.1, section 9 packaging table): the
+ * matcher PRIMITIVES this module used to define locally (matchesKnownSecretPrefix, looksHighEntropy,
+ * looksSecretShaped, isSensitiveFieldName, looksLikeEnvVarReference) now live in the zero-dependency
+ * leaf package `@conductor/secrets`, imported here and re-exported unchanged so every existing
+ * consumer of this module (config-summary.ts, write-config.ts, this package's own index.ts, and the
+ * Fase 1 test suite) keeps working without a single call-site change. This module's own remaining
+ * job is narrower and config-specific: `assertNoRawSecrets` (the throwing walk over an arbitrary
+ * config object) and FREE_TEXT_ENTROPY_CHECKED_PATHS (which fields are "genuinely free text" enough
+ * to run entropy detection against). `conductor-runtime`'s redaction.ts imports the SAME
+ * `@conductor/secrets` primitives to mask rather than throw -- one shared definition of
+ * "secret-shaped" for the whole monorepo, never two regex lists to keep in sync (ADR section 6.1;
+ * the exact bug class this closes is gate3-fase1-addendum.md section 6.2's T11 word-boundary fix,
+ * which would otherwise have to be applied twice).
+ *
  * Two independent checks, both defense in depth against a different mistake:
  *   1. Field-name-based: ANY field (known schema field or not) whose name looks like it names a
  *      credential (apiKey, token, secret, password, credential, private key, ...) must hold an
@@ -21,120 +35,33 @@
  * Grounding: the query run for this gate ("detecting secret-shaped or high-entropy credential
  * values in configuration before writing to disk", cdt library --gate 6) returned only generic
  * defensive-programming material (top score 0.577) -- Software Construction Practices - Complete
- * Professional Guide §2.8 ("I validate untrusted input at boundaries... Bad data can't travel far
+ * Professional Guide section 2.8 ("I validate untrusted input at boundaries... Bad data can't travel far
  * before being caught") grounds the *shape* of this module (validate at the boundary, fail before
- * any write), not the specific thresholds below. No book in this project's library corpus covers
- * entropy-based secret scanning specifically -- reported honestly rather than forced, the same
- * treatment gate3-fase1-addendum.md itself gives T11/T16's uncovered angles. The thresholds mirror
- * the well-known trufflehog/gitleaks entropy-scanner family (hex charset >= 3.0 bits/char,
- * base64-ish charset threshold tuned up from the family's typical ~4.0 to 4.4 bits/char, minimum
- * length 20 before entropy is even considered) -- a named industry convention, not a library
- * citation, and a deliberately narrow design call: it is scoped to the two free-text provider
- * fields specifically to avoid flagging ordinary path-like strings (see
- * FREE_TEXT_ENTROPY_CHECKED_PATHS below). The 4.4 tuning is itself evidence-based, not guessed: a
- * sample of realistic "provider/modelId"-shaped identifiers measured 3.4-4.26 bits/char (e.g.
- * "anthropic/claude-sonnet-5-20260101" at 4.256), while genuine secret-shaped samples (a base64
- * blob, a GitHub PAT body) measured 4.8-5.2 -- 4.4 sits in the gap with margin on both sides.
+ * any write), not the specific thresholds now owned by @conductor/secrets. No book in this
+ * project's library corpus covers entropy-based secret scanning specifically -- reported honestly
+ * rather than forced, the same treatment gate3-fase1-addendum.md itself gives T11/T16's uncovered
+ * angles.
  */
 
+import {
+	isSensitiveFieldName,
+	looksHighEntropy,
+	looksLikeEnvVarReference,
+	looksSecretShaped,
+	matchesKnownSecretPrefix,
+} from "@conductor/secrets";
 import { ConfigValidationError } from "./errors.ts";
 
-/**
- * T11 bypass fix (docs/conductor/gate8-validation-fase1.md §6.2): these were previously anchored
- * `^...$`, matching only when the value's ENTIRE (trimmed) content equaled the pattern -- so
- * "anthropic/sk-ant-api03-..." (a known prefix embedded after a "provider/" segment) slipped past
- * undetected, live-reproduced there via `conductor config set provider.model
- * "anthropic/sk-ant-api03-..."`. Fixed with `\b` (word boundary) in place of `^`, and no trailing `$`,
- * so a prefix is caught wherever it starts a fresh token in the string -- matching the module's own
- * documented intent (header comment above: "rejected wherever it appears").
- *
- * `\b` (not a bare, unanchored substring search) is the deliberate part of the fix: a plain
- * `.test()` with the anchors simply dropped would also fire on a known prefix appearing mid-word --
- * e.g. the generic OpenAI-style `sk-` pattern would misfire on "desk-lamp-..." (the literal
- * substring "sk-" inside "de[sk-]lamp", not a real prefix) -- exactly the "over-broadening into
- * false positives on totally unrelated fields" risk this fix must avoid, since
- * `matchesKnownSecretPrefix` runs unconditionally against every string field in the config, not only
- * `provider.model` (see `assertNoRawSecrets` below). `\b` requires the prefix to begin right after a
- * non-identifier character (or the start of the string) -- true for "anthropic/sk-ant-..." (preceded
- * by `/`) and for a prefix at the very start (preceded by nothing), false for "desk-lamp-..." (the
- * "sk-" there is preceded by "e", still inside the same word). Grounded in the same defensive-
- * programming posture as this module's header comment (Software Construction Practices - Complete
- * Professional Guide §2.3/§2.8: validate at the boundary, bad data can't travel far before being
- * caught) -- the library has no chapter on secret-prefix regex design specifically, so the `\b`
- * choice itself is an engineering call, not a library citation; it mirrors how real secret scanners
- * (gitleaks/trufflehog-style rules) commonly word-boundary their short/generic prefixes for the same
- * false-positive reason, named here as an industry convention, not a citation (same treatment this
- * module's header already gives the entropy thresholds below).
- */
-const KNOWN_SECRET_PREFIX_PATTERNS: RegExp[] = [
-	/\bsk-ant-[A-Za-z0-9_-]{10,}/, // Anthropic
-	/\bsk-[A-Za-z0-9_-]{10,}/, // OpenAI-style
-	/\bghp_[A-Za-z0-9]{20,}/, // GitHub PAT (classic)
-	/\bgithub_pat_[A-Za-z0-9_]{20,}/, // GitHub PAT (fine-grained)
-	/\bgho_[A-Za-z0-9]{20,}/, // GitHub OAuth
-	/\bglpat-[A-Za-z0-9_-]{15,}/, // GitLab PAT
-	/\bxox[baprs]-[A-Za-z0-9-]{10,}/, // Slack
-	/\bAKIA[A-Z0-9]{12,}/, // AWS access key id
-	/\bASIA[A-Z0-9]{12,}/, // AWS STS session key
-	/\bAIza[A-Za-z0-9_-]{20,}/, // Google API key
-	/\bya29\.[A-Za-z0-9_-]{10,}/, // Google OAuth access token
-	/-----BEGIN [A-Z ]*PRIVATE KEY-----/, // PEM private key block
-];
-
-const SENSITIVE_FIELD_NAME_PATTERN = /(api[-_]?key|token|secret|passwd|password|credential|private[-_]?key)/i;
-const ENV_VAR_REFERENCE_SHAPE = /^[A-Z][A-Z0-9_]*$/;
-const MIN_ENTROPY_CHECK_LENGTH = 20;
-const HEX_CHARSET = /^[0-9a-fA-F]+$/;
-const BASE64ISH_CHARSET = /^[A-Za-z0-9+/_=.-]+$/;
-const HEX_ENTROPY_THRESHOLD_BITS_PER_CHAR = 3.0;
-// Tuned to 4.4 (not the trufflehog/gitleaks family's typical ~4.0) because this threshold is
-// applied to real "provider/modelId" identifiers, not arbitrary strings -- see the module header
-// comment for the measured samples that motivated the gap.
-const BASE64ISH_ENTROPY_THRESHOLD_BITS_PER_CHAR = 4.4;
+export {
+	isSensitiveFieldName,
+	looksHighEntropy,
+	looksLikeEnvVarReference,
+	looksSecretShaped,
+	matchesKnownSecretPrefix,
+};
 
 /** Fields where a legitimate value is always a short, human-typed identifier -- never a long random blob. */
 const FREE_TEXT_ENTROPY_CHECKED_PATHS = new Set(["provider.model", "provider.thinkingLevel"]);
-
-export function matchesKnownSecretPrefix(value: string): boolean {
-	const trimmed = value.trim();
-	return KNOWN_SECRET_PREFIX_PATTERNS.some((pattern) => pattern.test(trimmed));
-}
-
-export function isSensitiveFieldName(fieldName: string): boolean {
-	return SENSITIVE_FIELD_NAME_PATTERN.test(fieldName);
-}
-
-export function looksLikeEnvVarReference(value: string): boolean {
-	return ENV_VAR_REFERENCE_SHAPE.test(value);
-}
-
-function shannonEntropyBitsPerChar(value: string): number {
-	const counts = new Map<string, number>();
-	for (const ch of value) counts.set(ch, (counts.get(ch) ?? 0) + 1);
-	let entropy = 0;
-	for (const count of counts.values()) {
-		const p = count / value.length;
-		entropy -= p * Math.log2(p);
-	}
-	return entropy;
-}
-
-/** True for a long string drawn from a hex/base64-ish charset with entropy above a secret-scanner-style threshold. */
-export function looksHighEntropy(value: string): boolean {
-	const trimmed = value.trim();
-	if (trimmed.length < MIN_ENTROPY_CHECK_LENGTH) return false;
-	if (HEX_CHARSET.test(trimmed)) return shannonEntropyBitsPerChar(trimmed) >= HEX_ENTROPY_THRESHOLD_BITS_PER_CHAR;
-	if (BASE64ISH_CHARSET.test(trimmed)) {
-		return shannonEntropyBitsPerChar(trimmed) >= BASE64ISH_ENTROPY_THRESHOLD_BITS_PER_CHAR;
-	}
-	return false;
-}
-
-export function looksSecretShaped(value: string): boolean {
-	const trimmed = value.trim();
-	if (trimmed.length === 0) return false;
-	return matchesKnownSecretPrefix(trimmed) || looksHighEntropy(trimmed);
-}
 
 /**
  * Walk `value` recursively and throw ConfigValidationError on the first field that looks like it

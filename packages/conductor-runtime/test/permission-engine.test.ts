@@ -108,6 +108,31 @@ describe("decide: BR-8/T23/T24 — a 'critical' tier bash command has NO approva
 	});
 });
 
+describe("decide: FR-1/FR-3/NFR-4 — a 'low' tier from the classifier's own built-in heuristic still requires ctx.ui.confirm(); only an explicit policy.json allowlist grant skips it", () => {
+	it("FR-1/NFR-4: a bash command recognized ONLY by the built-in known-safe heuristic (no policy.json grant) still needs approval — the tier is surfaced, confirm is not skipped", () => {
+		const options: PermissionEngineOptions = { workspace: { workspaceRoot: workspace.root }, yesFlagActive: false };
+		// "ls -la" matches command-classifier.ts's built-in allowlist heuristic (BUILTIN_ALLOWLIST_PATTERNS)
+		// with no policy.json entry involved at all — this is the exact shape the Fase 0/1 regression
+		// test (conductor-cli's tui-integration.test.ts) exercises via "echo hello...".
+		const result = decide("bash", { command: "ls -la" }, options);
+		expect(result.outcome.kind).toBe("needs-approval");
+		expect(result.riskTier).toBe("low");
+		expect((result.outcome as { kind: "needs-approval"; message: string }).message).toBe("ls -la");
+	});
+
+	it("FR-3: a bash command matching an EXPLICIT policy.json allowlist grant skips ctx.ui.confirm() outright", () => {
+		const options: PermissionEngineOptions = {
+			workspace: { workspaceRoot: workspace.root },
+			yesFlagActive: false,
+			policy: { allowlist: [{ pattern: "npm test", risk: "low" }] },
+		};
+		const result = decide("bash", { command: "npm test" }, options);
+		expect(result.outcome.kind).toBe("allow");
+		expect((result.outcome as { kind: "allow"; approvalMethod: string }).approvalMethod).toBe("allowlist");
+		expect(result.riskTier).toBe("low");
+	});
+});
+
 describe("decide: FR-6/FR-7/FR-8/R5 — Network level is default-deny except an explicitly consented destination", () => {
 	// The concrete tool name/call-site for a non-tool-call network check (e.g. `conductor doctor`'s
 	// Library-backend ping, FR-8) is Gate 6 wiring; `permissionLevelOverride` is the seam this Gate-5

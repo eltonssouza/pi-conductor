@@ -48,6 +48,7 @@ export {
 	type CreateConductorSessionOptions,
 	createConductorSession,
 } from "./session.ts";
+export { installSessionRedactionGuard } from "./session-redaction-guard.ts";
 export { sanitizeForTerminal } from "./terminal-sanitize.ts";
 export {
 	type ConductorNoteRecord,
