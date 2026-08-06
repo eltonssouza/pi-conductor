@@ -29,6 +29,11 @@ export default mergeConfig(
 			globals: true,
 			environment: "node",
 			testTimeout: 30000,
+			// Installs the T29/R12c write-path redaction guard before every test file in this package
+			// runs -- see test/setup/install-session-redaction-guard.ts's own header for why the
+			// session-redaction regression canary specifically needs this (it drives Pi's real
+			// SessionManager directly, without importing any conductor-runtime source).
+			setupFiles: [fileURLToPath(new URL("./test/setup/install-session-redaction-guard.ts", import.meta.url))],
 			// Tests run offline by default; the one live-model test opts back in with
 			// vi.stubEnv("PI_OFFLINE", undefined) so the rest of the suite never depends on network.
 			env: { PI_OFFLINE: "1" },

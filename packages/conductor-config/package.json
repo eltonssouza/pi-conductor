@@ -9,6 +9,9 @@
 	"scripts": {
 		"test": "vitest --run"
 	},
+	"dependencies": {
+		"@conductor/secrets": "0.0.0"
+	},
 	"devDependencies": {
 		"@types/node": "24.12.4",
 		"@vitest/coverage-v8": "4.1.9",

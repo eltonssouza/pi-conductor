@@ -1,5 +1,6 @@
 import type { InlineExtension } from "@earendil-works/pi-coding-agent";
 import { type CreateAgentSessionResult, DefaultResourceLoader } from "@earendil-works/pi-coding-agent";
+import type { EffectivePolicyInput } from "./permission-engine.ts";
 import { createPermissionGateExtension, type PermissionGateDecision } from "./permission-gate.ts";
 
 /**
@@ -71,6 +72,16 @@ export interface ConductorResourceLoaderOptions {
 	approvalTimeoutMs?: number;
 	/** Observability hook -- same contract as `CreateConductorSessionOptions.onDecision`. Must never throw. */
 	onDecision?: (decision: PermissionGateDecision) => void;
+	/**
+	 * FR-3/FR-6/FR-7/FR-9..FR-11/FR-23/FR-24 (GAP-B loop-back) -- same contract as
+	 * `CreateConductorSessionOptions.policy`. `session.ts` already unions `policy.protectedPaths`
+	 * into the `additionalProtectedPaths` this class receives above, so this class only needs to
+	 * forward the value as-is to its own internal `createPermissionGateExtension` call below --
+	 * it does not re-derive or re-merge anything.
+	 */
+	policy?: EffectivePolicyInput;
+	/** FR-19/FR-20/FR-21 -- same contract as `CreateConductorSessionOptions.yesFlagActive`. */
+	yesFlagActive?: boolean;
 	/** Test-only: extra inline extensions -- same contract as `CreateConductorSessionOptions.extraExtensions`. */
 	extraExtensions?: InlineExtension[];
 }
@@ -114,6 +125,8 @@ export class ConductorResourceLoader {
 					additionalProtectedPaths: options.additionalProtectedPaths,
 					approvalTimeoutMs: options.approvalTimeoutMs,
 					onDecision: options.onDecision,
+					policy: options.policy,
+					yesFlagActive: options.yesFlagActive,
 				}),
 				...(options.extraExtensions ?? []),
 			],

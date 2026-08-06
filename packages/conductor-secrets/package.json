@@ -1,0 +1,21 @@
+{
+	"name": "@conductor/secrets",
+	"version": "0.0.0",
+	"private": true,
+	"description": "Pure, zero-dependency secret-shape matchers and redaction (docs/adr/0003-fase2-security-architecture.md §6.1/§9): the single source of truth conductor-config (assert+throw, T11) and conductor-runtime (mask, R6) both import, so redaction can never diverge from what the Secret Scanner considers secret-shaped. Zero @conductor/* dependencies -- the leaf of the graph.",
+	"type": "module",
+	"main": "./src/index.ts",
+	"types": "./src/index.ts",
+	"scripts": {
+		"test": "vitest --run"
+	},
+	"devDependencies": {
+		"@types/node": "24.12.4",
+		"@vitest/coverage-v8": "4.1.9",
+		"typescript": "5.9.3",
+		"vitest": "4.1.9"
+	},
+	"engines": {
+		"node": ">=22.19.0"
+	}
+}

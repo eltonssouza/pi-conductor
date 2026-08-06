@@ -171,3 +171,45 @@ describe("summarizeEntryForTranscript / replayTranscript -- terminal sanitizatio
 		expect(line).toBe("safeunsafe");
 	});
 });
+
+/**
+ * FR-13 (docs/conductor/gate2-spec-fase2.md Grupo D; gate3-addendum-fase2.md T21 sink #1;
+ * docs/adr/0003-fase2-security-architecture.md §6.2 sink #1): "sanitização de terminal != redação de
+ * segredo" -- T14 above only strips ANSI/CSI/OSC control sequences, it does not mask a secret VALUE
+ * that arrives as ordinary printable text (e.g. a `bash` result echoing an env var). Gate 8 (this
+ * session) found this module still only called `sanitizeForTerminal`, never
+ * `redactSecrets`/`@conductor/runtime` -- the exact regression FR-13 names by number
+ * ("gate8-validation-fase1.md §6.1 documentou... a Fase 1 só resolveu a primeira [sanitização]").
+ */
+describe("summarizeEntryForTranscript / replayTranscript -- secret redaction (FR-13)", () => {
+	it("masks a known-prefix secret inside a bash tool result's stdout, leaving the surrounding text legible", () => {
+		const [line] = summarizeEntryForTranscript(
+			toolResultEntry("bash", "ANTHROPIC_API_KEY=sk-ant-api03-FAKEFAKEFAKEFAKEFAKE"),
+		);
+		expect(line).not.toContain("sk-ant-api03-FAKEFAKEFAKEFAKEFAKE");
+		expect(line).toContain("[REDACTED:");
+		expect(line).toContain("ANTHROPIC_API_KEY=");
+	});
+
+	it("masks a secret embedded as a substring (FR-14's word-boundary correction, reused here)", () => {
+		const [line] = summarizeEntryForTranscript(
+			assistantTextEntry("token is anthropic/sk-ant-api03-FAKEFAKEFAKEFAKE"),
+		);
+		expect(line).not.toContain("sk-ant-api03-FAKEFAKEFAKEFAKE");
+		expect(line).toContain("anthropic/[REDACTED:");
+	});
+
+	it("does NOT mask a 40-char git-SHA-shaped hex string (FR-15: no false positive)", () => {
+		const sha = "a".repeat(40);
+		const [line] = summarizeEntryForTranscript(toolResultEntry("bash", `commit ${sha}`));
+		expect(line).toContain(sha);
+		expect(line).not.toContain("[REDACTED:");
+	});
+
+	it("redacts on --resume replay too, not just live rendering", () => {
+		const entries = [toolResultEntry("bash", "leaked: sk-ant-api03-FAKEFAKEFAKEFAKEFAKE")];
+		const [line] = replayTranscript(entries);
+		expect(line).not.toContain("sk-ant-api03-FAKEFAKEFAKEFAKEFAKE");
+		expect(line).toContain("[REDACTED:");
+	});
+});
