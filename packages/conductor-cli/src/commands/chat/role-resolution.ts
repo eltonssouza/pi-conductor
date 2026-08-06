@@ -59,7 +59,11 @@
 import { type ConductorRole, type RoleRegistry, resolveRole } from "@conductor/config";
 import type { RoleRegistryView } from "@conductor/runtime";
 import { loadBuiltinRoleCatalog } from "../role-catalog.ts";
-import { defaultProjectSkillsDir, loadBuiltinSkillCatalog } from "../skill-catalog.ts";
+import {
+	type BuiltinSkillCatalog,
+	defaultProjectSkillsDir,
+	loadBuiltinSkillCatalog,
+} from "../skill-catalog.ts";
 
 /** Mirrors `@conductor/config`'s real `ConductorRole` -- kept as a distinct alias (not a bare
  * re-export) so this module's own callers (`chat.ts`) only ever need to know this file's name for
@@ -87,21 +91,43 @@ export interface LoadRealRoleRegistryOptions {
 	skillsDir?: string;
 }
 
+export interface RealRoleRegistryAndSkills {
+	registry: RoleRegistry;
+	/**
+	 * Gate 8 loop-back (G3/FR-5/FR-6): the SAME already-vetted (`filterSkillsWithinRoots`/R20)
+	 * catalog used to compute `knownSkills` below -- `chat.ts` reuses this to build
+	 * `createConductorSession`'s `additionalSkillPaths` instead of scanning the skill directories a
+	 * second time.
+	 */
+	skillCatalog: BuiltinSkillCatalog;
+}
+
 /**
  * Loads the REAL, file-backed Role Registry (the same 37-role catalog `conductor roles list`
- * shows) -- `chat.ts`'s own `prepareChat` calls this exactly ONCE per invocation and reuses the
- * result for both `--role` resolution and `task`'s `RoleRegistryView`, rather than re-parsing every
- * every `templates/agents/<slug>.md` / `templates/skills/<name>/SKILL.md` file twice per
- * `conductor chat` run.
+ * shows) AND the real, contained skill catalog (the same 44-skill catalog `conductor skills list`
+ * shows) in a single scan -- `chat.ts`'s own `prepareChat` calls this exactly ONCE per invocation
+ * and reuses the result for `--role` resolution, `task`'s `RoleRegistryView`, AND
+ * `createConductorSession`'s `additionalSkillPaths` (Gate 8 loop-back closing G3/FR-5/FR-6), rather
+ * than re-parsing every `templates/agents/<slug>.md` / `templates/skills/<name>/SKILL.md` file
+ * multiple times per `conductor chat` run.
  */
-export function loadRealRoleRegistry(options: LoadRealRoleRegistryOptions = {}): RoleRegistry {
+export function loadRealRoleRegistryAndSkills(options: LoadRealRoleRegistryOptions = {}): RealRoleRegistryAndSkills {
 	const skillCatalog = loadBuiltinSkillCatalog({
 		builtinSkillsDir: options.skillsDir,
 		projectSkillsDir: options.cwd ? defaultProjectSkillsDir(options.cwd) : undefined,
 	});
 	const knownSkills = new Set(skillCatalog.skills.map((skill) => skill.name));
 	const { registry } = loadBuiltinRoleCatalog({ agentsDir: options.agentsDir, knownSkills });
-	return registry;
+	return { registry, skillCatalog };
+}
+
+/**
+ * Convenience wrapper for callers that only need the registry (this module's own tests, and
+ * `resolveChatRole`/`describeUnknownChatRole`'s own defaults below) -- `chat.ts`'s production path
+ * uses `loadRealRoleRegistryAndSkills` directly so it never scans the skill directories twice.
+ */
+export function loadRealRoleRegistry(options: LoadRealRoleRegistryOptions = {}): RoleRegistry {
+	return loadRealRoleRegistryAndSkills(options).registry;
 }
 
 /** FR-1/FR-2: resolves `roleId` against an already-loaded registry. An unknown id is never a generic

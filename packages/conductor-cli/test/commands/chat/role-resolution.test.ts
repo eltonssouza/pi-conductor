@@ -10,6 +10,7 @@ import { describe, expect, it } from "vitest";
 import {
 	describeUnknownChatRole,
 	loadRealRoleRegistry,
+	loadRealRoleRegistryAndSkills,
 	ROOT_CALLER_ROLE_ID,
 	resolveChatRole,
 	toTaskRoleRegistryView,
@@ -115,5 +116,24 @@ describe("toTaskRoleRegistryView -- adapting the real registry for task's author
 		expect(view.canSpawn(ROOT_CALLER_ROLE_ID, "business-analyst")).toBe(true);
 		expect(view.canSpawn(ROOT_CALLER_ROLE_ID, "site-reliability-engineer")).toBe(true);
 		expect(view.canSpawn(ROOT_CALLER_ROLE_ID, "role-that-does-not-exist")).toBe(false);
+	});
+});
+
+describe("loadRealRoleRegistryAndSkills -- Gate 8 loop-back (G3/FR-5/FR-6)", () => {
+	it("returns the real, contained skill catalog alongside the registry, from a single scan", () => {
+		const { registry, skillCatalog } = loadRealRoleRegistryAndSkills();
+
+		// The same 37-role registry loadRealRoleRegistry() returns -- this is not a second, divergent
+		// load path.
+		expect(registry.roles.has("backend-engineer")).toBe(true);
+
+		// The real 44-skill catalog conductor skills list shows, contained (R20) against the built-in
+		// templates/skills/ root -- never empty, which is exactly the Gate 8 finding this loop-back
+		// closes: a real session had zero skills despite this catalog being correct all along.
+		expect(skillCatalog.skills.length).toBeGreaterThan(0);
+		expect(skillCatalog.excluded).toEqual([]);
+		const designService = skillCatalog.skills.find((skill) => skill.name === "design-service");
+		expect(designService).toBeDefined();
+		expect(designService?.realPath.endsWith("SKILL.md")).toBe(true);
 	});
 });

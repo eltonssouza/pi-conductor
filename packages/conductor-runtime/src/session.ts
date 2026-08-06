@@ -48,6 +48,22 @@ export interface CreateConductorSessionOptions {
 	agentDir?: string;
 	additionalProtectedPaths?: string[];
 	approvalTimeoutMs?: number;
+	/**
+	 * Gate 8 loop-back (G3/FR-5/FR-6, gate2-spec-fase3.md Grupo C -- "progressive disclosure de
+	 * skills"): directories (scanned recursively for `SKILL.md`, Pi's own `loadSkillsFromDir`
+	 * convention) or individual skill files whose name+description+location should be available to
+	 * this session via Pi's own native progressive-disclosure mechanism
+	 * (`@earendil-works/pi-coding-agent`'s `formatSkillsForPrompt`/`skills.ts`: injects only
+	 * name+description+`<location>` into the system prompt, instructs the model to use `read` for the
+	 * full body -- see `resource-loader.ts`'s own header for why `noSkills: true` and this option are
+	 * NOT in tension). This package never resolves its own built-in skills directory (ADR 0002 §3.1:
+	 * `conductor-runtime` stays framework-agnostic, no dependency on `conductor-cli`'s
+	 * `builtin-paths.ts`) -- the caller's own composition root (`conductor-cli`'s `chat.ts`, via
+	 * `skill-catalog.ts`'s `loadBuiltinSkillCatalog`, already vetted through `filterSkillsWithinRoots`/
+	 * R20) supplies the real, contained paths. Omitted or empty: byte-for-byte the same "zero skills"
+	 * behavior every caller had before this loop-back.
+	 */
+	additionalSkillPaths?: string[];
 	/** Test-only: extra inline extensions to load (e.g. a fake model provider registration). */
 	extraExtensions?: InlineExtension[];
 	/**
@@ -200,12 +216,16 @@ export async function createConductorSession(options: CreateConductorSessionOpti
 				extraExtensions: options.extraExtensions,
 				auditTrailWriter,
 				systemPromptOverride: options.systemPromptOverride,
+				additionalSkillPaths: options.additionalSkillPaths,
 			}).pi
 		: new DefaultResourceLoader({
 				cwd: options.workspaceRoot,
 				agentDir,
 				noExtensions: true,
 				noSkills: true,
+				// Gate 8 loop-back (G3/FR-5/FR-6): see this option's own doc comment above -- merged in
+				// by the inner loader regardless of `noSkills` (resource-loader.ts's header explains why).
+				additionalSkillPaths: options.additionalSkillPaths ?? [],
 				noPromptTemplates: true,
 				noThemes: true,
 				noContextFiles: true,

@@ -56,7 +56,7 @@ import { resolveEffectivePolicy } from "./chat/policy-resolution.ts";
 import {
 	type ChatRole,
 	describeUnknownChatRole,
-	loadRealRoleRegistry,
+	loadRealRoleRegistryAndSkills,
 	ROOT_CALLER_ROLE_ID,
 	resolveChatRoleFromRegistry,
 	toTaskRoleRegistryView,
@@ -159,12 +159,21 @@ interface PreparedChat {
 	role?: ChatRole;
 	/**
 	 * Gate 6 real-wiring loop-back: the REAL, file-backed Role Registry (`role-resolution.ts`'s
-	 * `loadRealRoleRegistry`), loaded exactly ONCE per invocation here and reused by `runChat` to
-	 * build `task`'s `RoleRegistryView` -- regardless of whether `--role` was passed. `--role`
-	 * resolution above and `task`'s own delegation authorization are two different consumers of the
-	 * SAME registry snapshot, never two independent loads that could observe different on-disk state.
+	 * `loadRealRoleRegistryAndSkills`), loaded exactly ONCE per invocation here and reused by
+	 * `runChat` to build `task`'s `RoleRegistryView` -- regardless of whether `--role` was passed.
+	 * `--role` resolution above and `task`'s own delegation authorization are two different consumers
+	 * of the SAME registry snapshot, never two independent loads that could observe different on-disk
+	 * state.
 	 */
 	roleRegistry: RoleRegistry;
+	/**
+	 * Gate 8 loop-back (G3/FR-5/FR-6): the real, contained (`filterSkillsWithinRoots`/R20) skill
+	 * locations from the SAME scan that produced `roleRegistry` above -- `runChat` passes these
+	 * straight through to `createConductorSession`'s `additionalSkillPaths` so a real `conductor chat`
+	 * session actually has the 44 built-in skills (plus any project `.conductor/skills/`) available
+	 * via Pi's own native progressive-disclosure mechanism, regardless of whether `--role` was passed.
+	 */
+	skillPaths: string[];
 }
 
 type PrepareResult = { ok: true; prepared: PreparedChat } | { ok: false; message: string };
@@ -184,8 +193,11 @@ async function prepareChat(options: ChatOptions): Promise<PrepareResult> {
 	// Gate 6 real-wiring loop-back: loaded exactly ONCE per invocation, regardless of whether --role
 	// was passed -- runChat reuses this same snapshot to build task's RoleRegistryView (Gap 1), and
 	// --role resolution below is the OTHER consumer of it (never two independent loads that could
-	// observe different on-disk state within the same invocation).
-	const roleRegistry = loadRealRoleRegistry({ cwd: options.cwd });
+	// observe different on-disk state within the same invocation). Gate 8 loop-back (G3/FR-5/FR-6):
+	// the same scan also produces the real, contained skill catalog runChat threads into
+	// createConductorSession's additionalSkillPaths below.
+	const { registry: roleRegistry, skillCatalog } = loadRealRoleRegistryAndSkills({ cwd: options.cwd });
+	const skillPaths = skillCatalog.skills.map((skill) => skill.realPath);
 
 	// --role <slug> (FR-1/FR-2): resolved before the session is ever opened -- an unknown role id is a
 	// clean, terminal-free CLI error, never a session that starts anyway and only fails once the model
@@ -276,6 +288,7 @@ async function prepareChat(options: ChatOptions): Promise<PrepareResult> {
 			yesFlagActive: parsedArgs.yesFlagActive,
 			role,
 			roleRegistry,
+			skillPaths,
 		},
 	};
 }
@@ -286,7 +299,8 @@ export async function runChat(options: ChatOptions): Promise<number> {
 		options.stderr.write(`${prepared.message}\n`);
 		return 1;
 	}
-	const { config, model, modelRuntime, sessionManager, yesFlagActive, role, roleRegistry } = prepared.prepared;
+	const { config, model, modelRuntime, sessionManager, yesFlagActive, role, roleRegistry, skillPaths } =
+		prepared.prepared;
 
 	const agentDir = resolveConductorAgentDir(options.cwd);
 
@@ -328,6 +342,9 @@ export async function runChat(options: ChatOptions): Promise<number> {
 		onDecision: (decision) => decisions.push(decision),
 		policy,
 		yesFlagActive,
+		// Gate 8 loop-back (G3/FR-5/FR-6): the real, contained (R20) skill locations from
+		// prepareChat's single scan -- see PreparedChat.skillPaths's own doc comment.
+		additionalSkillPaths: skillPaths,
 		taskDelegation: {
 			roleRegistry: toTaskRoleRegistryView(roleRegistry),
 			sharedBudget,

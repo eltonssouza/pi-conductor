@@ -96,7 +96,44 @@ describe("ConductorResourceLoader construction", () => {
 		expect(extensionsResult.extensions.map((extension) => extension.path)).toEqual([
 			"<inline:conductor-permission-gate>",
 		]);
+		// No `additionalSkillPaths` supplied by this test -- this asserts the secure DEFAULT (no
+		// caller-supplied skill path -> zero skills), not a gap. Gate 8 loop-back (G3/FR-5/FR-6): a
+		// caller that DOES supply `additionalSkillPaths` gets those skills regardless of `noSkills`
+		// (see the next test, and `resource-loader.ts`'s own header for why the two options don't
+		// conflict) -- `conductor-cli`'s `chat.ts` is that real caller, threading the 44 built-in
+		// skills' vetted, contained locations through this exact option.
 		expect(loader.pi.getSkills().skills).toEqual([]);
+		expect(loader.pi.getThemes().themes).toEqual([]);
+	});
+
+	it("Gate 8 loop-back (G3/FR-5/FR-6): threads additionalSkillPaths to the inner loader even though noSkills stays true", async () => {
+		const skillDir = join(workspace.root, "fixture-skills", "design-service");
+		mkdirSync(skillDir, { recursive: true });
+		writeFileSync(
+			join(skillDir, "SKILL.md"),
+			["---", "name: design-service", "description: Use for the fixture.", "---", "", "body"].join("\n"),
+			"utf-8",
+		);
+
+		const config: Fase1ProjectConfig = {
+			project: { type: "backend", technologies: [] },
+			provider: { model: "anthropic/claude-sonnet-5" },
+		};
+		const loader = new ConductorResourceLoader({
+			workspaceRoot: workspace.root,
+			agentDir: workspace.agentDir,
+			config,
+			additionalSkillPaths: [join(workspace.root, "fixture-skills")],
+		});
+
+		await loader.reload();
+
+		const { skills } = loader.pi.getSkills();
+		expect(skills).toHaveLength(1);
+		expect(skills[0]?.name).toBe("design-service");
+		expect(skills[0]?.description).toBe("Use for the fixture.");
+		// Still no third-party extensions/prompts/themes -- additionalSkillPaths is additive, it does
+		// not loosen any OTHER secure default this class applies.
 		expect(loader.pi.getThemes().themes).toEqual([]);
 	});
 });

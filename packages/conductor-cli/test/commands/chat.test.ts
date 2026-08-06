@@ -162,6 +162,61 @@ describe("runChat -- full happy path (injected FakeTerminal + scripted model, no
 		expect(sessionFiles.length).toBeGreaterThan(0);
 	}, 45_000);
 
+	it(
+		"Gate 8 loop-back (G3/FR-5/FR-6): the real built-in skill catalog reaches the model's system " +
+			"prompt via progressive disclosure -- name+description+location only, never a skill's own body",
+		async () => {
+			writeValidConfig(project.root);
+			const terminal = new FakeTerminal();
+			const { io } = createCapturingIo(project.root);
+
+			let fakeModel: ReturnType<typeof registerFakeModel> | undefined;
+			const runPromise = runChat({
+				cwd: project.root,
+				args: [],
+				stdout: io.stdout,
+				stderr: io.stderr,
+				terminal,
+				createModelRuntime: async () => {
+					const runtime = await ModelRuntime.create({
+						authPath: join(project.root, ".conductor", "auth.json"),
+						modelsPath: join(project.root, ".conductor", "models.json"),
+						allowModelNetwork: false,
+					});
+					fakeModel = registerFakeModel(runtime, "conductor-fake", [{ text: "hello from the assistant" }]);
+					return runtime;
+				},
+			});
+
+			await waitUntil(() => terminal.allWrites().includes("conductor-fake/conductor-cli-fake-1"));
+
+			terminal.sendInput("hi there");
+			terminal.sendInput("\r");
+
+			await waitUntil(() => terminal.allWrites().includes("hello from the assistant"));
+
+			const prompt = fakeModel?.lastSystemPrompt();
+			expect(prompt).toBeTruthy();
+			// A real, ported skill (backend-engineer's own primary skill, templates/skills/design-service/
+			// SKILL.md) -- proves the 44-skill catalog `loadRealRoleRegistryAndSkills` builds actually
+			// reached `createConductorSession`'s `additionalSkillPaths`, not merely `conductor skills
+			// list`'s own, separately-wired catalog (the Gate 8 finding: the catalog was correct but never
+			// reached a live session).
+			expect(prompt).toContain("design-service");
+			expect(prompt).toContain(
+				"Use when creating or modifying a service or API, by defining the contract and data model",
+			);
+			// Progressive disclosure (FR-5): the skill's own body text (only in the SKILL.md file on
+			// disk) never leaks into the prompt itself.
+			expect(prompt).not.toContain("Choose a justified consistency/index strategy.");
+
+			terminal.sendInput("/exit");
+			terminal.sendInput("\r");
+			expect(await runPromise).toBe(0);
+		},
+		45_000,
+	);
+
 	it("also exits cleanly on Ctrl+C, the other exit mechanism the task requires alongside /exit", async () => {
 		writeValidConfig(project.root);
 		const terminal = new FakeTerminal();
