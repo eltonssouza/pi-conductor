@@ -763,3 +763,311 @@ antes de avançar. As 5 lacunas do §5 (GAP-3A…E) devem voltar ao Gate 2 antes
 R13** (destrutivo dentro do subagente é negado idêntico a fora) e o **teste de evidência
 não-forjável de R14** (o pai detecta uma lista-de-arquivos declarada que o registro do
 runtime não confirma).
+
+---
+
+## 9. Reconciliação pontual — as 3 fronteiras que a decisão in-process (Gate 4) ela mesma abriu (T40–T42)
+
+**Origem:** o Gate 4 escolheu **subagente in-process** via `createAgentSession`
+(ADR 0004 §2). A escolha **fecha diretamente** T30 (por referência de objeto, não por
+fiação cross-process) — logo o mandato do §7 ("se escolher processo separado, voltar
+para confirmar R13/R16 + canário") **não** dispara na sua forma original. Mas a própria
+decisão in-process **expõe três fronteiras de confiança novas** que o STRIDE T30–T39
+(construído sob a incerteza processo-separado-vs-in-process, §0) **não** modelou porque
+assumia a fronteira de processo. O ADR as reportou de volta (§13, riscos R3/R5/R6) e o
+Gate 4 pediu esta reconciliação **antes do Gate 5**. É um adendo **pontual** — não
+re-litiga T1–T39, R1–R21, nem os secure defaults 1–30.
+
+**O deslocamento de fronteira (o que mudou do §0).** Em processo separado, o filho é um
+**binário isolado** cujo event bus, budget e sinks são *outro processo* — o risco era
+"o controle não atravessa a fronteira" (fiação esquecível, fail-open). In-process, o
+filho **compartilha o processo** mas **não** compartilha automaticamente: (a) o
+**contador de budget** vira objeto mutável sob concorrência de event-loop; (b) o
+**event bus** do filho é uma instância **própria** — `pi.on("tool_call")` do pai não o
+escuta; (c) o **SessionManager** do filho é uma instância **nova** cujo arquivo é um
+**escritor de sessão adicional**. As três ameaças abaixo são a versão **in-process** de
+riscos já nomeados — T33b, T30 e T21 — por **portas novas** que a fronteira de processo
+antes escondia.
+
+### Sumário priorizado
+
+| ID | Ameaça | STRIDE | Prob | Impacto | Prio | Loop-back |
+|---|---|---|---|---|---|---|
+| **T41** | **Filho não-governado por porta in-process** — o event bus do filho é instância própria; o gate/audit do pai **não** o escuta a menos que re-registrado; um 2º construtor de sessão-filha (fora da `task`) que alcance `createAgentSession` **público** sem re-fiar a gate = T30 com o mesmo formato, mas silencioso e no mesmo processo | E, T, R | Média | **Crítico** | **P1** | T30 (SF1/SF3) |
+| **T42** | **Transcrito-evidência não-redigido** — o `SessionManager` disco-backed do filho é um **escritor de sessão novo**; se a redação-at-rest não estiver no seam de escrita compartilhado, o arquivo de sessão do filho (que R14 devolve ao pai como evidência **por referência**) persiste em claro o segredo que o filho leu | I, R | Média | **Alto** | **P1** | T21 (SF5) |
+| **T40** | **Budget: janela reserve→settle sob concorrência** — a atomicidade depende de `reserve` debitar o estimate **no reserve-time** e de o estimate ser **teto-superior**; um `reserve` que difere o débito ao `settle`, ou um estimate que subestima, deixa `remaining()` superestimado durante o `await` do modelo, e N raias concorrentes (o Pi roda até 4) sobre-comprometem | E, D | Baixa | **Alto** | **P2** | T33b (SF4) |
+
+---
+
+### T41 — Filho não-governado pela porta in-process (event bus próprio) — P1, T30 por porta nova
+**STRIDE:** Elevation + Tampering + Repudiation · **Elemento:** SF1/SF3 · **Loop-back R13/T30.**
+
+**A porta nova.** `pi.on("tool_call")` registra um handler no **emitter de uma sessão
+específica**. A sessão-filha criada por `createAgentSession` (`sdk.ts:169`) tem seu
+**próprio** emitter. Logo o handler da Permission Gate do **pai**, registrado no emitter
+do **pai**, **não vê** as tool calls do filho — mesma consequência de T30 (filho fora da
+gate), mas por um mecanismo **diferente** do que o §0 modelou: não é "outro processo sem
+a extensão carregada", é "**mesmo processo, event bus próprio, extensão não re-registrada
+no emitter do filho**". A `task` fecha isso construindo o `resourceLoader` do filho com o
+**mesmo** `createPermissionGateExtension(...)` fiado às **mesmas** referências
+(`EffectivePolicy`/`AuditTrailWriter`/`workspaceRoot`/protected-paths/`--yes`) — o
+emitter próprio do filho ganha **seu próprio** handler ligado ao **mesmo** estado
+compartilhado (ADR §2). **A ameaça residual** é a que o prompt do Gate 4 nomeia: um
+**caminho de spawn alternativo** — um segundo call-site que alcance `createAgentSession`
+(que é **SDK público** do Pi, não um construtor privado) para uma filha **sem** essa
+fiação. O filho roda in-process, com autoridade total do processo, e **nenhuma** de suas
+tool calls é classificada/aprovada/auditada — e, pior que em processo separado, **não
+deixa nem o rastro de um `child_process.spawn`** no log do pai. Prob **Média** (exige um
+2º construtor; mas `createAgentSession` ser público torna isso um `import` de distância);
+Impacto **Crítico** (desarma a Fase 2 inteira dentro da delegação, silenciosamente).
+
+**Mitigação — o ADR já a prevê; esta reconciliação a torna vinculante por construção, não
+por disciplina.** O ADR §2.2 (precondição sole-constructor) + R5 (2º construtor reabre
+T30) + o canário R13 rebaixado (§8) são a **direção certa**. Precisões que o Gate 5/6
+DEVE travar para que T41 valha **por construção**, não por convenção:
+1. **Referências da gate = parâmetros OBRIGATÓRIOS do único construtor de filha
+   governada.** O `SharedBudget` já faz isto (param obrigatório → R16b por construção,
+   ADR §5.2); **estender a mesma disciplina à gate**: o wrapper de spawn recebe
+   `EffectivePolicy`/`AuditTrailWriter`/`workspaceRoot`/protected-paths/`--yes` como
+   params **não-opcionais**, de modo que "esqueci de fiar" seja **erro de compilação**,
+   não fail-open em runtime. "Fail-closed-if-unwireable" (GAP-3A) só é real se a
+   ausência de referência **não compilar** — não se for um `if (policy) …` esquecível.
+2. **Lint/teste sole-constructor:** nenhum call-site além desse wrapper chama
+   `createAgentSession` para uma filha (o teste (c) do §13 do ADR). É o enforcement
+   mecânico do §2.2 — sem ele, a precondição é prosa.
+3. **Residual declarado (novo, honesto):** uma **extensão de terceiro** carregada no
+   mesmo processo (já dentro do domínio de confiança — sem sandbox, fato dominante §0)
+   pode chamar `createAgentSession` cru, **fora do alcance** do nosso teste. In-process
+   **aumenta o número de principais** que alcançam a fábrica crua (antes era um binário;
+   agora é qualquer código in-process). Dobra no residual sem-sandbox herdado, mas
+   **nomeado** porque a decisão in-process o agrava — o canário R13 cobre o **nosso**
+   código através de um upgrade do Pi, **não** um terceiro.
+*Grounding:* **Secure and Reliable Systems Design §3.13** ("expose narrow purpose-built
+APIs instead of ambient root … route privileged access through an audit trail" — top
+**0.633**; o wrapper estreito é a API purpose-built, `createAgentSession` cru é o ambient
+root), **§3.4** ("the safe proxy … direct connections defeat the proxy" — top 0.609; o
+2º construtor **é** a conexão direta que derrota o proxy), **§3.12** ("the reachable
+authority has never been enumerated" — top 0.628; um call-site esquecido a
+`createAgentSession` **é** autoridade alcançável não-enumerada). Cross-ref **Penetration
+Testing §13.12** (herdado de T29: "every new route is a fresh chance to omit" —
+guaranteed-by-construction). **Veredito: confirmado — a arquitetura resolve**, condicional
+às precisões 1–2 viverem como restrição-de-tipo + teste no Gate 5/6; residual de terceiro
+declarado.
+
+### T42 — Transcrito-evidência não-redigido (escritor de sessão novo) — P1, T21 por porta nova
+**STRIDE:** Information disclosure + Repudiation · **Elemento:** SF5 · **Loop-back R14 ∩ R12/R18/T21.**
+
+**A porta nova.** R14 exige que a evidência devolvida ao pai seja
+**derivada-do-runtime**: `details.transcript = {sessionId, filePath}` — uma **referência**
+ao arquivo de sessão que o runtime escreveu, **não** texto inlinado (ADR §6). Para que
+esse arquivo exista e seja durável, o filho usa um `SessionManager` **novo,
+disco-backed** (correção do ADR §6: `inMemory()` derrubaria R14). Mas — por T21/T29 — uma
+session JSONL **captura o I/O de tool**, e um `read` de `.env`/config que o filho faça
+grava a **credencial** nesse arquivo. Portanto o arquivo que R14 entrega ao revisor
+**pode conter o segredo que o filho tocou**. A pergunta do Gate 4 é exatamente: esse
+transcrito **precisa de um 7º sink** de redação, ou já passa por um existente?
+
+**Resposta — não precisa de 7º sink, SE E SÓ SE a redação-at-rest estiver no seam
+compartilhado de escrita do `SessionManager`.** É a bifurcação que decide se T42 está
+fechada ou reaberta:
+- **Redação no primitivo de escrita do `SessionManager`** (código compartilhado por
+  **toda** instância) → o `SessionManager` novo do filho **herda a redação por
+  construção**; o transcrito-evidência já está redigido em disco; um `read` dele vaza
+  conteúdo não-sensível, não credencial (exatamente R12/T29). **T42 fechada.**
+- **Redação na fiação parent-específica** (só o wiring de persistência do pai chama
+  `redact()` antes de escrever) → o `SessionManager` **separado** do filho escreve
+  **cru**. O arquivo de sessão do filho é um **7º sink não-redigido**, e R14 o entrega ao
+  pai como "evidência" — **T21 reaberto**: um sink esquecido porque **um escritor novo
+  apareceu**. In-process torna isto **dinâmico**: há agora **N** escritores de sessão
+  (pai + um por filho), cada filho "a fresh chance to omit" o sink.
+
+O ADR **acerta a direção** (§13 fronteira 3, R6: "reusa o sink R12/R18; não escreve
+cru"), mas trata como afirmação; esta reconciliação a torna **verificável**. Precisões
+vinculantes ao Gate 5/6:
+1. **Verificar no código do Pi ONDE a redação-at-rest é aplicada.** Se no primitivo de
+   escrita do `SessionManager` → herança por construção (preferido). Se na fiação
+   parent-específica → **rotear explicitamente** o `SessionManager` do filho pelo mesmo
+   sink, senão o transcrito-evidência vaza.
+2. **Regra vinculante:** redação-at-rest é propriedade do **primitivo de escrita do
+   `SessionManager`**, aplicada a **toda instância** por construção — não um bolt-on
+   por-wiring. É a única forma de a contagem-de-sinks dinâmica (N filhos) não virar N
+   chances de esquecer.
+3. **O payload `details` em si não carrega segredo cru** — `transcript` é **referência**
+   (filePath), `filesTouched` vem do `AuditTrailWriter` (já redigido at-rest),
+   `tokenCost` é numérico, `merge.diffPath` é caminho. **Confirmar por teste** que
+   **nenhum** caminho inlina o **texto cru** do transcrito do filho no `content`/sessão/
+   audit do pai.
+4. **Residual declarado (reforçado, não novo):** o `content` (prosa do modelo-filho, o
+   único canal auto-reportado) pode **ecoar** um segredo que o filho leu, e alcança o
+   **contexto vivo** do pai — a redação-**at-rest** protege o **arquivo**, não a janela
+   viva. É o residual herdado T5/T7 (canal do modelo não-gated), agora com um principal a
+   mais alcançando o segredo. Fora de escopo desta fase, **declarado**.
+
+**Teste a derivar no Gate 5/6:** um filho que lê um segredo produz um arquivo
+transcrito-evidência **redigido** — o revisor que abre `details.transcript.filePath` vê o
+placeholder de redação, nunca a credencial. É o gêmeo do teste de evidência-não-forjável
+de R14.
+*Grounding:* **Penetration Testing §20.12** ("a secret can leave the repository … each of
+those routes **around every application control** … no amount of web testing sees it" —
+top **0.625**; o sink esquecido é a rota que contorna a redação), **§14.2** (secrets/
+supply-chain: segredo não pode persistir onde outro leitor o obtém); **Secure Code Review
+§2.12** (herdado de R14: "a completed trace is evidence about that question and about
+nothing else" — a evidência é o **observado**, e o observado não pode ser a credencial em
+claro); **OWASP ASVS V6.4** (herdado de T21/T29: segredo não persistido em claro).
+**Veredito: confirmado — a arquitetura resolve sem 7º sink, condicional** à verificação
+(1) de que a redação vive no seam compartilhado; se viver na fiação do pai, é **ajuste
+obrigatório** (rotear o `SessionManager` do filho pelo sink) antes do Gate 6.
+
+### T40 — Budget: janela reserve→settle sob concorrência de event-loop — P2, T33b por porta nova
+**STRIDE:** Elevation + DoS · **Elemento:** SF4 · **Loop-back R16b/T33b.**
+
+**A porta nova.** In-process **troca** a corrida entre processos de SO (T33b, sem contador
+compartilhado) por uma corrida de **dados in-memory** sobre o objeto `SharedBudget`. O
+prompt do Gate 4 aponta o cenário exato: **e se uma chamada assíncrona (o streaming do
+modelo) acontecer ENTRE `reserve` e `settle`, abrindo uma janela onde outro subagente
+reserva sobre um saldo desatualizado?** É corrida real em JS (single-threaded, mas com
+microtasks/I/O intercalado), não hipotética.
+
+**Análise — o cenário específico está fechado por construção, mas por uma razão precisa
+que o ADR deve tornar vinculante.** A janela reserve→settle **só é stale se o débito for
+diferido ao `settle`**. O design do ADR §5.2 é `reserve(estimate)` = **check-E-reserve
+numa única chamada síncrona**, que **debita `remaining` pelo estimate no reserve-time**
+(reserva otimista); `settle(reservation, actual)` **reconcilia** o estimate já debitado
+com o uso real **depois**. Consequência: durante o `await` do modelo entre `reserve` e
+`settle`, `remaining()` **já reflete** a reserva — um segundo subagente que reserva nessa
+janela lê o saldo **já debitado**, **não** stale. A janela que o prompt descreve é
+**fechada precisamente porque `reserve` debita na hora**, não porque `reserve`/`settle`
+sejam adjacentes no tempo. Duas condições sustentam isso, e ambas têm de ser **codificadas
+no contrato**, não deixadas à disciplina:
+1. **`reserve` DEBITA no reserve-time** (reserva otimista), nunca "registra intenção e
+   debita só no `settle`". O ADR diz "check-E-reserve" — o que **implica** débito-no-
+   reserve —, mas isto tem de ser **explícito e testado**: um refactor que torne `reserve`
+   um mero check e mova o débito ao `settle` **reabre** exatamente a janela stale que o
+   prompt descreve.
+2. **Zero `await`/Promise no corpo de `reserve` e de `settle`** (ADR §5.3, condição (i)) +
+   **sem `check()` avulso** (condição (ii)) — o read-then-write do contador tem de ser um
+   corpo síncrono run-to-completion. É o residual R3 do ADR, **confirmado** e promovido a
+   **lint + teste** no Gate 5/6.
+
+**O ajuste que esta reconciliação faz ao ADR (não é só confirmação):** o ADR §5.3 afirma o
+bound "não excede o teto por mais que **uma requisição em voo**" (spec §7.6). Esse bound é
+verdadeiro **apenas se o estimate for teto-superior** do custo real (reserve
+sobre-reserva, settle credita de volta). Se o estimate **subestima** — plausível, porque o
+custo em tokens de uma resposta **streamed** não é conhecido até completar —, então durante
+o `await` o filho gasta **mais** que o reservado, `remaining()` **superestima** o saldo
+por `(actual − estimate)`, e com N raias concorrentes (o Pi roda até 4) o sobre-comprometi-
+mento é até **N × (actual − estimate)**, **não** "uma em voo". O `settle` corrige **depois**
+(impede acúmulo entre turnos **sequenciais**), mas o over-commit **concorrente dentro da
+janela já ocorreu**. Logo, para o bound de "uma em voo" valer, o Gate 5/6 DEVE **uma** das
+duas: (a) exigir que o estimate seja **teto-superior** (conservador); **ou** (b) adicionar
+uma **checagem-de-teto fail-closed no `settle`** — se o custo real cruzar o teto, é a
+**parada graciosa** (R16a, `Result.error`), pegando o último turno mesmo que seu estimate
+fosse baixo. Prob **Baixa** (exige estimate subestimado **e** concorrência **e** saldo
+perto do teto); Impacto **Alto** (o único backstop econômico da árvore vaza por N×delta).
+
+**Mitigação:** **R16b reafirmado** + as três precisões acima (débito-no-reserve; síncrono/
+sem-check-avulso; bound restated com teto-superior **ou** ceiling-check no settle).
+*Grounding:* a biblioteca **não cobre** contabilidade de budget de token nem atomicidade
+de event-loop (consulta desta sessão **top 0.560**, genérica — mesma lacuna já declarada
+em T33b e no ADR §5.3). Ancorado, honestamente: **Secure and Reliable Systems Design
+§1.12** ("the failure direction is forced … an authorization check must fail closed" —
+top 0.554; o budget é uma checagem de autorização de gasto, o débito diferido/subestimado
+falha na direção errada), **Secure Code Review §1.2** ("hunting the assumptions the
+developer made that an attacker can violate" — top 0.551; as **assumções** aqui são
+"`reserve`/`settle` permanecem síncronos" e "o estimate é teto-superior"), **Threat
+Modeling §3.5** (STRIDE-per-element, forma). Fundamentado no invariante #14 do plano +
+comportamento de `spent_so_far` do `conductor-main`, **não forçado**. **Veredito:
+confirmado — a arquitetura resolve o cenário do prompt (a janela não é stale porque
+`reserve` debita na hora)**, com **um ajuste ao bound declarado**: "uma em voo" só vale
+com estimate teto-superior; senão, ceiling-check no `settle`.
+
+---
+
+### 9.1 Veredito consolidado sobre a arquitetura do Gate 4
+
+**A arquitetura do Gate 4 está OK — avança para o Gate 5.** Nenhuma das três fronteiras
+reabre um P1 como finding **não-mitigado**: as três já eram **antecipadas** pelo ADR
+(riscos R3/R5/R6, fronteiras §13.1/2/3) e são **fechadas pelos próprios primitivos** da
+decisão in-process (reserve-debita-na-hora; sole-constructor; sink de escrita
+compartilhado do `SessionManager`). O que a reconciliação **acrescenta** são **três
+precisões vinculantes** — restrições-de-design + testes a carregar ao Gate 5/6, **não**
+re-arquitetura, **não** bloqueio:
+
+- **T41 → confirmado, resolve por construção** *se* as referências da gate forem
+  **params obrigatórios** do único wrapper de spawn (erro de compilação na omissão —
+  estender a disciplina que o `SharedBudget` já aplica) **e** um teste sole-constructor
+  proibir qualquer outro call-site de `createAgentSession`. Residual de terceiro
+  in-process declarado.
+- **T42 → confirmado, resolve sem 7º sink** *condicional* a **verificar** que a
+  redação-at-rest vive no **primitivo de escrita compartilhado** do `SessionManager` (toda
+  filha herda). Se viver na fiação parent-específica → **ajuste obrigatório**: rotear o
+  `SessionManager` do filho pelo mesmo sink antes do Gate 6.
+- **T40 → confirmado, resolve o cenário do prompt** (a janela reserve→settle não é stale
+  porque `reserve` debita no reserve-time), com **um ajuste ao claim**: o bound "uma
+  requisição em voo" só vale com **estimate teto-superior**; senão, **ceiling-check
+  fail-closed no `settle`**. Débito-no-reserve e "zero await + sem check() avulso" viram
+  lint+teste (residual R3 do ADR promovido).
+
+**Nada exige revisitar a decisão central (in-process).** Ao contrário: as três fronteiras
+são **consequência** da decisão certa (in-process fecha T30 por referência), e cada uma se
+fecha reusando um primitivo que a própria decisão já introduziu. **O ônus é de codificação
+e teste, não de design.**
+
+### 9.2 Secure defaults acrescentados (append aos itens 1–30)
+
+31. **Único construtor de filha governada com referências da gate como params
+    obrigatórios** (erro de compilação na omissão, não fail-open em runtime) + teste
+    sole-constructor proibindo outro call-site de `createAgentSession` (R13/T41).
+32. **Redação-at-rest no primitivo de escrita do `SessionManager`**, herdada por toda
+    instância-filha por construção; transcrito-evidência nunca escrito cru (R14∩R12/T42).
+33. **`reserve` debita no reserve-time + bound de não-ultrapassagem só com estimate
+    teto-superior, senão ceiling-check fail-closed no `settle`**; "zero await em
+    reserve/settle, sem check() avulso" como lint+teste (R16b/T40).
+
+### 9.3 Costuras adicionais que o Gate 5 DEVE travar (test-first) — append ao §7 e ao ADR §13
+
+- **(f) Teste da porta in-process de T41:** um subagente construído por qualquer
+  call-site que **não** seja o wrapper governado é rejeitado (sole-constructor); e uma
+  tool destrutiva dentro do subagente construído pela `task` é negada/classificada
+  idêntico a fora (o canário R13, já em (a) — reforçado aqui pela porta do event bus
+  próprio).
+- **(g) Teste de redação do transcrito-evidência (T42):** um filho que lê um arquivo com
+  credencial produz um `details.transcript.filePath` cujo conteúdo em disco está
+  **redigido** — o revisor nunca lê o segredo.
+- **(h) Teste do bound do budget sob subestimativa (T40):** N subagentes concorrentes com
+  estimate **abaixo** do custo real não ultrapassam o teto além do tolerado — provando o
+  ceiling-check no `settle` (ou a exigência de estimate teto-superior). Estende o teste de
+  atomicidade já em (d).
+
+### 9.4 Grounding desta reconciliação (consultas desta sessão)
+
+Rodadas de `C:\development\source\projects\conductor` via `cdt library "<pergunta>"
+--gate 3` (backend saudável, 2267 chunks). Postura honesta mantida: **forte** nos eixos
+choke-point/least-privilege/fail-direction e secret-at-rest/route-around-controls;
+**fraco/ausente** no eixo **agente-nativo** de contabilidade de budget de token sob
+concorrência de event-loop — declarado, não forçado.
+
+1. **Único chokepoint / narrow purpose-built API / o 2º caminho derrota o proxy** (T41) →
+   **Secure and Reliable Systems Design §3.13** (top **0.633**, "narrow purpose-built APIs
+   instead of ambient root; route privileged access through an audit trail"), **§3.4**
+   (0.609, "the safe proxy … direct connections defeat the proxy"), **§3.12** (0.628,
+   "the reachable authority has never been enumerated"). Cross-ref **Penetration Testing
+   §13.12** (herdado, "every new route is a fresh chance to omit").
+2. **Segredo não persiste em claro / a rota que contorna todo controle** (T42) →
+   **Penetration Testing §20.12** (top **0.625**, "a secret can leave the repository …
+   routes around every application control"), **§14.2** (secrets/supply-chain); **Secure
+   Code Review §2.12** (herdado de R14, trace = evidência do observado); **OWASP ASVS
+   V6.4** (herdado de T21/T29).
+3. **Direção de falha forçada / assumção que o atacante viola** (T40) → **Secure and
+   Reliable Systems Design §1.12** (top 0.554, "the failure direction is forced … must
+   fail closed"), **Secure Code Review §1.2** (0.551, "the assumptions the developer made
+   that an attacker can violate"), **Threat Modeling §3.5** (STRIDE-per-element).
+   **Contabilidade de budget de token sob concorrência: ausente** (top 0.560) —
+   declarado; ancorado no invariante #14 do plano + `spent_so_far`.
+
+**Fecho da reconciliação Gate 3 ↔ Gate 4.** As três fronteiras que o ADR 0004 §13
+reportou de volta estão modeladas (T40/T41/T42), com veredito **confirmado — a arquitetura
+resolve** para as três, condicionadas a três precisões de **codificação/verificação**
+(não re-arquitetura) que o Gate 5/6 trava como test-first (§9.3 (f)(g)(h) + secure
+defaults 31–33). **Sem finding crítico/alto não-mitigado em aberto.** Liberado para o
+Gate 5 (test-first).
