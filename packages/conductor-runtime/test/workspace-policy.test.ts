@@ -195,4 +195,76 @@ describe("evaluateToolPath", () => {
 			expect(result.allowed).toBe(true);
 		});
 	});
+
+	// FR-6 / Gate 8 loop-back (Gate 4 decision, journal 2026-08-06): the 44 real built-in skills live
+	// OUTSIDE any user workspaceRoot by construction (packaged with the CLI, resolved via
+	// import.meta.url -- conductor-cli's builtin-paths.ts), so a plain workspaceRoot check denies every
+	// real `read` attempt against one -- reproduced here with a REAL second scratch directory standing
+	// in for that external skill root (never a fixture placed inside workspace.root, the non-
+	// representative shape Gate 8 found had hidden this defect from the pre-existing test suite).
+	describe("additionalAllowedReadRoots (extra roots allowed for reads, beyond the workspace)", () => {
+		it("allows a path inside an additionalAllowedReadRoots entry, even though it is outside the workspace root", () => {
+			const externalSkillsRoot = createScratchWorkspace("conductor-runtime-external-skills-");
+			try {
+				const skillDir = join(externalSkillsRoot.root, "design-service");
+				mkdirSync(skillDir, { recursive: true });
+				const skillFile = join(skillDir, "SKILL.md");
+				writeFileSync(skillFile, "body");
+
+				const result = evaluateToolPath(skillFile, {
+					workspaceRoot: workspace.root,
+					additionalAllowedReadRoots: [skillFile],
+				});
+
+				expect(result.allowed).toBe(true);
+				expect(result.realPath).toBe(skillFile);
+			} finally {
+				externalSkillsRoot.cleanup();
+			}
+		});
+
+		it("still denies a path outside BOTH the workspace root and every additionalAllowedReadRoots entry (not a general bypass)", () => {
+			const externalSkillsRoot = createScratchWorkspace("conductor-runtime-external-skills-");
+			const unrelatedRoot = createScratchWorkspace("conductor-runtime-unrelated-");
+			try {
+				const skillDir = join(externalSkillsRoot.root, "design-service");
+				mkdirSync(skillDir, { recursive: true });
+				const skillFile = join(skillDir, "SKILL.md");
+				writeFileSync(skillFile, "body");
+
+				const unrelatedFile = join(unrelatedRoot.root, "secret.txt");
+				writeFileSync(unrelatedFile, "top secret");
+
+				const result = evaluateToolPath(unrelatedFile, {
+					workspaceRoot: workspace.root,
+					additionalAllowedReadRoots: [skillFile],
+				});
+
+				expect(result.allowed).toBe(false);
+				expect(result.reason).toMatch(/outside the workspace root/);
+			} finally {
+				externalSkillsRoot.cleanup();
+				unrelatedRoot.cleanup();
+			}
+		});
+
+		it("a protected path still denies even when it is also inside an additionalAllowedReadRoots entry (defense in depth — protected-paths is checked first)", () => {
+			const externalSkillsRoot = createScratchWorkspace("conductor-runtime-external-skills-");
+			try {
+				const sensitiveFile = join(externalSkillsRoot.root, "secret-config.json");
+				writeFileSync(sensitiveFile, "{}");
+
+				const result = evaluateToolPath(sensitiveFile, {
+					workspaceRoot: workspace.root,
+					additionalAllowedReadRoots: [externalSkillsRoot.root],
+					additionalProtectedPaths: [sensitiveFile],
+				});
+
+				expect(result.allowed).toBe(false);
+				expect(result.reason).toMatch(/protected location/);
+			} finally {
+				externalSkillsRoot.cleanup();
+			}
+		});
+	});
 });

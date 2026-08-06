@@ -7,7 +7,7 @@ import type {
 	ToolCallEventResult,
 } from "@earendil-works/pi-coding-agent";
 import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
-import { type ApprovalMethod, createAuditTrailWriter } from "./audit-trail.ts";
+import { type ApprovalMethod, type AuditTrailWriter, createAuditTrailWriter } from "./audit-trail.ts";
 import type { RiskTier } from "./command-classifier.ts";
 import { confirmOrDeny, DEFAULT_APPROVAL_TIMEOUT_MS } from "./confirm.ts";
 import { evaluatePolicyFailClosed, type PolicyDecision } from "./fail-closed.ts";
@@ -26,7 +26,12 @@ import { evaluateToolPath, type WorkspacePolicyOptions } from "./workspace-polic
  *
  * Built entirely on pi.on("tool_call") (recon §2) — a genuine pre-execution hook. Secure defaults
  * (threat model §5):
- *   1. read: allowed only inside the workspace root; no approval prompt.
+ *   1. read: allowed inside the workspace root, OR inside one of `additionalAllowedReadRoots` (FR-6/
+ *      Gate 8 loop-back — already R20-vetted skill locations disclosed via FR-5's name+description+
+ *      `<location>` catalog, see workspace-policy.ts's own doc comment on that field); no approval
+ *      prompt either way. write/edit/bash below never see this widening (they keep using the plain
+ *      `policyOptions`, with no `additionalAllowedReadRoots` populated) — least privilege scoped to
+ *      exactly the tool whose own promised behavior needs it.
  *   2. write / edit: require BOTH workspace containment (protected-paths + real-path
  *      canonicalization) AND ctx.ui.confirm() approval with a fail-closed timeout.
  *   3. bash: routed through the Permission Engine's decide() (permission-engine.ts) — the Policy
@@ -45,7 +50,15 @@ import { evaluateToolPath, type WorkspacePolicyOptions } from "./workspace-polic
  *      containment-before-approval pattern used for write/edit, then ctx.ui.confirm() approval
  *      with the same fail-closed timeout as write/edit/bash. Registering a custom tool is not by
  *      itself a reason to trust it more than a built-in with side effects.
- *   5. any other tool (grep/find/ls/an unregistered custom tool/unknown): denied by default —
+ *   5. task (ADR 0004 §2.3 correction #2 / gate3-addendum-fase3.md T31, R17a): validates the target
+ *      `role` param BEFORE approval (mirrors conductor_note's non-empty-string check), then
+ *      ctx.ui.confirm() with a message that names the TARGET ROLE explicitly -- "approving a task is
+ *      approving whatever it goes on to run" (task.py's own framing), so an approval prompt that only
+ *      said "Approve task?" would be approval-theater. The child's own tool calls (its `bash`/`write`)
+ *      are NOT covered by this one approval -- they pass through the child's own re-wired Permission
+ *      Gate (R13), classified/approved/audited exactly like the parent's, never a free pass for being
+ *      "inside" a delegation.
+ *   6. any other tool (grep/find/ls/an unregistered custom tool/unknown): denied by default —
  *      fail-closed, no policy declared (plan invariant #7: "ferramenta sem permissão é negada").
  *      This is what proves item 4 doesn't widen into "custom tools are trusted": a custom tool
  *      without its own explicit branch here still falls through to this default deny, exactly
@@ -85,10 +98,26 @@ export interface PermissionGateOptions extends WorkspacePolicyOptions {
 	 * `--yes` flag existed.
 	 */
 	yesFlagActive?: boolean;
+	/**
+	 * R13/R14/T41 (ADR 0004 §2.2/§6, gate3-addendum-fase3.md §9 T41 precision #1): when a governed
+	 * DELEGATION CHILD session's own gate is constructed (tools/task.ts's
+	 * `createGovernedChildSessionSpawner`), it is fiared to the SAME `AuditTrailWriter` INSTANCE the
+	 * parent's gate audits to — a child's tool calls must land in the ONE audit trail, not a second,
+	 * unlinked writer that merely happens to point at the same file. Omitted entirely (every other
+	 * caller — the top-level session): behaves exactly as before, constructing its own writer at
+	 * `workspaceRoot`/.conductor/audit.jsonl below — additive, never a breaking change.
+	 */
+	auditTrailWriter?: AuditTrailWriter;
 }
 
 function requiresApproval(toolName: string): boolean {
-	return toolName === "write" || toolName === "edit" || toolName === "bash" || toolName === "conductor_note";
+	return (
+		toolName === "write" ||
+		toolName === "edit" ||
+		toolName === "bash" ||
+		toolName === "conductor_note" ||
+		toolName === "task"
+	);
 }
 
 /**
@@ -122,7 +151,17 @@ async function decideToolCall(
 	// CustomToolCallEvent member has `toolName: string`, so a plain switch/if on the literal
 	// string does not fully narrow `event.input` away from `Record<string, unknown>`.
 	if (isToolCallEventType("read", event)) {
-		const check = evaluateToolPath(event.input.path, policyOptions);
+		// FR-6/Gate 8 loop-back (Gate 4 decision, journal 2026-08-06): a SEPARATE options value from
+		// `policyOptions` above, scoped to this branch alone -- `write`/`edit` below and the `bash`
+		// decision further down both keep using the plain `policyOptions`, which never carries
+		// `additionalAllowedReadRoots`. This is what makes the widening read-only by construction: it is
+		// not that `evaluateToolPath` refuses to honor the field for other tools, it is that no other
+		// tool's options object here is ever built with it populated.
+		const readPolicyOptions: WorkspacePolicyOptions = {
+			...policyOptions,
+			additionalAllowedReadRoots: options.additionalAllowedReadRoots,
+		};
+		const check = evaluateToolPath(event.input.path, readPolicyOptions);
 		return check.allowed
 			? { block: false, permissionLevel: "read", approvalMethod: "none" }
 			: { block: true, reason: check.reason, permissionLevel: "read", approvalMethod: "none" };
@@ -194,6 +233,39 @@ async function decideToolCall(
 				};
 	}
 
+	// task (ADR 0004 §2.3 correction #2; gate3-addendum-fase3.md T31, R17a): validated BEFORE
+	// approval (mirrors conductor_note's own non-empty-string check below), then approved via
+	// ctx.ui.confirm() with a message that names the TARGET ROLE explicitly. "canSpawn" is a grant of
+	// authority reachable through delegation (T31) -- approving `task` blindly would be
+	// approval-theater, so the message surfaces exactly what a human is really being asked to trust.
+	if (isToolCallEventType<"task", { role: unknown; prompt: unknown }>("task", event)) {
+		const role = event.input.role;
+		if (typeof role !== "string" || role.trim().length === 0) {
+			return {
+				block: true,
+				reason: "task requires a non-empty string 'role' — fail closed",
+				permissionLevel: "exec",
+				approvalMethod: "none",
+			};
+		}
+		const prompt = typeof event.input.prompt === "string" ? event.input.prompt : "(no prompt provided)";
+		const approved = await confirmOrDeny(
+			ctx,
+			`Approve delegating to role "${role}"?`,
+			`This delegates a task to role "${role}" — approving grants it that role's own tools and, ` +
+				`transitively, whatever roles it can in turn delegate to (canSpawn). Task: ${prompt}`,
+			approvalTimeoutMs,
+		);
+		return approved
+			? { block: false, permissionLevel: "exec", approvalMethod: "human" }
+			: {
+					block: true,
+					reason: "not approved (denied, or approval timed out — fail closed)",
+					permissionLevel: "exec",
+					approvalMethod: "human",
+				};
+	}
+
 	// conductor_note (Fase-0 custom-tool PoC — src/tools/conductor-note.ts). A custom tool gets no
 	// free pass just for being custom: it needs its own explicit branch here, same as every
 	// built-in above. Input is validated BEFORE approval is requested (mirrors write/edit's
@@ -248,7 +320,12 @@ export function createPermissionGateExtension(options: PermissionGateOptions): N
 	// workspace-policy.ts's defaultProtectedPaths() already set for .conductor/{config,policy,
 	// policy-trust}.json + audit.jsonl. The path is fixed relative to workspaceRoot, matching
 	// audit-trail.ts's own module doc and this file's protected-path entry for this exact file.
-	const auditTrailWriter = createAuditTrailWriter(join(options.workspaceRoot, ".conductor", "audit.jsonl"));
+	// R13/R14/T41: a DELEGATION CHILD's gate (tools/task.ts) passes its own parent's writer INSTANCE
+	// via `options.auditTrailWriter` instead, so the child's decisions land in the one audit trail the
+	// parent already audits to, not a second, unlinked writer — this only constructs a fresh one when
+	// none was supplied (every existing caller's behavior, byte-for-byte unchanged).
+	const auditTrailWriter =
+		options.auditTrailWriter ?? createAuditTrailWriter(join(options.workspaceRoot, ".conductor", "audit.jsonl"));
 
 	return {
 		name: "conductor-permission-gate",

@@ -1,19 +1,37 @@
 import type { InlineExtension } from "@earendil-works/pi-coding-agent";
 import { type CreateAgentSessionResult, DefaultResourceLoader } from "@earendil-works/pi-coding-agent";
+import type { AuditTrailWriter } from "./audit-trail.ts";
 import type { EffectivePolicyInput } from "./permission-engine.ts";
 import { createPermissionGateExtension, type PermissionGateDecision } from "./permission-gate.ts";
 
 /**
  * `ConductorResourceLoader` (docs/adr/0002-fase1-cli-foundation.md §4.1). Deliberately thin: on
  * Fase 1 its only job is to inject the custom system prompt built from `.conductor/config.json`
- * over an otherwise-locked-down `DefaultResourceLoader` (no third-party extensions/skills/prompt
+ * over an otherwise-locked-down `DefaultResourceLoader` (no third-party extensions/prompt
  * templates/themes/context files -- the same Gate 3 secure default the Fase 0 PoC already applied,
- * §3 item 5/§7). Roles, skills, rules, commands, gate-awareness and Diary context are explicit stubs
+ * §3 item 5/§7). Roles, rules, commands, gate-awareness and Diary context are explicit stubs
  * here (ADR 0002 §4.2's scope table) -- each is a later phase's job, named there, not a silent gap:
  *
- *   - roles / skills / rules / commands -> Fase 3 (noSkills/noPromptTemplates stay true)
- *   - current gate                      -> Fase 4 (no gate concept exists yet to inject)
- *   - relevant memory (Diary)           -> Fase 6 (no journal query in the prompt yet)
+ *   - roles / rules / commands -> Fase 3 (role wiring is chat.ts's own composition, not this class)
+ *   - current gate             -> Fase 4 (no gate concept exists yet to inject)
+ *   - relevant memory (Diary)  -> Fase 6 (no journal query in the prompt yet)
+ *
+ * Skills (Gate 8 loop-back closing G3/FR-5/FR-6, gate2-spec-fase3.md Grupo C): `noSkills: true`
+ * stays true below -- it still blocks Pi's own AMBIENT skill discovery (a project's/user's `.pi`-style
+ * package-manager-resolved skills, the Gate 3 secure default this class has applied since Fase 0/1)
+ * -- but `additionalSkillPaths` (new option below) is now threaded to the inner
+ * `DefaultResourceLoader`. Reading `packages/coding-agent/src/core/resource-loader.ts`'s own
+ * `reload()` confirms `noSkills` and `additionalSkillPaths` are independent switches: `noSkills` only
+ * suppresses the auto-discovered/CLI-enabled resource set, while `additionalSkillPaths` is ALWAYS
+ * merged in regardless of `noSkills`'s value (`this.mergePaths(cliEnabledSkills,
+ * this.additionalSkillPaths)` on the `noSkills` branch) -- i.e. Pi's own framework already supports
+ * exactly "no ambient discovery, but an explicit first-party allow-list", so this class does not
+ * reimplement progressive disclosure (`formatSkillsForPrompt`/`skills.ts` already does that, per
+ * `skill-containment.ts`'s own header) -- it only had to stop leaving `additionalSkillPaths` empty on
+ * every real code path. The caller (conductor-cli's `chat.ts`, the composition root) supplies the
+ * REAL, already-vetted skill locations (via `skill-catalog.ts`'s `loadBuiltinSkillCatalog`, which
+ * already runs every path through `filterSkillsWithinRoots`/R20 before this class ever sees it) --
+ * this class stays a dumb pass-through, same discipline as every other option on this interface.
  *
  * Per ADR 0002 §3.1, this class does NOT become its own package -- it lives inside
  * `conductor-runtime`, which already builds a `DefaultResourceLoader` inline (session.ts) and
@@ -68,6 +86,26 @@ export interface ConductorResourceLoaderOptions {
 	config: Fase1ProjectConfig;
 	/** Passed through to the underlying permission-gate (same field CreateConductorSessionOptions exposes today). */
 	additionalProtectedPaths?: string[];
+	/**
+	 * Gate 8 loop-back (G3/FR-5/FR-6): forwarded as-is to the inner `DefaultResourceLoader`'s own
+	 * `additionalSkillPaths` -- a directory (scanned recursively for `SKILL.md`, Pi's own
+	 * `loadSkillsFromDir` convention) or an individual `SKILL.md`/`.md` file. Omitted or empty: this
+	 * class's behavior is unchanged from before this loop-back (`noSkills: true`, zero skills) -- the
+	 * same additive, never-a-breaking-change contract every other optional field on this interface
+	 * already keeps.
+	 */
+	additionalSkillPaths?: string[];
+	/**
+	 * FR-6/Gate 8 loop-back (Gate 4 decision, journal 2026-08-06): forwarded as-is to this class's own
+	 * internal `createPermissionGateExtension` call below, so the `read` tool may load the body of any
+	 * skill this loader's `additionalSkillPaths` already discloses via name+description+`<location>`.
+	 * `session.ts` derives this value from that SAME `additionalSkillPaths` list (never a second,
+	 * independently-sourced allowlist — see `session.ts`'s own composition of this field) before
+	 * constructing `ConductorResourceLoader`; this class stays a dumb pass-through, same discipline as
+	 * every other option here. Omitted or empty: unchanged prior behavior (read stays scoped to
+	 * `workspaceRoot` only).
+	 */
+	additionalAllowedReadRoots?: string[];
 	/** Passed through to the underlying permission-gate (same field CreateConductorSessionOptions exposes). */
 	approvalTimeoutMs?: number;
 	/** Observability hook -- same contract as `CreateConductorSessionOptions.onDecision`. Must never throw. */
@@ -84,6 +122,21 @@ export interface ConductorResourceLoaderOptions {
 	yesFlagActive?: boolean;
 	/** Test-only: extra inline extensions -- same contract as `CreateConductorSessionOptions.extraExtensions`. */
 	extraExtensions?: InlineExtension[];
+	/**
+	 * R13/R14/T41 (ADR 0004 §2.2/§6/§8) -- same contract as `PermissionGateOptions.auditTrailWriter`:
+	 * when supplied, this class's own internal `createPermissionGateExtension(...)` call is fiared to
+	 * this SAME writer instance instead of building its own default, so `session.ts`'s composition
+	 * root (and, through it, a registered `task` tool) shares the one audit trail this branch's gate
+	 * writes to. Omitted entirely: behaves exactly as before (this class's own default writer).
+	 */
+	auditTrailWriter?: AuditTrailWriter;
+	/**
+	 * Fase 3 (`conductor chat --role <slug>`, ADR 0004 §16 appendix `ConductorRole.systemPrompt`):
+	 * when supplied, replaces `buildFase1SystemPrompt(config)` outright as this loader's system
+	 * prompt -- the mechanism a role's own persona becomes the basis of the session. Omitted
+	 * entirely: this class's Fase 1 behavior (`buildFase1SystemPrompt(options.config)`) is unchanged.
+	 */
+	systemPromptOverride?: string;
 }
 
 /**
@@ -110,12 +163,19 @@ export class ConductorResourceLoader {
 		this.inner = new DefaultResourceLoader({
 			cwd: options.workspaceRoot,
 			agentDir: options.agentDir,
-			systemPromptOverride: () => buildFase1SystemPrompt(options.config),
+			// Fase 3: a role's own persona (systemPromptOverride passed in) takes precedence over the
+			// Fase 1 config-derived prompt when supplied -- both are still a static string/thunk, never
+			// re-derived per turn.
+			systemPromptOverride: () => options.systemPromptOverride ?? buildFase1SystemPrompt(options.config),
 			// Secure defaults inherited from Gate 3 (Fase 0 threat model, §5 item 5/§7) unchanged: no
 			// third-party extension/skill/prompt-template/theme/context-file ever enters the TCB --
 			// only this first-party permission-gate extension is loaded.
 			noExtensions: true,
 			noSkills: true,
+			// Gate 8 loop-back (G3/FR-5/FR-6): merged in by the inner loader REGARDLESS of `noSkills`
+			// above (see this class's own header) -- empty by default, so a caller that does not pass
+			// this option keeps the exact prior "zero skills" behavior.
+			additionalSkillPaths: options.additionalSkillPaths ?? [],
 			noPromptTemplates: true,
 			noThemes: true,
 			noContextFiles: true,
@@ -123,10 +183,12 @@ export class ConductorResourceLoader {
 				createPermissionGateExtension({
 					workspaceRoot: options.workspaceRoot,
 					additionalProtectedPaths: options.additionalProtectedPaths,
+					additionalAllowedReadRoots: options.additionalAllowedReadRoots,
 					approvalTimeoutMs: options.approvalTimeoutMs,
 					onDecision: options.onDecision,
 					policy: options.policy,
 					yesFlagActive: options.yesFlagActive,
+					auditTrailWriter: options.auditTrailWriter,
 				}),
 				...(options.extraExtensions ?? []),
 			],
@@ -138,7 +200,7 @@ export class ConductorResourceLoader {
 		return this.inner.getExtensions();
 	}
 
-	/** Repassed as `resourceLoader` to createAgentSession()/createConductorSession(). */
+	/** Repassed as `resourceLoader` to the Pi SDK's session factory / createConductorSession. */
 	get pi(): DefaultResourceLoader {
 		return this.inner;
 	}

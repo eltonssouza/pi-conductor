@@ -10,9 +10,12 @@ import {
 	SessionManager,
 	type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
+import { type AuditTrailWriter, createAuditTrailWriter } from "./audit-trail.ts";
 import type { EffectivePolicyInput } from "./permission-engine.ts";
 import { createPermissionGateExtension, type PermissionGateDecision } from "./permission-gate.ts";
 import { ConductorResourceLoader, type Fase1ProjectConfig } from "./resource-loader.ts";
+import type { SharedBudget } from "./shared-budget.ts";
+import { createTaskTool, type RoleRegistryView } from "./tools/task.ts";
 // Side-effecting import: installs the T29/R12c write-path redaction guard on SessionManager's shared
 // prototype (see session-redaction-guard.ts's own header) before this module's createConductorSession()
 // ever constructs a SessionManager below. This is the composition root for real (non-test) usage of
@@ -45,6 +48,22 @@ export interface CreateConductorSessionOptions {
 	agentDir?: string;
 	additionalProtectedPaths?: string[];
 	approvalTimeoutMs?: number;
+	/**
+	 * Gate 8 loop-back (G3/FR-5/FR-6, gate2-spec-fase3.md Grupo C -- "progressive disclosure de
+	 * skills"): directories (scanned recursively for `SKILL.md`, Pi's own `loadSkillsFromDir`
+	 * convention) or individual skill files whose name+description+location should be available to
+	 * this session via Pi's own native progressive-disclosure mechanism
+	 * (`@earendil-works/pi-coding-agent`'s `formatSkillsForPrompt`/`skills.ts`: injects only
+	 * name+description+`<location>` into the system prompt, instructs the model to use `read` for the
+	 * full body -- see `resource-loader.ts`'s own header for why `noSkills: true` and this option are
+	 * NOT in tension). This package never resolves its own built-in skills directory (ADR 0002 §3.1:
+	 * `conductor-runtime` stays framework-agnostic, no dependency on `conductor-cli`'s
+	 * `builtin-paths.ts`) -- the caller's own composition root (`conductor-cli`'s `chat.ts`, via
+	 * `skill-catalog.ts`'s `loadBuiltinSkillCatalog`, already vetted through `filterSkillsWithinRoots`/
+	 * R20) supplies the real, contained paths. Omitted or empty: byte-for-byte the same "zero skills"
+	 * behavior every caller had before this loop-back.
+	 */
+	additionalSkillPaths?: string[];
 	/** Test-only: extra inline extensions to load (e.g. a fake model provider registration). */
 	extraExtensions?: InlineExtension[];
 	/**
@@ -86,6 +105,56 @@ export interface CreateConductorSessionOptions {
 	 * equivalent to session.ts's behavior through round A/B1 -- additive, not a breaking change.
 	 */
 	config?: Fase1ProjectConfig;
+	/**
+	 * Restricts the session's own tool allowlist to exactly this list (plus whatever `customTools`
+	 * contribute) instead of the round A/B1 default `["read", "write", "edit", "bash"]` -- the
+	 * mechanism `conductor chat --role <slug>` uses to hold a role to its own declared `tools`
+	 * (Fase 3, ADR 0004 §16 appendix `ConductorRole.tools`: "OBRIGATÓRIO ... nunca 'undefined = tudo'").
+	 * Omitted entirely: every existing caller keeps the exact prior default, byte-for-byte.
+	 */
+	toolsOverride?: string[];
+	/**
+	 * Replaces the session's system prompt outright -- the mechanism `conductor chat --role <slug>`
+	 * uses to make a role's own persona/`systemPrompt` the basis of the session, instead of
+	 * `resource-loader.ts`'s Fase 1 `buildFase1SystemPrompt` (when `config` is set) or Pi's own
+	 * default prompt (when it is not). Omitted entirely: both existing branches behave exactly as
+	 * before.
+	 */
+	systemPromptOverride?: string;
+	/**
+	 * Registers the real `task` tool (Fase 3, ADR 0004 §2/§12; `tools/task.ts`'s `createTaskTool`) so
+	 * this session can delegate to another Conductor role. Requires ALL of `roleRegistry`/
+	 * `sharedBudget`/`callerRole` together -- `task` cannot function with only some of them (a
+	 * registry with no shared budget could let a child spend unbounded tokens; a budget with no
+	 * registry cannot resolve `canSpawn`/`tools` at all, ADR §5.2/§2.3's R16b). When this option is
+	 * omitted, `task` is simply never added to the session's tools -- the same "additive, never a
+	 * breaking change" contract every other optional field on this interface already keeps for every
+	 * existing caller (round A/B1's acceptance tests, `init`/`doctor`/`config`, and `conductor chat`
+	 * until its own composition root supplies these).
+	 *
+	 * INTEGRATION POINT (documented, not silently deferred): `roleRegistry` is the structural
+	 * `RoleRegistryView` (`get`/`canSpawn`) `tools/task.ts` already defines -- `@conductor/runtime`
+	 * deliberately never imports `@conductor/config`'s real Role Registry (ADR 0004 §12: "config ⊥
+	 * runtime" preserved). The REAL, file-backed registry (37 roles ported from conductor-main's
+	 * `roles.py`, split-trust via `RoleTrustStore`, validated acyclic via `delegation-graph.ts`) is a
+	 * parallel Gate 6 stream in `@conductor/config` at the time this option was added -- a caller's own
+	 * composition root (`@conductor/cli`'s `commands/chat.ts` / `role-resolution.ts`) is where that
+	 * real registry gets built and threaded in here once that stream lands; this package never builds
+	 * one itself.
+	 */
+	taskDelegation?: TaskDelegationOptions;
+}
+
+export interface TaskDelegationOptions {
+	roleRegistry: RoleRegistryView;
+	/** REQUIRED, never constructed by this function (R16b, ADR §5.2): the ONE `SharedBudget` for the
+	 * whole delegation tree, supplied by the caller's own composition root. */
+	sharedBudget: SharedBudget;
+	/** The role currently running THIS session (the one whose model calls `task`). */
+	callerRole: string;
+	/** How many `task` levels already led to THIS session (0 for the user's own top-level session). */
+	depth?: number;
+	maxDepth?: number;
 }
 
 export interface ConductorSession {
@@ -115,6 +184,32 @@ export async function createConductorSession(options: CreateConductorSessionOpti
 		...(options.policy?.protectedPaths ?? []),
 	];
 
+	// FR-6/Gate 8 loop-back (Gate 4 decision, journal 2026-08-06): the `read` tool must be able to load
+	// the body of any skill this session's system prompt already discloses by name+description+
+	// `<location>` (FR-5) -- otherwise the model is instructed to do something it can never actually do
+	// (Gate 8's second-pass finding: every one of the 44 built-in skills lives outside any user
+	// workspaceRoot by construction, so every real `read` attempt was denied). Derived ONCE, here, from
+	// the SAME `additionalSkillPaths` list already threaded to both resourceLoader branches below --
+	// deliberately NOT a second, independently-settable option: `additionalSkillPaths` is already the
+	// caller's own vetted (`filterSkillsWithinRoots`/R20-contained) list (see this option's own doc
+	// comment above), so the roots of those entries ARE the extra read-allowance, never an invented
+	// second source of truth. Only the `read` branch of the permission-gate ever consults this
+	// (workspace-policy.ts's own doc comment on `additionalAllowedReadRoots`); write/edit/bash are
+	// unaffected because neither branch below forwards it to anything but the read check.
+	const additionalAllowedReadRoots = options.additionalSkillPaths ?? [];
+
+	// R13/R14/T41 (ADR 0004 §2.2/§6/§8): constructed ONCE, explicitly, at this composition root --
+	// the exact same default path `permission-gate.ts`'s own `createPermissionGateExtension` would
+	// have built internally if left to its own default (`join(workspaceRoot, ".conductor",
+	// "audit.jsonl")`), so every existing caller's behavior is byte-for-byte unchanged. Constructing
+	// it here (rather than letting each branch below build its own) is what lets the SAME instance
+	// also reach `createTaskTool` below when `taskDelegation` is supplied -- a delegation child's own
+	// tool calls must land in the ONE audit trail this session's own gate already writes to, never a
+	// second, unlinked writer that merely happens to point at the same file.
+	const auditTrailWriter: AuditTrailWriter = createAuditTrailWriter(
+		join(options.workspaceRoot, ".conductor", "audit.jsonl"),
+	);
+
 	// ADR 0002 §3.2/§4: when `config` is supplied, delegate resourceLoader construction to
 	// ConductorResourceLoader (round B2's `conductor chat` wiring) so the Fase 1 system prompt is
 	// injected. Otherwise, build the same inline DefaultResourceLoader this function has always
@@ -128,28 +223,40 @@ export async function createConductorSession(options: CreateConductorSessionOpti
 				agentDir,
 				config: options.config,
 				additionalProtectedPaths: mergedProtectedPaths,
+				additionalAllowedReadRoots,
 				approvalTimeoutMs: options.approvalTimeoutMs,
 				onDecision: options.onDecision,
 				policy: options.policy,
 				yesFlagActive: options.yesFlagActive,
 				extraExtensions: options.extraExtensions,
+				auditTrailWriter,
+				systemPromptOverride: options.systemPromptOverride,
+				additionalSkillPaths: options.additionalSkillPaths,
 			}).pi
 		: new DefaultResourceLoader({
 				cwd: options.workspaceRoot,
 				agentDir,
 				noExtensions: true,
 				noSkills: true,
+				// Gate 8 loop-back (G3/FR-5/FR-6): see this option's own doc comment above -- merged in
+				// by the inner loader regardless of `noSkills` (resource-loader.ts's header explains why).
+				additionalSkillPaths: options.additionalSkillPaths ?? [],
 				noPromptTemplates: true,
 				noThemes: true,
 				noContextFiles: true,
+				...(options.systemPromptOverride !== undefined
+					? { systemPromptOverride: () => options.systemPromptOverride! }
+					: {}),
 				extensionFactories: [
 					createPermissionGateExtension({
 						workspaceRoot: options.workspaceRoot,
 						additionalProtectedPaths: mergedProtectedPaths,
+						additionalAllowedReadRoots,
 						approvalTimeoutMs: options.approvalTimeoutMs,
 						onDecision: options.onDecision,
 						policy: options.policy,
 						yesFlagActive: options.yesFlagActive,
+						auditTrailWriter,
 					}),
 					...(options.extraExtensions ?? []),
 				],
@@ -159,14 +266,44 @@ export async function createConductorSession(options: CreateConductorSessionOpti
 	const sessionManager =
 		options.sessionManager ?? SessionManager.create(options.workspaceRoot, join(agentDir, "sessions"));
 
-	const customTools = options.customTools ?? [];
+	// task (Fase 3, ADR 0004 §2/§12): registered ONLY when the caller supplied every collaborator
+	// `createTaskTool` structurally needs (see `taskDelegation`'s own doc comment above for exactly
+	// why partial wiring is refused rather than silently degraded). A fresh array, never a mutation of
+	// `options.customTools` -- this function must not have an observable side effect on a value the
+	// caller still owns.
+	const customTools: ToolDefinition[] = [...(options.customTools ?? [])];
+	if (options.taskDelegation) {
+		customTools.push(
+			createTaskTool({
+				callerRole: options.taskDelegation.callerRole,
+				depth: options.taskDelegation.depth,
+				maxDepth: options.taskDelegation.maxDepth,
+				roleRegistry: options.taskDelegation.roleRegistry,
+				sharedBudget: options.taskDelegation.sharedBudget,
+				workspaceRoot: options.workspaceRoot,
+				effectivePolicy: options.policy ?? {},
+				auditTrailWriter,
+				additionalProtectedPaths: mergedProtectedPaths,
+				yesFlagActive: options.yesFlagActive ?? false,
+				// GAP-5 (quality-baseline, Fase 3 checkpoint): this SAME session's own already-resolved
+				// `options.model` -- so every delegation child spawned from here inherits it by default,
+				// instead of `createGovernedChildSessionSpawner` leaving the child's own `model` unset for
+				// Pi's `findInitialModel` to auto-discover (and silently call) whatever provider happens to
+				// have an API key present in the process environment. See tools/task.ts's
+				// `SpawnChildSessionInput.model` doc comment for the full grounding.
+				model: options.model,
+			}),
+		);
+	}
+
+	const baseTools = options.toolsOverride ?? ["read", "write", "edit", "bash"];
 
 	const { session, extensionsResult }: CreateAgentSessionResult = await createAgentSession({
 		cwd: options.workspaceRoot,
 		agentDir,
 		modelRuntime,
 		model: options.model,
-		tools: ["read", "write", "edit", "bash", ...customTools.map((tool) => tool.name)],
+		tools: [...baseTools, ...customTools.map((tool) => tool.name)],
 		customTools,
 		resourceLoader,
 		sessionManager,

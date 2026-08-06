@@ -95,6 +95,12 @@ const TOOL_NAME_TO_LEVEL: Readonly<Record<string, PermissionLevel>> = {
 	write: "write",
 	edit: "write",
 	bash: "exec",
+	// ADR 0004 §2.3 correction #1 / gate3-addendum-fase3.md T31: without this entry, `task` falls
+	// through to the "security" default below (auto-deny-only), which would make the tool
+	// structurally unusable regardless of how correctly tools/task.ts implements runTask. `task` is
+	// Exec-level: approving it is approving whatever the delegated role's own tools can reach
+	// (R17a) -- the same order of authority as `bash`, not a lesser one.
+	task: "exec",
 };
 
 export function resolvePermissionLevel(toolName: string): PermissionLevel {

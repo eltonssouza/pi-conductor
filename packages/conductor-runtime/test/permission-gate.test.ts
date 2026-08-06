@@ -18,6 +18,7 @@ import type {
 	ReadToolCallEvent,
 	ToolCallEvent,
 	ToolCallEventResult,
+	WriteToolCallEvent,
 } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createPermissionGateExtension, type PermissionGateDecision } from "../src/permission-gate.ts";
@@ -322,6 +323,153 @@ describe("permission-gate: write / edit", () => {
 
 		expect(ui.confirmCalls).toHaveLength(1);
 		expect(ui.confirmCalls[0]?.message).not.toContain("\x1b");
+	});
+});
+
+// FR-6 / Gate 8 loop-back (Gate 4 decision, journal 2026-08-06): Gate 8's second pass found that the
+// real, built-in skills a session's system prompt already discloses (FR-5's name+description+
+// `<location>` catalog) live OUTSIDE any user workspaceRoot by construction — packaged with the CLI,
+// resolved via `import.meta.url` (conductor-cli's `builtin-paths.ts`) — so every real `read` attempt
+// against one was denied ("resolves outside the workspace root", confirmed live in .conductor/
+// audit.jsonl). `additionalAllowedReadRoots` fixes this for `read` alone. Every fixture here uses a
+// REAL second scratch directory outside `workspace.root` (never a fixture placed inside it — the
+// non-representative shape that let the original defect slip past the pre-existing progressive-
+// disclosure test).
+describe("permission-gate: additionalAllowedReadRoots (FR-6/Gate 8 loop-back — R20-vetted skill roots outside the workspace)", () => {
+	let externalSkillsRoot: ScratchWorkspace;
+	let skillFilePath: string;
+
+	beforeEach(() => {
+		externalSkillsRoot = createScratchWorkspace("conductor-runtime-external-skills-");
+		const skillDir = join(externalSkillsRoot.root, "design-service");
+		mkdirSync(skillDir, { recursive: true });
+		skillFilePath = join(skillDir, "SKILL.md");
+		writeFileSync(skillFilePath, ["---", "name: design-service", "---", "", "BODY-MARKER-42"].join("\n"));
+	});
+
+	afterEach(() => {
+		externalSkillsRoot.cleanup();
+	});
+
+	it("allows read of a real skill file living outside the workspace root when it is a vetted additionalAllowedReadRoots entry (reproduces Gate 8's finding)", async () => {
+		const extension = createPermissionGateExtension({
+			workspaceRoot: workspace.root,
+			additionalAllowedReadRoots: [skillFilePath],
+			onDecision: (decision) => decisions.push(decision),
+		});
+		const handler = captureToolCallHandler(extension.factory);
+		const ui = createTestUiContext({ confirmResult: true });
+
+		const event: ReadToolCallEvent = {
+			type: "tool_call",
+			toolCallId: "1",
+			toolName: "read",
+			input: { path: skillFilePath },
+		};
+		const result = await handler(event, fakeContext(ui, true));
+
+		expect(result).toBeUndefined();
+		expect(ui.confirmCalls).toHaveLength(0);
+		expect(decisions[0]).toMatchObject({ toolName: "read", allowed: true, requiredApproval: false });
+	});
+
+	it("still denies read of a path outside BOTH the workspace root and additionalAllowedReadRoots (the widening is not a general bypass)", async () => {
+		const extension = createPermissionGateExtension({
+			workspaceRoot: workspace.root,
+			additionalAllowedReadRoots: [skillFilePath],
+			onDecision: (decision) => decisions.push(decision),
+		});
+		const handler = captureToolCallHandler(extension.factory);
+		const ui = createTestUiContext({ confirmResult: true });
+
+		const unrelatedRoot = createScratchWorkspace("conductor-runtime-unrelated-");
+		try {
+			const unrelatedFile = join(unrelatedRoot.root, "secret.txt");
+			writeFileSync(unrelatedFile, "top secret");
+
+			const event: ReadToolCallEvent = {
+				type: "tool_call",
+				toolCallId: "1",
+				toolName: "read",
+				input: { path: unrelatedFile },
+			};
+			const result = await handler(event, fakeContext(ui, true));
+
+			expect(result?.block).toBe(true);
+			expect(result?.reason).toMatch(/outside the workspace root/);
+		} finally {
+			unrelatedRoot.cleanup();
+		}
+	});
+
+	it("does NOT extend to edit: an edit targeting the same vetted skill root is still blocked without even prompting", async () => {
+		const extension = createPermissionGateExtension({
+			workspaceRoot: workspace.root,
+			additionalAllowedReadRoots: [skillFilePath],
+			onDecision: (decision) => decisions.push(decision),
+		});
+		const handler = captureToolCallHandler(extension.factory);
+		const ui = createTestUiContext({ confirmResult: true });
+
+		const event: EditToolCallEvent = {
+			type: "tool_call",
+			toolCallId: "1",
+			toolName: "edit",
+			input: { path: skillFilePath, edits: [{ oldText: "BODY-MARKER-42", newText: "PWNED" }] },
+		};
+		const result = await handler(event, fakeContext(ui, true));
+
+		expect(result?.block).toBe(true);
+		expect(result?.reason).toMatch(/outside the workspace root/);
+		expect(ui.confirmCalls).toHaveLength(0);
+	});
+
+	it("does NOT extend to write: a write targeting the same vetted skill root is still blocked without even prompting", async () => {
+		const extension = createPermissionGateExtension({
+			workspaceRoot: workspace.root,
+			additionalAllowedReadRoots: [skillFilePath],
+			onDecision: (decision) => decisions.push(decision),
+		});
+		const handler = captureToolCallHandler(extension.factory);
+		const ui = createTestUiContext({ confirmResult: true });
+
+		const event: WriteToolCallEvent = {
+			type: "tool_call",
+			toolCallId: "1",
+			toolName: "write",
+			input: { path: join(externalSkillsRoot.root, "design-service", "NEW.md"), content: "pwned" },
+		};
+		const result = await handler(event, fakeContext(ui, true));
+
+		expect(result?.block).toBe(true);
+		expect(result?.reason).toMatch(/outside the workspace root/);
+		expect(ui.confirmCalls).toHaveLength(0);
+	});
+
+	it("does NOT extend to bash: a bash command targeting the same vetted skill root is classified identically with or without additionalAllowedReadRoots set (no widened authority)", async () => {
+		const withReadRoots = createPermissionGateExtension({
+			workspaceRoot: workspace.root,
+			additionalAllowedReadRoots: [skillFilePath],
+		});
+		const withoutReadRoots = createPermissionGateExtension({ workspaceRoot: workspace.root });
+		const handlerWith = captureToolCallHandler(withReadRoots.factory);
+		const handlerWithout = captureToolCallHandler(withoutReadRoots.factory);
+
+		const event: BashToolCallEvent = {
+			type: "tool_call",
+			toolCallId: "1",
+			toolName: "bash",
+			input: { command: `cat "${skillFilePath}"` },
+		};
+
+		const resultWith = await handlerWith(event, fakeContext(createTestUiContext({ confirmResult: true }), true));
+		const resultWithout = await handlerWithout(
+			event,
+			fakeContext(createTestUiContext({ confirmResult: true }), true),
+		);
+
+		expect(resultWith?.block).toBe(resultWithout?.block);
+		expect(resultWith?.reason).toBe(resultWithout?.reason);
 	});
 });
 

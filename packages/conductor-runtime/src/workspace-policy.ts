@@ -22,6 +22,29 @@ export interface WorkspacePolicyOptions {
 	workspaceRoot: string;
 	/** Extra absolute paths to deny, beyond defaultProtectedPaths(). */
 	additionalProtectedPaths?: string[];
+	/**
+	 * FR-6 / Gate 8 loop-back (Fase 3, gate3-addendum-fase3.md R20; journal 2026-08-06 Gate 4
+	 * decision): extra roots a path may resolve into and still be allowed, ADDITIONAL to
+	 * `workspaceRoot` -- consulted ONLY by the `read` call path (permission-gate.ts's `decideToolCall`
+	 * builds a SEPARATE `WorkspacePolicyOptions` value carrying this field for its `read` branch alone;
+	 * the `write`/`edit` branches and the `bash` decision both keep using the plain options object with
+	 * this field absent). `evaluateToolPath` itself does not know or care which tool is calling it --
+	 * the read-only guarantee is a property of WHO populates this field, not of this function refusing
+	 * to look at it, exactly like `additionalProtectedPaths` above is already "whichever list the
+	 * caller assembles, evaluated exactly as given."
+	 *
+	 * Real motivation: Gate 8's second pass found that the 44 built-in skills a session's system prompt
+	 * already discloses by name+description+`<location>` (FR-5) live OUTSIDE any user workspaceRoot by
+	 * construction (packaged with the CLI, resolved via `import.meta.url` -- see
+	 * `conductor-cli`'s `builtin-paths.ts`), so a model instructed to `read` one for its body (FR-6) was
+	 * denied every single time -- announcing a location the system can never actually open is a
+	 * contradiction between FR-5 and FR-6, not a security boundary anyone intended. These entries are
+	 * expected to be paths that ALREADY passed `filterSkillsWithinRoots`/R20 before being disclosed to
+	 * the model (`skill-catalog.ts`'s `loadBuiltinSkillCatalog`) -- this option never opens a NEW,
+	 * unvetted directory to read access, it only stops re-denying locations a different mechanism
+	 * already proved contained and already put in the prompt.
+	 */
+	additionalAllowedReadRoots?: string[];
 }
 
 export interface PathCheckResult {
@@ -162,13 +185,26 @@ export function evaluateToolPath(rawPath: string, options: WorkspacePolicyOption
 		}
 	}
 
-	if (!isWithinRoot(targetReal, workspaceReal)) {
-		return {
-			allowed: false,
-			reason: `"${rawPath}" resolves outside the workspace root`,
-			realPath: targetReal,
-		};
+	if (isWithinRoot(targetReal, workspaceReal)) {
+		return { allowed: true, realPath: targetReal };
 	}
 
-	return { allowed: true, realPath: targetReal };
+	// FR-6/Gate 8 loop-back: a path outside workspaceRoot may still be allowed if it resolves into one
+	// of the already-vetted extra roots the caller supplied (see this field's own doc comment above for
+	// why this can never widen write/edit/bash — only whichever caller populates the field decides
+	// that). Checked AFTER workspace containment (the common case stays a single check) but the
+	// protected-paths loop above still ran first regardless, so a protected path is never rescued by
+	// being inside an allowed-read root either.
+	for (const readRoot of options.additionalAllowedReadRoots ?? []) {
+		const readRootReal = realpathOfExistingAncestorOrLexical(readRoot);
+		if (isWithinRoot(targetReal, readRootReal)) {
+			return { allowed: true, realPath: targetReal };
+		}
+	}
+
+	return {
+		allowed: false,
+		reason: `"${rawPath}" resolves outside the workspace root`,
+		realPath: targetReal,
+	};
 }

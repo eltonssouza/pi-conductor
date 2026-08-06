@@ -1,4 +1,20 @@
+export {
+	BUILTIN_GATE_ROLES,
+	BUILTIN_ROLES,
+	type BuiltinRoleSpec,
+	findBuiltinRole,
+	gatesForBuiltinRole,
+	skillsForBuiltinRole,
+} from "./builtin-roles-data.ts";
 export { type ConfigSummary, getConfigSummary, summarizeConfig } from "./config-summary.ts";
+export {
+	buildMergedGraph,
+	type DelegationGraph,
+	type DelegationGraphError,
+	findCycle,
+	type ValidateDelegationGraphResult,
+	validateDelegationGraph,
+} from "./delegation-graph.ts";
 export { ConfigNotFoundError, ConfigParseError, ConfigValidationError, WorkspaceContainmentError } from "./errors.ts";
 export {
 	type BuiltinPolicyDefaults,
@@ -21,6 +37,29 @@ export {
 	type TrustEntry,
 } from "./policy-trust-store.ts";
 export { readConfig } from "./read-config.ts";
+export {
+	buildRoleRegistry,
+	type ConductorRole,
+	isToolAllowed,
+	listRoles,
+	type ModelRole,
+	type ResolveRoleResult,
+	type RoleApprovalPolicy,
+	type RoleDiagnostic,
+	type RoleListEntry,
+	type RoleProvenanceSource,
+	type RoleRegistry,
+	resolveRole,
+} from "./role-loader.ts";
+export {
+	loadRoleTrustStore,
+	ROLE_TRUST_STORE_SCHEMA_VERSION,
+	type RoleTrustEntry,
+	type RoleTrustStore,
+	type RoleTrustStoreDocument,
+	type RoleTrustStoreOptions,
+	resolveRoleGrants,
+} from "./role-trust-store.ts";
 export { CONFIG_SCHEMA_VERSION, type ConductorConfig, PROJECT_TYPES, type ProjectType } from "./schema.ts";
 export { assertValidConfigShape } from "./schema-validation.ts";
 export {
