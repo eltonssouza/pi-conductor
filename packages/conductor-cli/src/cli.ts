@@ -20,6 +20,18 @@
 import { runChat } from "./commands/chat.ts";
 import { runConfigGet, runConfigSet, runConfigShow } from "./commands/config.ts";
 import { doctorExitCode, formatDoctorReport, runDoctor } from "./commands/doctor.ts";
+import {
+	createUnwiredGateStateStore,
+	type EvidenceAttachment,
+	type EvidenceRef,
+	formatGateStatusReport,
+	runGateApprove,
+	runGateCalibrate,
+	runGateEvidence,
+	runGateReject,
+	runGateStart,
+	runGateStatus,
+} from "./commands/gate.ts";
 import { describeInitOutcome, initExitCode, runInit } from "./commands/init.ts";
 import { formatRolesListReport, runRolesList } from "./commands/roles.ts";
 import { formatSkillsListReport, runSkillsList } from "./commands/skills.ts";
@@ -45,14 +57,97 @@ Usage:
   conductor chat
   conductor roles list
   conductor skills list
+  conductor gate status  [--demand <id>]
+  conductor gate start   <N> [--demand <id>]
+  conductor gate evidence --gate <N> --kind <git-commit|file|journal-entry|test-run> --ref <sha|path|id>
+                          [--note "..."] [--demand <id>]
+  conductor gate approve [--gate <N>] [--demand <id>]
+  conductor gate reject  --reason "..." [--gate <N>] [--demand <id>]
+  conductor gate calibrate --collapse <N,M,...> [--demand <id>]
   conductor --help
 
-See docs/adr/0002-fase1-cli-foundation.md for the full command contract, and
-docs/adr/0004-fase3-roles-skills-subagents.md for roles/skills.
+See docs/adr/0002-fase1-cli-foundation.md for the full command contract,
+docs/adr/0004-fase3-roles-skills-subagents.md for roles/skills, and
+docs/adr/0005-fase4-gate-state-machine.md for the gate state machine (gate * commands
+are Gate-5 scaffolding today -- GateStateStore wiring is a pending Gate 6 integration).
 `;
 
 function describeError(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
+}
+
+/** Minimal `--flag value` parser shared by the `gate` subcommands (mirrors `runInitCommand`'s own
+ * `args.includes("--force")` style, generalized to flags that take a value). Positional arguments
+ * (e.g. `gate start <N>`) are returned separately from recognized/unrecognized flags. */
+function parseFlags(
+	args: string[],
+	valueFlags: readonly string[],
+): { positional: string[]; flags: Record<string, string>; unrecognized: string[] } {
+	const positional: string[] = [];
+	const flags: Record<string, string> = {};
+	const unrecognized: string[] = [];
+
+	for (let i = 0; i < args.length; i++) {
+		const arg = args[i];
+		if (arg?.startsWith("--")) {
+			const name = arg.slice(2);
+			if (!valueFlags.includes(name)) {
+				unrecognized.push(arg);
+				continue;
+			}
+			const value = args[i + 1];
+			if (value === undefined) {
+				unrecognized.push(arg); // dangling flag with no value -- refused, never silently "" (fail-closed)
+				continue;
+			}
+			flags[name] = value;
+			i++;
+		} else if (arg !== undefined) {
+			positional.push(arg);
+		}
+	}
+
+	return { positional, flags, unrecognized };
+}
+
+/** Headless-by-default confirm channel: today's `conductor gate ...` is a bare, non-interactive CLI
+ * invocation (never a live chat/TUI session) -- there is no interactive channel wired at this call
+ * site yet (Gate 6 follow-up: a real TTY prompt satisfying the SAME two invariants `confirmOrDeny`
+ * already has, `!hasUI -> false` / `timeout/reject -> false`). Resolving `false` unconditionally is
+ * the fail-closed, honest placeholder: it can never be mistaken for "human said yes" (R22) -- a
+ * mandatory gate approved this way correctly falls through to `needs-human` (FR-11) rather than
+ * silently blocking forever on a channel nothing will ever answer. */
+async function headlessConfirmChannel(): Promise<boolean> {
+	return false;
+}
+
+function parseGateNumber(raw: string | undefined, label: string): number | { error: string } {
+	if (raw === undefined) return { error: `${label}: a gate number is required` };
+	const n = Number(raw);
+	if (!Number.isInteger(n) || n < 1 || n > 14) {
+		return { error: `${label}: "${raw}" is not a valid gate number (expected an integer 1-14)` };
+	}
+	return n;
+}
+
+const EVIDENCE_KINDS = ["git-commit", "file", "journal-entry", "test-run"] as const;
+
+function parseEvidenceRef(kind: string | undefined, ref: string | undefined): EvidenceRef | { error: string } {
+	if (!ref) return { error: "conductor gate evidence: --ref is required (a bare --note is not evidence, FR-5)" };
+	switch (kind) {
+		case "git-commit":
+			return { kind: "git-commit", sha: ref };
+		case "file":
+			return { kind: "file", path: ref };
+		case "journal-entry":
+			return { kind: "journal-entry", id: ref };
+		case "test-run":
+			return { kind: "test-run", id: ref };
+		default:
+			return {
+				error: `conductor gate evidence: --kind must be one of ${EVIDENCE_KINDS.join(", ")} (got "${kind ?? ""}")`,
+			};
+	}
 }
 
 async function runInitCommand(args: string[], io: CliIO): Promise<number> {
@@ -179,6 +274,202 @@ async function runSkillsCommand(args: string[], io: CliIO): Promise<number> {
 	return 1;
 }
 
+const DEFAULT_DEMAND_ID = "default";
+
+/**
+ * `conductor gate *` (Gate 5, Fase 4 "Gates e evidências"). Argument parsing/shape validation here is
+ * ordinary CLI plumbing (mirrors `runRolesCommand`/`runConfigCommand`'s own style) and is real, not a
+ * stub -- but every subcommand's SUBSTANTIVE behavior is delegated to `commands/gate.ts`'s `run*`
+ * functions, which are all Gate-5 stubs that throw "not implemented" (see that file's own header).
+ * `createUnwiredGateStateStore()` is likewise an honest placeholder, not a real store -- see
+ * `commands/gate.ts`'s header for the pending integration with the parallel GateStateStore stream.
+ */
+async function runGateCommand(args: string[], io: CliIO): Promise<number> {
+	const [sub, ...rest] = args;
+	const store = createUnwiredGateStateStore();
+
+	if (sub === "status") {
+		const { positional, flags, unrecognized } = parseFlags(rest, ["demand"]);
+		if (positional.length > 0 || unrecognized.length > 0) {
+			io.stderr.write(`conductor gate status: unrecognized argument(s): ${[...positional, ...unrecognized].join(" ")}\n`);
+			return 1;
+		}
+		try {
+			const snapshot = runGateStatus({ cwd: io.cwd, demandId: flags.demand ?? DEFAULT_DEMAND_ID, store });
+			io.stdout.write(formatGateStatusReport(snapshot));
+			return 0;
+		} catch (error) {
+			io.stderr.write(`conductor gate status: ${describeError(error)}\n`);
+			return 1;
+		}
+	}
+
+	if (sub === "start") {
+		const { positional, flags, unrecognized } = parseFlags(rest, ["demand"]);
+		if (unrecognized.length > 0) {
+			io.stderr.write(`conductor gate start: unrecognized argument(s): ${unrecognized.join(" ")}\n`);
+			return 1;
+		}
+		if (positional.length > 1) {
+			io.stderr.write(`conductor gate start: unrecognized argument(s): ${positional.slice(1).join(" ")}\n`);
+			return 1;
+		}
+		const gate = parseGateNumber(positional[0], "conductor gate start");
+		if (typeof gate !== "number") {
+			io.stderr.write(`${gate.error}\n`);
+			return 1;
+		}
+		try {
+			const snapshot = runGateStart({ cwd: io.cwd, demandId: flags.demand ?? DEFAULT_DEMAND_ID, store, gate });
+			io.stdout.write(formatGateStatusReport(snapshot));
+			return 0;
+		} catch (error) {
+			io.stderr.write(`conductor gate start: ${describeError(error)}\n`);
+			return 1;
+		}
+	}
+
+	if (sub === "evidence") {
+		const { positional, flags, unrecognized } = parseFlags(rest, ["demand", "gate", "kind", "ref", "note"]);
+		if (positional.length > 0 || unrecognized.length > 0) {
+			io.stderr.write(
+				`conductor gate evidence: unrecognized argument(s): ${[...positional, ...unrecognized].join(" ")}\n`,
+			);
+			return 1;
+		}
+		const gate = parseGateNumber(flags.gate, "conductor gate evidence: --gate");
+		if (typeof gate !== "number") {
+			io.stderr.write(`${gate.error}\n`);
+			return 1;
+		}
+		const ref = parseEvidenceRef(flags.kind, flags.ref);
+		if ("error" in ref) {
+			io.stderr.write(`${ref.error}\n`);
+			return 1;
+		}
+		try {
+			const attachment: EvidenceAttachment = { ref, provenance: "author-declared", note: flags.note };
+			const snapshot = runGateEvidence({
+				cwd: io.cwd,
+				demandId: flags.demand ?? DEFAULT_DEMAND_ID,
+				store,
+				gate,
+				attachment,
+			});
+			io.stdout.write(formatGateStatusReport(snapshot));
+			return 0;
+		} catch (error) {
+			io.stderr.write(`conductor gate evidence: ${describeError(error)}\n`);
+			return 1;
+		}
+	}
+
+	if (sub === "approve") {
+		const { positional, flags, unrecognized } = parseFlags(rest, ["demand", "gate"]);
+		if (positional.length > 0 || unrecognized.length > 0) {
+			io.stderr.write(
+				`conductor gate approve: unrecognized argument(s): ${[...positional, ...unrecognized].join(" ")}\n`,
+			);
+			return 1;
+		}
+		const gateArg = flags.gate === undefined ? undefined : parseGateNumber(flags.gate, "conductor gate approve: --gate");
+		if (gateArg !== undefined && typeof gateArg !== "number") {
+			io.stderr.write(`${gateArg.error}\n`);
+			return 1;
+		}
+		try {
+			// gate is resolved from currentGate by runGateApprove when --gate is omitted (Gate 6); 0 is
+			// never a valid gate number and is used here only as an explicit "unset" sentinel the stub
+			// signature still requires today.
+			const snapshot = await runGateApprove({
+				cwd: io.cwd,
+				demandId: flags.demand ?? DEFAULT_DEMAND_ID,
+				store,
+				gate: gateArg ?? 0,
+				confirm: headlessConfirmChannel,
+				source: "cli:gate-approve",
+			});
+			io.stdout.write(formatGateStatusReport(snapshot));
+			return 0;
+		} catch (error) {
+			io.stderr.write(`conductor gate approve: ${describeError(error)}\n`);
+			return 1;
+		}
+	}
+
+	if (sub === "reject") {
+		const { positional, flags, unrecognized } = parseFlags(rest, ["demand", "gate", "reason"]);
+		if (positional.length > 0 || unrecognized.length > 0) {
+			io.stderr.write(
+				`conductor gate reject: unrecognized argument(s): ${[...positional, ...unrecognized].join(" ")}\n`,
+			);
+			return 1;
+		}
+		if (!flags.reason) {
+			io.stderr.write('conductor gate reject: usage: conductor gate reject --reason "..." [--gate <N>]\n');
+			return 1;
+		}
+		const gateArg = flags.gate === undefined ? undefined : parseGateNumber(flags.gate, "conductor gate reject: --gate");
+		if (gateArg !== undefined && typeof gateArg !== "number") {
+			io.stderr.write(`${gateArg.error}\n`);
+			return 1;
+		}
+		try {
+			const snapshot = runGateReject({
+				cwd: io.cwd,
+				demandId: flags.demand ?? DEFAULT_DEMAND_ID,
+				store,
+				gate: gateArg ?? 0,
+				reason: flags.reason,
+			});
+			io.stdout.write(formatGateStatusReport(snapshot));
+			return 0;
+		} catch (error) {
+			io.stderr.write(`conductor gate reject: ${describeError(error)}\n`);
+			return 1;
+		}
+	}
+
+	if (sub === "calibrate") {
+		const { positional, flags, unrecognized } = parseFlags(rest, ["demand", "collapse"]);
+		if (positional.length > 0 || unrecognized.length > 0) {
+			io.stderr.write(
+				`conductor gate calibrate: unrecognized argument(s): ${[...positional, ...unrecognized].join(" ")}\n`,
+			);
+			return 1;
+		}
+		if (!flags.collapse) {
+			io.stderr.write("conductor gate calibrate: usage: conductor gate calibrate --collapse <N,M,...>\n");
+			return 1;
+		}
+		const collapse = flags.collapse.split(",").map((s) => Number(s.trim()));
+		if (collapse.some((n) => !Number.isInteger(n) || n < 1 || n > 14)) {
+			io.stderr.write(`conductor gate calibrate: --collapse must be a comma-separated list of gate numbers 1-14 (got "${flags.collapse}")\n`);
+			return 1;
+		}
+		try {
+			const snapshot = await runGateCalibrate({
+				cwd: io.cwd,
+				demandId: flags.demand ?? DEFAULT_DEMAND_ID,
+				store,
+				collapse,
+				confirm: headlessConfirmChannel,
+				source: "cli:gate-calibrate",
+			});
+			io.stdout.write(formatGateStatusReport(snapshot));
+			return 0;
+		} catch (error) {
+			io.stderr.write(`conductor gate calibrate: ${describeError(error)}\n`);
+			return 1;
+		}
+	}
+
+	io.stderr.write(
+		`conductor gate: unknown subcommand "${sub ?? ""}". Usage: status | start <N> | evidence | approve | reject | calibrate\n`,
+	);
+	return 1;
+}
+
 export async function runCli(argv: string[], io: CliIO): Promise<number> {
 	const [command, ...rest] = argv;
 
@@ -194,6 +485,8 @@ export async function runCli(argv: string[], io: CliIO): Promise<number> {
 				return await runRolesCommand(rest, io);
 			case "skills":
 				return await runSkillsCommand(rest, io);
+			case "gate":
+				return await runGateCommand(rest, io);
 			case "chat":
 				return await runChat({ cwd: io.cwd, args: rest, stdout: io.stdout, stderr: io.stderr });
 			case "--help":

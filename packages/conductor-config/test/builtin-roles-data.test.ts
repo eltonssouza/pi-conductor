@@ -20,6 +20,7 @@ import {
 	type BuiltinRoleSpec,
 	findBuiltinRole,
 	gatesForBuiltinRole,
+	MANDATORY_GATES,
 	skillsForBuiltinRole,
 } from "../src/builtin-roles-data.ts";
 import { validateDelegationGraph } from "../src/delegation-graph.ts";
@@ -103,6 +104,41 @@ describe("findBuiltinRole / skillsForBuiltinRole / gatesForBuiltinRole", () => {
 	it("computes an empty gates list for a role no gate names directly", () => {
 		// data-engineer never appears in any GATE_ROLES tuple (only reached via spawns).
 		expect(gatesForBuiltinRole("data-engineer")).toEqual([]);
+	});
+});
+
+// ---------------------------------------------------------------------------------------------
+// MANDATORY_GATES — Fase 4, ADR 0005 §4/§18 R23; gate3-addendum-fase4.md T42; BR-10.
+//
+// Resolves a real discrepancy, not invented here (see MANDATORY_GATES's own doc comment in
+// builtin-roles-data.ts): this project's root CLAUDE.md prose lists {3,5,7,8}; the CODE that
+// `conductor-main`'s `gate_land.py` landing guard actually enforces (`roles.py:MANDATORY_GATES`)
+// is {3,5,7,8,9}. Fase 4's live GateState floor was decided (Gate 2/4 of this demand, journal
+// 2026-08-06) to follow the enforced code, not the prose — these tests pin THAT decision, not the
+// unresolved CLAUDE.md prose gap (out of this demand's scope).
+// ---------------------------------------------------------------------------------------------
+
+describe("MANDATORY_GATES — the live-enforced floor for GateState (R23/BR-10)", () => {
+	it("is exactly {3, 5, 7, 8, 9} — the gate_land.py/roles.py set, not the CLAUDE.md prose subset {3,5,7,8}", () => {
+		expect([...MANDATORY_GATES].sort((a, b) => a - b)).toEqual([3, 5, 7, 8, 9]);
+	});
+
+	it("is a genuine Set with working has() semantics (not an array masquerading as ReadonlySet)", () => {
+		expect(MANDATORY_GATES.has(3)).toBe(true);
+		expect(MANDATORY_GATES.has(5)).toBe(true);
+		expect(MANDATORY_GATES.has(7)).toBe(true);
+		expect(MANDATORY_GATES.has(8)).toBe(true);
+		expect(MANDATORY_GATES.has(9)).toBe(true);
+	});
+
+	it("does NOT include gates outside the floor (1,2,4,6,10-14 are collapsible, per CLAUDE.md's calibration table)", () => {
+		for (const collapsible of [1, 2, 4, 6, 10, 11, 12, 13, 14]) {
+			expect(MANDATORY_GATES.has(collapsible), `gate ${collapsible} must not be in the mandatory floor`).toBe(false);
+		}
+	});
+
+	it("has exactly 5 members — every member accounted for, none silently duplicated or dropped", () => {
+		expect(MANDATORY_GATES.size).toBe(5);
 	});
 });
 
@@ -192,6 +228,21 @@ describe.skipIf(!rolesPyAvailable)("BUILTIN_ROLES vs. the real conductor-main/co
 		for (let gate = 1; gate <= 14; gate++) {
 			expect([...BUILTIN_GATE_ROLES[gate]], `gate ${gate}`).toEqual(parsed.gateRoles[gate]);
 		}
+	});
+
+	// Fase 4 (ADR 0005 §4/BR-10): MANDATORY_GATES was resolved to follow the CODE roles.py actually
+	// enforces via gate_land.py, not the CLAUDE.md prose subset — this is the direct proof of that
+	// claim, not an assumption. `roles.py` has no ROLES-literal-shaped structure for this constant
+	// (it is a bare `frozenset({...})` module-level literal), so this is a small, independent
+	// regex, not a reuse of `parseRolesPy`'s ROLES/GATE_ROLES-specific parsing.
+	it("matches roles.py's own MANDATORY_GATES frozenset literal exactly", () => {
+		const source = readFileSync(rolesPyPath, "utf-8");
+		const match = source.match(/MANDATORY_GATES[^=]*=\s*frozenset\(\{([^}]*)\}\)/);
+		expect(match, "could not locate the MANDATORY_GATES frozenset literal in roles.py").not.toBeNull();
+		const referenceGates = Array.from(match?.[1].matchAll(/\d+/g) ?? [])
+			.map((m) => Number(m[0]))
+			.sort((a, b) => a - b);
+		expect([...MANDATORY_GATES].sort((a, b) => a - b)).toEqual(referenceGates);
 	});
 });
 

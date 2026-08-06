@@ -277,6 +277,33 @@ export const BUILTIN_GATE_ROLES: Readonly<Record<number, readonly string[]>> = {
 	14: ["application-security-engineer", "security-engineer", "site-reliability-engineer", "ciso"],
 };
 
+/**
+ * The live-enforced mandatory-gate floor for the `GateState` machine (Fase 4, ADR
+ * 0005-fase4-gate-state-machine.md §4/§18, R23; gate3-addendum-fase4.md T42/BR-10).
+ *
+ * Resolves a real discrepancy found while specifying Fase 4, not invented here: this project's own
+ * root `CLAUDE.md` ("Never collapse these gates") names `{3, 5, 7, 8}` as prose guidance for a
+ * model following the flow inside one session; `conductor-main/conductor/roles.py:MANDATORY_GATES`
+ * — the constant `gate_land.py`'s landing guard ACTUALLY enforces at `git push` time, in code, not
+ * prose — is `frozenset({3, 5, 7, 8, 9})`, five gates, including 9 (application pentest). Gate 2 of
+ * this demand recorded the discrepancy (BR-10) without resolving it; Gate 4 (the ADR above)
+ * resolved it FOR THE LIVE `GateState` FLOOR as `{3, 5, 7, 8, 9}` — the set a machine actually
+ * enforces beats prose a model might drift from, and this session's own Gate 9 already found and
+ * fixed a real critical (a `--yes` bypass) in an earlier phase, which is exactly the empirical case
+ * for treating the application pentest gate as non-negotiable too. (The root `CLAUDE.md`'s `{3, 5,
+ * 7, 8}` list is a separate, pre-existing documentation gap in the parent `conductor` project, out
+ * of this demand's scope to edit.)
+ *
+ * Single canonical source (BR-10 — "nunca duplicado à mão em dois lugares"), living beside
+ * `BUILTIN_GATE_ROLES` for the same reason: both are the one place in this codebase that answers a
+ * question about the 14-gate flow's own structure, never re-derived or hand-copied by a second
+ * file. `gate-state-policy.ts`'s `evaluateAdvance`/`isMandatorySatisfied`/`evaluateCalibration`
+ * (packages/conductor-runtime) take this set as a parameter rather than importing it directly, so
+ * that package's zero-dependency-on-`@conductor/config` invariant (ADR 0002 §3.1) still holds — the
+ * CLI composition root (Gate 6/out of this scope) is what actually passes `MANDATORY_GATES` through.
+ */
+export const MANDATORY_GATES: ReadonlySet<number> = new Set([3, 5, 7, 8, 9]);
+
 /** Looks up a built-in role spec by slug, or `undefined` if it is not one of the 37. */
 export function findBuiltinRole(slug: string): BuiltinRoleSpec | undefined {
 	return BUILTIN_ROLES.find((role) => role.slug === slug);
