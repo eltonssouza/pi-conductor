@@ -184,6 +184,20 @@ export async function createConductorSession(options: CreateConductorSessionOpti
 		...(options.policy?.protectedPaths ?? []),
 	];
 
+	// FR-6/Gate 8 loop-back (Gate 4 decision, journal 2026-08-06): the `read` tool must be able to load
+	// the body of any skill this session's system prompt already discloses by name+description+
+	// `<location>` (FR-5) -- otherwise the model is instructed to do something it can never actually do
+	// (Gate 8's second-pass finding: every one of the 44 built-in skills lives outside any user
+	// workspaceRoot by construction, so every real `read` attempt was denied). Derived ONCE, here, from
+	// the SAME `additionalSkillPaths` list already threaded to both resourceLoader branches below --
+	// deliberately NOT a second, independently-settable option: `additionalSkillPaths` is already the
+	// caller's own vetted (`filterSkillsWithinRoots`/R20-contained) list (see this option's own doc
+	// comment above), so the roots of those entries ARE the extra read-allowance, never an invented
+	// second source of truth. Only the `read` branch of the permission-gate ever consults this
+	// (workspace-policy.ts's own doc comment on `additionalAllowedReadRoots`); write/edit/bash are
+	// unaffected because neither branch below forwards it to anything but the read check.
+	const additionalAllowedReadRoots = options.additionalSkillPaths ?? [];
+
 	// R13/R14/T41 (ADR 0004 §2.2/§6/§8): constructed ONCE, explicitly, at this composition root --
 	// the exact same default path `permission-gate.ts`'s own `createPermissionGateExtension` would
 	// have built internally if left to its own default (`join(workspaceRoot, ".conductor",
@@ -209,6 +223,7 @@ export async function createConductorSession(options: CreateConductorSessionOpti
 				agentDir,
 				config: options.config,
 				additionalProtectedPaths: mergedProtectedPaths,
+				additionalAllowedReadRoots,
 				approvalTimeoutMs: options.approvalTimeoutMs,
 				onDecision: options.onDecision,
 				policy: options.policy,
@@ -236,6 +251,7 @@ export async function createConductorSession(options: CreateConductorSessionOpti
 					createPermissionGateExtension({
 						workspaceRoot: options.workspaceRoot,
 						additionalProtectedPaths: mergedProtectedPaths,
+						additionalAllowedReadRoots,
 						approvalTimeoutMs: options.approvalTimeoutMs,
 						onDecision: options.onDecision,
 						policy: options.policy,

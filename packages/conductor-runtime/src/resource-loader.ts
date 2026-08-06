@@ -95,6 +95,17 @@ export interface ConductorResourceLoaderOptions {
 	 * already keeps.
 	 */
 	additionalSkillPaths?: string[];
+	/**
+	 * FR-6/Gate 8 loop-back (Gate 4 decision, journal 2026-08-06): forwarded as-is to this class's own
+	 * internal `createPermissionGateExtension` call below, so the `read` tool may load the body of any
+	 * skill this loader's `additionalSkillPaths` already discloses via name+description+`<location>`.
+	 * `session.ts` derives this value from that SAME `additionalSkillPaths` list (never a second,
+	 * independently-sourced allowlist — see `session.ts`'s own composition of this field) before
+	 * constructing `ConductorResourceLoader`; this class stays a dumb pass-through, same discipline as
+	 * every other option here. Omitted or empty: unchanged prior behavior (read stays scoped to
+	 * `workspaceRoot` only).
+	 */
+	additionalAllowedReadRoots?: string[];
 	/** Passed through to the underlying permission-gate (same field CreateConductorSessionOptions exposes). */
 	approvalTimeoutMs?: number;
 	/** Observability hook -- same contract as `CreateConductorSessionOptions.onDecision`. Must never throw. */
@@ -172,6 +183,7 @@ export class ConductorResourceLoader {
 				createPermissionGateExtension({
 					workspaceRoot: options.workspaceRoot,
 					additionalProtectedPaths: options.additionalProtectedPaths,
+					additionalAllowedReadRoots: options.additionalAllowedReadRoots,
 					approvalTimeoutMs: options.approvalTimeoutMs,
 					onDecision: options.onDecision,
 					policy: options.policy,

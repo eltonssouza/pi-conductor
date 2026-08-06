@@ -26,7 +26,12 @@ import { evaluateToolPath, type WorkspacePolicyOptions } from "./workspace-polic
  *
  * Built entirely on pi.on("tool_call") (recon §2) — a genuine pre-execution hook. Secure defaults
  * (threat model §5):
- *   1. read: allowed only inside the workspace root; no approval prompt.
+ *   1. read: allowed inside the workspace root, OR inside one of `additionalAllowedReadRoots` (FR-6/
+ *      Gate 8 loop-back — already R20-vetted skill locations disclosed via FR-5's name+description+
+ *      `<location>` catalog, see workspace-policy.ts's own doc comment on that field); no approval
+ *      prompt either way. write/edit/bash below never see this widening (they keep using the plain
+ *      `policyOptions`, with no `additionalAllowedReadRoots` populated) — least privilege scoped to
+ *      exactly the tool whose own promised behavior needs it.
  *   2. write / edit: require BOTH workspace containment (protected-paths + real-path
  *      canonicalization) AND ctx.ui.confirm() approval with a fail-closed timeout.
  *   3. bash: routed through the Permission Engine's decide() (permission-engine.ts) — the Policy
@@ -146,7 +151,17 @@ async function decideToolCall(
 	// CustomToolCallEvent member has `toolName: string`, so a plain switch/if on the literal
 	// string does not fully narrow `event.input` away from `Record<string, unknown>`.
 	if (isToolCallEventType("read", event)) {
-		const check = evaluateToolPath(event.input.path, policyOptions);
+		// FR-6/Gate 8 loop-back (Gate 4 decision, journal 2026-08-06): a SEPARATE options value from
+		// `policyOptions` above, scoped to this branch alone -- `write`/`edit` below and the `bash`
+		// decision further down both keep using the plain `policyOptions`, which never carries
+		// `additionalAllowedReadRoots`. This is what makes the widening read-only by construction: it is
+		// not that `evaluateToolPath` refuses to honor the field for other tools, it is that no other
+		// tool's options object here is ever built with it populated.
+		const readPolicyOptions: WorkspacePolicyOptions = {
+			...policyOptions,
+			additionalAllowedReadRoots: options.additionalAllowedReadRoots,
+		};
+		const check = evaluateToolPath(event.input.path, readPolicyOptions);
 		return check.allowed
 			? { block: false, permissionLevel: "read", approvalMethod: "none" }
 			: { block: true, reason: check.reason, permissionLevel: "read", approvalMethod: "none" };

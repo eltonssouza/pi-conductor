@@ -32,7 +32,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createConductorSession } from "../src/session.ts";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { afterEach, beforeEach, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { registerFakeModel } from "./support/fake-model.ts";
 import { createTestUiContext } from "./support/test-ui.ts";
 import { createScratchWorkspace, type ScratchWorkspace } from "./support/workspace.ts";
@@ -163,3 +163,126 @@ it(
 	},
 	20_000,
 );
+
+// FR-6 / Gate 8 loop-back (Gate 4 decision, journal 2026-08-06): the two tests above place their
+// fixture skill INSIDE workspace.root (join(workspace.root, "fixture-skills")) -- a shape that never
+// occurs in real production, where the 44 built-in skills are packaged with the CLI and resolved via
+// import.meta.url (conductor-cli's builtin-paths.ts's getBuiltinSkillsDir()), i.e. always OUTSIDE any
+// user's workspaceRoot. Gate 8's second pass reproduced the real defect live (conductor chat against a
+// real scratch project, real skill location) and found permission-gate.ts's `read` branch denied it
+// every time ("resolves outside the workspace root", confirmed in .conductor/audit.jsonl) -- FR-5
+// announces the location, FR-6 promises `read` can load it, but the promise was broken for the one
+// case that matters today. This block reproduces that exact shape: a SEPARATE scratch directory (never
+// nested under workspace.root) standing in for the packaged skills directory.
+describe("FR-6 (real production shape): the skill lives OUTSIDE workspaceRoot, exactly like the 44 built-in skills packaged with the CLI", () => {
+	let externalSkillsRoot: ScratchWorkspace;
+	let externalSkillFilePath: string;
+
+	beforeEach(() => {
+		externalSkillsRoot = createScratchWorkspace("conductor-runtime-external-skills-");
+		const skillDir = join(externalSkillsRoot.root, "design-service");
+		mkdirSync(skillDir, { recursive: true });
+		externalSkillFilePath = join(skillDir, "SKILL.md");
+		writeFileSync(
+			externalSkillFilePath,
+			["---", "name: design-service", `description: ${SKILL_DESCRIPTION}`, "---", "", "# Design Service", "", SKILL_BODY_MARKER].join(
+				"\n",
+			),
+			"utf-8",
+		);
+	});
+
+	afterEach(() => {
+		externalSkillsRoot.cleanup();
+	});
+
+	it(
+		"a real `read` tool call against a skill located outside workspaceRoot succeeds and returns the body (RED before the Gate 6 fix: was denied with 'resolves outside the workspace root')",
+		async () => {
+			const modelRuntime = await ModelRuntime.create({
+				authPath: join(workspace.agentDir, "auth.json"),
+				modelsPath: join(workspace.agentDir, "models.json"),
+				allowModelNetwork: false,
+			});
+			const fakeModel = registerFakeModel(modelRuntime, "conductor-fake", [
+				{ toolCalls: [{ name: "read", args: { path: externalSkillFilePath } }] },
+				{ text: "done" },
+			]);
+
+			// additionalSkillPaths carries the SAME shape chat.ts's real composition root uses --
+			// skillCatalog.skills.map(skill => skill.realPath), i.e. individual, already R20-vetted
+			// SKILL.md file paths, never a directory the caller invents ad hoc.
+			const conductorSession = await createConductorSession({
+				workspaceRoot: workspace.root,
+				model: fakeModel.model,
+				modelRuntime,
+				agentDir: workspace.agentDir,
+				additionalSkillPaths: [externalSkillFilePath],
+			});
+
+			const events: CapturedToolEvent[] = [];
+			conductorSession.session.subscribe((event) => {
+				if (event.type === "tool_execution_end") events.push({ toolName: event.toolName, result: event.result });
+			});
+
+			await conductorSession.session.bindExtensions({ uiContext: createTestUiContext(), mode: "print" });
+			await conductorSession.session.prompt("Follow the design-service skill.");
+			await waitUntil(() => events.some((e) => e.toolName === "read"));
+
+			const readEvent = events.find((e) => e.toolName === "read");
+			expect(readEvent).toBeDefined();
+			// GREEN (post-fix): the read tool's own result carries the real body. Pre-fix, this same
+			// assertion failed because the result was a permission-gate denial
+			// ("... resolves outside the workspace root") that never contains the body at all.
+			expect(JSON.stringify(readEvent!.result)).toContain(SKILL_BODY_MARKER);
+
+			conductorSession.dispose();
+		},
+		20_000,
+	);
+
+	it(
+		"a `read` for a path outside BOTH workspaceRoot and the disclosed skill roots is still denied (the fix is not a general read bypass)",
+		async () => {
+			const modelRuntime = await ModelRuntime.create({
+				authPath: join(workspace.agentDir, "auth.json"),
+				modelsPath: join(workspace.agentDir, "models.json"),
+				allowModelNetwork: false,
+			});
+			const unrelatedRoot = createScratchWorkspace("conductor-runtime-unrelated-");
+			const unrelatedFile = join(unrelatedRoot.root, "secret.txt");
+			writeFileSync(unrelatedFile, "top secret", "utf-8");
+
+			const fakeModel = registerFakeModel(modelRuntime, "conductor-fake", [
+				{ toolCalls: [{ name: "read", args: { path: unrelatedFile } }] },
+				{ text: "done" },
+			]);
+
+			// Same proven observation channel acceptance.test.ts uses for a blocked call (the
+			// permission-gate's own `onDecision` hook), rather than inferring the shape a blocked
+			// tool_execution_end's `result` takes at the underlying SDK level.
+			const decisions: Array<{ toolName: string; allowed: boolean; reason?: string }> = [];
+
+			const conductorSession = await createConductorSession({
+				workspaceRoot: workspace.root,
+				model: fakeModel.model,
+				modelRuntime,
+				agentDir: workspace.agentDir,
+				additionalSkillPaths: [externalSkillFilePath],
+				onDecision: (decision) => decisions.push(decision),
+			});
+
+			await conductorSession.session.bindExtensions({ uiContext: createTestUiContext(), mode: "print" });
+			await conductorSession.session.prompt("Read the unrelated secret file.");
+			await waitUntil(() => decisions.some((d) => d.toolName === "read"));
+
+			const readDecision = decisions.find((d) => d.toolName === "read");
+			expect(readDecision?.allowed).toBe(false);
+			expect(readDecision?.reason).toMatch(/outside the workspace root/);
+
+			unrelatedRoot.cleanup();
+			conductorSession.dispose();
+		},
+		20_000,
+	);
+});
