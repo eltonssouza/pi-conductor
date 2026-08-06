@@ -18,7 +18,7 @@
  */
 
 import { join } from "node:path";
-import type { ResolveEvidenceRefContext } from "@conductor/runtime";
+import { TOTAL_FLOW_GATES, type ResolveEvidenceRefContext } from "@conductor/runtime";
 import { runChat } from "./commands/chat.ts";
 import { runConfigGet, runConfigSet, runConfigShow } from "./commands/config.ts";
 import { doctorExitCode, formatDoctorReport, runDoctor } from "./commands/doctor.ts";
@@ -129,8 +129,8 @@ async function headlessConfirmChannel(): Promise<boolean> {
 function parseGateNumber(raw: string | undefined, label: string): number | { error: string } {
 	if (raw === undefined) return { error: `${label}: a gate number is required` };
 	const n = Number(raw);
-	if (!Number.isInteger(n) || n < 1 || n > 14) {
-		return { error: `${label}: "${raw}" is not a valid gate number (expected an integer 1-14)` };
+	if (!Number.isInteger(n) || n < 1 || n > TOTAL_FLOW_GATES) {
+		return { error: `${label}: "${raw}" is not a valid gate number (expected an integer 1-${TOTAL_FLOW_GATES})` };
 	}
 	return n;
 }
@@ -478,9 +478,9 @@ async function runGateCommand(args: string[], io: CliIO): Promise<number> {
 			return 1;
 		}
 		const collapse = flags.collapse.split(",").map((s) => Number(s.trim()));
-		if (collapse.some((n) => !Number.isInteger(n) || n < 1 || n > 14)) {
+		if (collapse.some((n) => !Number.isInteger(n) || n < 1 || n > TOTAL_FLOW_GATES)) {
 			io.stderr.write(
-				`conductor gate calibrate: --collapse must be a comma-separated list of gate numbers 1-14 (got "${flags.collapse}")\n`,
+				`conductor gate calibrate: --collapse must be a comma-separated list of gate numbers 1-${TOTAL_FLOW_GATES} (got "${flags.collapse}")\n`,
 			);
 			return 1;
 		}

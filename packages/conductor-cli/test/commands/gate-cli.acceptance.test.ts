@@ -12,6 +12,7 @@
  */
 
 import { execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { runCli } from "../../src/cli.ts";
@@ -76,6 +77,24 @@ describe("conductor gate (end-to-end dispatch) -- argument shape (real, GREEN to
 		const { io, stderr } = createCapturingIo(project.root);
 
 		const code = await runCli(["gate", "start", "banana"], io);
+
+		expect(code).not.toBe(0);
+		expect(stderr()).toMatch(/not a valid gate number/);
+	});
+
+	it("rejects `gate start` with a gate number above the flow's 14 gates (out-of-range, not just non-numeric)", async () => {
+		const { io, stderr } = createCapturingIo(project.root);
+
+		const code = await runCli(["gate", "start", "15"], io);
+
+		expect(code).not.toBe(0);
+		expect(stderr()).toMatch(/not a valid gate number/);
+	});
+
+	it("rejects `gate start 0` (gate numbers are 1-indexed, 0 is never valid)", async () => {
+		const { io, stderr } = createCapturingIo(project.root);
+
+		const code = await runCli(["gate", "start", "0"], io);
 
 		expect(code).not.toBe(0);
 		expect(stderr()).toMatch(/not a valid gate number/);
@@ -257,5 +276,27 @@ describe("conductor gate (end-to-end dispatch) -- substantive behavior, against 
 
 		expect(code).not.toBe(0);
 		expect(stderr()).toMatch(/does not resolve/);
+	});
+
+	it("`gate evidence --kind git-commit` treats a shell-metacharacter-laden --ref as just an invalid sha -- never shell-interpreted (gitCommitExistsSync uses execFileSync's argv array, not a shell)", async () => {
+		project.write("README.md", "hello\n");
+		initRepoWithOneCommit(project.root, "feature/fase4-demo");
+		const { io, stderr } = createCapturingIo(project.root);
+		const maliciousRef = "$(touch injected.txt)`touch injected2.txt`; touch injected3.txt";
+
+		const code = await runCli(
+			["gate", "evidence", "--gate", "1", "--kind", "git-commit", "--ref", maliciousRef],
+			io,
+		);
+
+		expect(code).not.toBe(0);
+		expect(stderr()).toMatch(/does not resolve/);
+		// The real proof: none of the injected side-effect files exist -- git-status.ts's
+		// gitCommitExistsSync never spawns a shell (execFileSync with an argv array), so a payload
+		// that WOULD run as a command under a shell is instead passed to `git rev-parse --verify`
+		// as one inert, non-resolving revision string.
+		expect(existsSync(join(project.root, "injected.txt"))).toBe(false);
+		expect(existsSync(join(project.root, "injected2.txt"))).toBe(false);
+		expect(existsSync(join(project.root, "injected3.txt"))).toBe(false);
 	});
 });

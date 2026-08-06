@@ -194,6 +194,26 @@ describe("runGateApprove (FR-7/FR-8/FR-10/FR-11, R22/R23: sign-off persists via 
 
 		expect(snapshot.gates.find((g) => g.gate === 1)?.status).toBe("needs-human");
 	});
+
+	it("FR-13/ADR 0005 §15: re-approving an already-approved gate is idempotent -- never mints a second Approval", async () => {
+		const store = createFakeGateStore();
+		store.start(DEMAND, 1);
+
+		await runGateApprove({ cwd: "/tmp", demandId: DEMAND, store, gate: 1, confirm: alwaysApprove, source: "first" });
+		const snapshot = await runGateApprove({
+			cwd: "/tmp",
+			demandId: DEMAND,
+			store,
+			gate: 1,
+			confirm: alwaysApprove,
+			source: "second-attempt",
+		});
+
+		expect(snapshot.gates.find((g) => g.gate === 1)?.status).toBe("approved");
+		// Locks the ADR's own decision: re-approval REAFFIRMS state, it never grows approvalsCount
+		// (1, 2, 3, ...) on every retry of an already-closed gate.
+		expect(store.getRaw(DEMAND)?.gates.get(1)?.approvalsCount).toBe(1);
+	});
 });
 
 describe("runGateReject (FR-9: rejection blocks subsequent advance)", () => {

@@ -229,7 +229,12 @@ function isValidEnvelopeShape(value: unknown): value is GateStateEnvelopeV1 {
 // explicitly "started" yet.
 // ---------------------------------------------------------------------------------------------
 
-const TOTAL_FLOW_GATES = 14;
+/** The Conductor flow has exactly 14 gates (CLAUDE.md's own gate table) -- exported so every other
+ * package that needs to validate "is N a real gate number" (the CLI's own `--gate`/`--collapse`
+ * parsing, `cli.ts`) consults this SAME constant instead of an independently-typed literal `14` that
+ * could silently drift from this file's own bootstrap loop (quality-baseline category 4: no
+ * un-synced hardcoded assumptions). */
+export const TOTAL_FLOW_GATES = 14;
 
 function createDefaultGateState(options: GateStateStoreOptions): GateState {
 	const gates: Record<number, GateRecord> = {};

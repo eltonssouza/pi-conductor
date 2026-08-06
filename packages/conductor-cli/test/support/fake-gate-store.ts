@@ -120,6 +120,12 @@ export function createFakeGateStore(options: { branch?: string } = {}): FakeGate
 			if (!record || record.status === "not-started" || record.status === "rejected") {
 				throw new GateCommandError(`cannot approve gate ${gate}: it was never started (or is rejected)`);
 			}
+			// FR-13/ADR 0005 §15: re-approving an already-approved gate is idempotent -- reaffirms the
+			// existing state, never increments approvalsCount again (mirrors the real store's own guard,
+			// commands/gate-store.ts).
+			if (record.status === "approved") {
+				return snapshot(demandId);
+			}
 			// FR-8/BR-6: a mandatory gate cannot be approved with zero evidence.
 			if (MANDATORY_GATES.has(gate) && record.evidenceCount === 0) {
 				throw new GateCommandError(`cannot approve mandatory gate ${gate}: no evidence attached (BR-6)`);

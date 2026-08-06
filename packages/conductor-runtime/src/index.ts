@@ -61,6 +61,7 @@ export {
 	type GateStateMutationError,
 	type GateStateStore,
 	type GateStateStoreOptions,
+	TOTAL_FLOW_GATES,
 } from "./gate-state-store.ts";
 export {
 	decide,

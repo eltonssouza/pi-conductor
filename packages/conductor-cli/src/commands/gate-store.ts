@@ -223,6 +223,17 @@ export function createPersistedGateStateStore(options: PersistedGateStateStoreOp
 				if (!record || record.status === "not-started" || record.status === "rejected") {
 					throw new GateCommandError(`cannot approve gate ${gate}: it was never started (or is rejected)`);
 				}
+				// FR-13/ADR 0005 §15: approving an already-approved gate is deterministic and never
+				// ambiguous -- the ADR's own follow-up resolves this as IDEMPOTENT: reaffirm the existing
+				// state, never mint a second, redundant Approval. Without this guard every re-approve call
+				// below would unconditionally call mintHumanApproval again and append yet another genuine
+				// Approval (approvalsCount growing 1, 2, 3, ... on every retry of an already-closed gate) --
+				// exactly the "ambiguous" outcome FR-13 forbids. A caller that genuinely wants to redo
+				// sign-off must reopen the gate explicitly (`gate reject` then re-approve), a different,
+				// already-handled state transition, not this one.
+				if (record.status === "approved") {
+					return current;
+				}
 				// FR-8/BR-6/R25: a mandatory gate needs at least one RUNTIME-DERIVED evidence item, not
 				// merely a non-empty evidence list -- the same golden rule gate-state-policy.ts's own
 				// isMandatorySatisfied now consults (this pendency's sibling fix), applied here too so
