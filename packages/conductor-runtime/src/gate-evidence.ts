@@ -26,7 +26,15 @@
  * by import"). Do not let a future edit redeclare them a second time anywhere else (an earlier revision
  * of this file briefly inverted the direction -- importing FROM `gate-state.ts` instead -- before the
  * two concurrent streams converged on this ownership; see this file's git/edit history).
+ *
+ * GATE 6: `resolveEvidenceRef`/`hasSufficientEvidenceForMandatoryGate` implemented for real below.
+ * `resolveEvidenceRef`'s `file` branch reuses `resolveRealPath`/`isWithinRoot` (workspace-policy.ts) —
+ * the SAME fail-closed containment primitives write/edit already trust — rather than a second,
+ * ad-hoc path check (ADR 0005 §8's own note names this precedent explicitly).
  */
+
+import { existsSync } from "node:fs";
+import { isWithinRoot, resolveRealPath } from "./workspace-policy.ts";
 
 export type EvidenceRef =
 	| { kind: "git-commit"; sha: string }
@@ -81,7 +89,57 @@ export type ResolveEvidenceRefResult = { ok: true; provenance: EvidenceProvenanc
  * item.
  */
 export function resolveEvidenceRef(ref: EvidenceRef, ctx: ResolveEvidenceRefContext): ResolveEvidenceRefResult {
-	throw new Error("resolveEvidenceRef: not implemented -- Gate 6 (Fase 4, ADR 0005 §8/R25)");
+	try {
+		switch (ref.kind) {
+			case "git-commit":
+				// Injected collaborator (production: `git rev-parse --verify <sha>^{commit}` in repoRoot) —
+				// this function never shells out itself (testable without a real git binary/repo state).
+				return ctx.gitCommitExists(ctx.repoRoot, ref.sha)
+					? { ok: true, provenance: "author-declared" }
+					: { ok: false, reason: `git-commit evidence ref does not resolve in this repo: "${ref.sha}"` };
+
+			case "file": {
+				// existsSync FIRST: resolveRealPath deliberately does NOT throw for a not-yet-existing
+				// path (it walks up to the nearest existing ancestor so a not-yet-created file inside a
+				// symlink-escaping chain is still caught) — so a plain existence check is the only way to
+				// catch a genuinely dangling ref before asking "is it contained?".
+				if (!existsSync(ref.path)) {
+					return { ok: false, reason: `file evidence ref does not exist: "${ref.path}"` };
+				}
+				const realPath = resolveRealPath(ref.path, ctx.workspaceRoot);
+				const workspaceRealPath = resolveRealPath(ctx.workspaceRoot, ctx.workspaceRoot);
+				if (!isWithinRoot(realPath, workspaceRealPath)) {
+					return { ok: false, reason: `file evidence ref resolves outside the workspace root: "${ref.path}"` };
+				}
+				return { ok: true, provenance: "author-declared" };
+			}
+
+			case "test-run":
+				// R25 golden rule: only an id the RUNTIME itself recorded counts — an author-typed id that
+				// merely looks plausible is refused, not merely downgraded.
+				return ctx.runtimeRecordedTestRunIds.has(ref.id)
+					? { ok: true, provenance: "runtime-derived" }
+					: { ok: false, reason: `test-run evidence ref was never recorded by the runtime: "${ref.id}"` };
+
+			case "journal-entry":
+				return ctx.runtimeRecordedJournalEntryIds.has(ref.id)
+					? { ok: true, provenance: "runtime-derived" }
+					: { ok: false, reason: `journal-entry evidence ref was never recorded by the runtime: "${ref.id}"` };
+
+			default: {
+				// Exhaustiveness guard: a future EvidenceRef variant that forgets a case here is a compile
+				// error, not a silent fall-through that would otherwise need its own could-not-verify path.
+				const exhaustive: never = ref;
+				return { ok: false, reason: `unknown evidence ref kind: ${JSON.stringify(exhaustive)}` };
+			}
+		}
+	} catch (error) {
+		// R25(i)/BR-9 mirror: any I/O uncertainty (an unreadable filesystem entry, a thrown collaborator)
+		// resolves to ok:false -- never ok:true by default, and never an uncaught exception a caller
+		// could forget to handle.
+		const message = error instanceof Error ? error.message : String(error);
+		return { ok: false, reason: `evidence ref could not be verified: ${message}` };
+	}
 }
 
 /** The minimal shape `hasSufficientEvidenceForMandatoryGate` needs from an attached evidence item --
@@ -106,5 +164,5 @@ export interface EvidenceProvenanceInfo {
  * whether its attached evidence clears this one bar.
  */
 export function hasSufficientEvidenceForMandatoryGate(evidence: readonly EvidenceProvenanceInfo[]): boolean {
-	throw new Error("hasSufficientEvidenceForMandatoryGate: not implemented -- Gate 6 (ADR 0005 §8, R25 golden rule)");
+	return evidence.some((item) => item.provenance === "runtime-derived");
 }

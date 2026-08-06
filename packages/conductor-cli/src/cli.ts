@@ -21,7 +21,7 @@ import { runChat } from "./commands/chat.ts";
 import { runConfigGet, runConfigSet, runConfigShow } from "./commands/config.ts";
 import { doctorExitCode, formatDoctorReport, runDoctor } from "./commands/doctor.ts";
 import {
-	createUnwiredGateStateStore,
+	createInMemoryGateStateStore,
 	type EvidenceAttachment,
 	type EvidenceRef,
 	formatGateStatusReport,
@@ -69,7 +69,9 @@ Usage:
 See docs/adr/0002-fase1-cli-foundation.md for the full command contract,
 docs/adr/0004-fase3-roles-skills-subagents.md for roles/skills, and
 docs/adr/0005-fase4-gate-state-machine.md for the gate state machine (gate * commands
-are Gate-5 scaffolding today -- GateStateStore wiring is a pending Gate 6 integration).
+run against a real in-process GateStateStoreView today -- the persisted, atomic,
+checksum-protected store is a pending integration with the parallel GateStateStore
+stream, see commands/gate.ts's own header).
 `;
 
 function describeError(error: unknown): string {
@@ -277,16 +279,16 @@ async function runSkillsCommand(args: string[], io: CliIO): Promise<number> {
 const DEFAULT_DEMAND_ID = "default";
 
 /**
- * `conductor gate *` (Gate 5, Fase 4 "Gates e evidências"). Argument parsing/shape validation here is
- * ordinary CLI plumbing (mirrors `runRolesCommand`/`runConfigCommand`'s own style) and is real, not a
- * stub -- but every subcommand's SUBSTANTIVE behavior is delegated to `commands/gate.ts`'s `run*`
- * functions, which are all Gate-5 stubs that throw "not implemented" (see that file's own header).
- * `createUnwiredGateStateStore()` is likewise an honest placeholder, not a real store -- see
- * `commands/gate.ts`'s header for the pending integration with the parallel GateStateStore stream.
+ * `conductor gate *` (Gate 6, Fase 4 "Gates e evidências"). Argument parsing/shape validation here is
+ * ordinary CLI plumbing (mirrors `runRolesCommand`/`runConfigCommand`'s own style). Every subcommand's
+ * substantive behavior is delegated to `commands/gate.ts`'s `run*` functions, now implemented for
+ * real. `createInMemoryGateStateStore()` is a REAL, working, in-process store (Gate 6) -- not yet the
+ * persisted, atomic, checksum-protected store the parallel GateStateStore stream owns; see
+ * `commands/gate.ts`'s header for the exact pending-integration point.
  */
 async function runGateCommand(args: string[], io: CliIO): Promise<number> {
 	const [sub, ...rest] = args;
-	const store = createUnwiredGateStateStore();
+	const store = createInMemoryGateStateStore();
 
 	if (sub === "status") {
 		const { positional, flags, unrecognized } = parseFlags(rest, ["demand"]);

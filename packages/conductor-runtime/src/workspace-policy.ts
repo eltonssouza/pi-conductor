@@ -143,6 +143,16 @@ export function defaultProtectedPaths(workspaceRoot?: string): string[] {
 			join(workspaceRoot, ".conductor", "policy.json"),
 			join(workspaceRoot, ".conductor", "policy-trust.json"),
 			join(workspaceRoot, ".conductor", "audit.jsonl"),
+			// Fase 4 (ADR 0005 §9.1, gate3-addendum-fase4.md R28/T44): the GateState governance store
+			// is a NEW security boundary the store's own on-disk location exposes, not a new
+			// mechanism -- the SAME "unerasable/unwritable by the very agent whose acts it records"
+			// reasoning as audit.jsonl above, now applied to a durable APPROVAL record rather than a
+			// log. The WHOLE `.conductor/gates/` subtree is protected -- the `<demand>.json` envelopes
+			// AND the `.lock` files sitting alongside them (isWithinRoot() below already makes this a
+			// subtree match, not a single-file one, from this single entry) -- so the only way to
+			// mutate a GateState is through the `gate *` commands (which route through
+			// mutateGateState/GateStateStore, R22/R27), never a direct write/edit/bash on the file.
+			join(workspaceRoot, ".conductor", "gates"),
 		);
 	}
 	return paths;

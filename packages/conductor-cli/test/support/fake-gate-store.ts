@@ -90,9 +90,11 @@ export function createFakeGateStore(options: { branch?: string } = {}): FakeGate
 				.filter((g) => ensureRecord(demand, g).status !== "approved")
 				.sort((a, b) => a - b);
 			if (missing.length > 0) {
-				throw new GateCommandError(
-					`cannot start gate ${gate}: mandatory gate(s) ${missing.join(", ")} are not approved yet`,
-				);
+				// Each missing entry is rendered as its own "gate N" token (not a bare joined number list)
+				// so a caller/test matching on a specific missing gate (e.g. /gate 3/) can find it as a
+				// literal substring regardless of how many other gates are also missing.
+				const missingLabel = missing.map((g) => `gate ${g}`).join(", ");
+				throw new GateCommandError(`cannot start gate ${gate}: mandatory ${missingLabel} not approved yet`);
 			}
 			const record = ensureRecord(demand, gate);
 			record.status = "in-progress";

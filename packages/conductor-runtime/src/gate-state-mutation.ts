@@ -39,8 +39,20 @@ import type { GateState } from "./gate-state.ts";
 import type { GateStateMutationError, GateStateStore } from "./gate-state-store.ts";
 
 export function mutateGateState(
-	_store: GateStateStore,
-	_mutate: (current: GateState) => GateState,
+	store: GateStateStore,
+	mutate: (current: GateState) => GateState,
 ): Result<{ next: GateState; revision: number }, GateStateMutationError> {
-	throw new Error("not implemented");
+	// GATE 6: `store.mutate()` (gate-state-store.ts) already IS the check-and-write, zero-await,
+	// lock+CAS-guarded, atomic-write implementation (R27) -- this function's own header explains why
+	// it exists as a separate, thin, named seam anyway (so a future caller can compose cross-cutting
+	// behavior -- retry-on-could-not-verify, telemetry -- around EVERY mutation call site in one
+	// place) rather than every call site invoking `store.mutate` directly. No cross-cutting behavior
+	// has been asked for yet (Gate 6 scope), so the body only forwards -- adding speculative
+	// retry/telemetry here now would be exactly the un-asked-for complexity Gate 4's own "baixa
+	// complexidade acidental" quality attribute (ADR 0005 §1.3 item 4) warns against.
+	//
+	// A bug INSIDE `mutate` throws straight out of `store.mutate(...)`, hence straight out of this
+	// call too -- nothing here wraps it in a try/catch that could turn it into a misleadingly generic
+	// `io-error` (contract point 3 above).
+	return store.mutate(mutate);
 }

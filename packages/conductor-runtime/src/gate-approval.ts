@@ -47,7 +47,14 @@ export type ApprovalMethod = "human" | "auto";
 // literal `method: "human"` at all, see `test/gate-approval-sole-mint.test.ts`), never an
 // indistinguishable-at-runtime forgery. `isGenuineHumanApproval` below is the runtime detector that
 // makes that distinction checkable, not just asserted in a comment.
-declare const HUMAN_MINT: unique symbol;
+// GATE 6: a REAL, module-private runtime symbol (not merely an ambient `declare const`, which would
+// have no runtime value at all -- a computed property `[HUMAN_MINT]` written against an undeclared
+// ambient binding would throw `ReferenceError` the moment any code tried to actually set it). `Symbol()`
+// is intentionally NOT `Symbol.for(...)` -- a well-known/global-registry symbol is guessable/creatable
+// by any other module that also calls `Symbol.for()` with the same key, which would let a hand-built
+// object literal elsewhere in the codebase forge the brand; a plain `Symbol()` is unique per-realm and
+// only ever reachable via this module's own closed-over binding, never exported.
+const HUMAN_MINT: unique symbol = Symbol("gate-approval.human-mint");
 
 /** Everything the mint needs to know about WHICH gate/demand/branch/source an `Approval` is for — never
  * the proof itself. R23 (ADR 0005 §4): an `Approval` only counts for gate N if it is structurally keyed
@@ -100,7 +107,22 @@ export interface Approval extends ApprovalMeta {
  * caller records `status:"needs-human"` instead of ever reaching this factory with a truthy result.
  */
 export function mintHumanApproval(confirmResult: boolean, meta: ApprovalMeta): Approval | null {
-	throw new Error("mintHumanApproval: not implemented -- Gate 6 (Fase 4, ADR 0005 §6/R22)");
+	// R22/T40(b): fail-closed -- anything other than a literal `true` (a headless `!hasUI` deny, a
+	// timeout, an explicit deny, or a caller passing some other truthy-but-not-`true` value) refuses to
+	// mint. This is the ONLY branch of this function; there is no second code path that could mint
+	// "human" from a falsy/absent confirmResult.
+	if (confirmResult !== true) {
+		return null;
+	}
+	return {
+		gate: meta.gate,
+		demandId: meta.demandId,
+		branch: meta.branch,
+		source: meta.source,
+		method: "human",
+		approvedAt: new Date().toISOString(),
+		[HUMAN_MINT]: true,
+	};
 }
 
 /**
@@ -117,7 +139,16 @@ export function mintHumanApproval(confirmResult: boolean, meta: ApprovalMeta): A
  * sign-off).
  */
 export function mintAutoApproval(meta: ApprovalMeta): Approval {
-	throw new Error("mintAutoApproval: not implemented -- Gate 6 (Fase 4, ADR 0005 §18 appendix, FR-10)");
+	return {
+		gate: meta.gate,
+		demandId: meta.demandId,
+		branch: meta.branch,
+		source: meta.source,
+		method: "auto",
+		approvedAt: new Date().toISOString(),
+		// No [HUMAN_MINT] brand -- BR-7: an auto approval must never be structurally indistinguishable
+		// from a genuine human one.
+	};
 }
 
 /**
@@ -130,5 +161,8 @@ export function mintAutoApproval(meta: ApprovalMeta): Approval {
  * "evidence is a checkable contract, not a claim in prose."
  */
 export function isGenuineHumanApproval(approval: Approval): boolean {
-	throw new Error("isGenuineHumanApproval: not implemented -- Gate 6 (Fase 4, ADR 0005 §6/R22)");
+	// Both halves matter: `method === "human"` alone is exactly what a forged literal also claims: the
+	// brand-symbol check is what a hand-built object (even one cast `as unknown as Approval`) cannot
+	// carry, because nothing outside this module can name the property key required to set it.
+	return approval.method === "human" && approval[HUMAN_MINT] === true;
 }
