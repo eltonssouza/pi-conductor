@@ -277,6 +277,28 @@ describe("runChat -- --role <slug> (Fase 3, FR-1/FR-2)", () => {
 	});
 
 	it(
+		"FR-2: a typo close to a real role id gets a 'Did you mean' suggestion end-to-end through the " +
+			"real CLI, not only in the isolated resolveRole() unit test -- Gate 8 finding: describeUnknownChatRole " +
+			"discarded resolveRole()'s own suggestion field, so `conductor chat --role backedn-engineer` listed " +
+			"all 37 roles instead of naming the one obvious fix (gate2-spec-fase3.md FR-2's own worked example).",
+		async () => {
+			writeValidConfig(project.root);
+			const { io, stderr } = createCapturingIo(project.root);
+
+			const code = await runChat({
+				cwd: project.root,
+				args: ["--role", "backedn-engineer"],
+				stdout: io.stdout,
+				stderr: io.stderr,
+			});
+
+			expect(code).toBe(1);
+			expect(stderr()).toMatch(/unknown role "backedn-engineer"/);
+			expect(stderr()).toMatch(/Did you mean "backend-engineer"/);
+		},
+	);
+
+	it(
 		"GAP 2: refuses a real role that does not declare a tools allowlist yet, instead of silently " +
 			"opening a session with zero usable tools -- exit code 1, before any session/terminal is touched",
 		async () => {

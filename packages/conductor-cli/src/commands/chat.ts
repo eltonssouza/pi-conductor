@@ -194,7 +194,7 @@ async function prepareChat(options: ChatOptions): Promise<PrepareResult> {
 	if (parsedArgs.roleId !== undefined) {
 		const resolved = resolveChatRoleFromRegistry(roleRegistry, parsedArgs.roleId);
 		if (resolved.status === "not-found") {
-			return { ok: false, message: describeUnknownChatRole(resolved.roleId, roleRegistry) };
+			return { ok: false, message: describeUnknownChatRole(resolved.roleId, roleRegistry, resolved.suggestion) };
 		}
 		// GAP 2 (orchestrator finding): NONE of the 37 real built-in roles declare a tools allowlist
 		// yet (role-catalog.ts's own header) -- role.tools is `[]` for every one of them today. Silently

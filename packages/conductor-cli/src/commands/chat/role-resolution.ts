@@ -66,7 +66,9 @@ import { defaultProjectSkillsDir, loadBuiltinSkillCatalog } from "../skill-catal
  * the shape `--role` resolves to. */
 export type ChatRole = ConductorRole;
 
-export type ResolveChatRoleResult = { status: "found"; role: ChatRole } | { status: "not-found"; roleId: string };
+export type ResolveChatRoleResult =
+	| { status: "found"; role: ChatRole }
+	| { status: "not-found"; roleId: string; suggestion?: string };
 
 /**
  * Sentinel `callerRole` identity for a `conductor chat` session opened WITHOUT `--role` -- see this
@@ -104,12 +106,17 @@ export function loadRealRoleRegistry(options: LoadRealRoleRegistryOptions = {}):
 
 /** FR-1/FR-2: resolves `roleId` against an already-loaded registry. An unknown id is never a generic
  * silent session -- it names the role that was not found so `chat.ts` can surface a clear CLI error
- * instead of starting an unrestricted session. */
+ * instead of starting an unrestricted session. Gate 8 fix: `@conductor/config`'s `resolveRole` already
+ * computes a proximity `suggestion` (FR-2's own worked example: "backedn-engineer" -> suggest
+ * "backend-engineer") and was tested in isolation (`role-loader.test.ts`), but this wrapper used to
+ * discard it on the "not-found" branch, so the real CLI never surfaced it -- the exact
+ * implemented-but-not-wired shape this Fase's own history (GAP 1/GAP 2/GAP-4) kept finding elsewhere.
+ * Threaded through here instead of dropped. */
 export function resolveChatRoleFromRegistry(registry: RoleRegistry, roleId: string): ResolveChatRoleResult {
 	const result = resolveRole(registry, roleId);
 	return result.status === "found"
 		? { status: "found", role: result.role }
-		: { status: "not-found", roleId: result.roleId };
+		: { status: "not-found", roleId: result.roleId, suggestion: result.suggestion };
 }
 
 /** Convenience wrapper that loads its own registry -- used by this module's own unit tests, which do
@@ -121,11 +128,18 @@ export function resolveChatRole(roleId: string): ResolveChatRoleResult {
 }
 
 /** `conductor chat --role`'s own error message for an unknown role id (FR-2: names the role, lists
- * what IS available so the fix is obvious without a separate `roles list` lookup). Accepts an
+ * what IS available so the fix is obvious without a separate `roles list` lookup, AND -- when the
+ * registry has something close -- leads with a "Did you mean" hint naming it, per FR-2's own worked
+ * example: "quando houver um nome próximo no registro (ex.: backend-engineer), sugere-o"). Accepts an
  * already-loaded `registry` so `chat.ts` never has to load a second one just to build this message. */
-export function describeUnknownChatRole(roleId: string, registry: RoleRegistry = loadRealRoleRegistry()): string {
+export function describeUnknownChatRole(
+	roleId: string,
+	registry: RoleRegistry = loadRealRoleRegistry(),
+	suggestion?: string,
+): string {
 	const known = Array.from(registry.roles.keys()).sort().join(", ");
-	return `conductor chat: unknown role "${roleId}". Known roles: ${known || "(none)"}.`;
+	const hint = suggestion ? ` Did you mean "${suggestion}"?` : "";
+	return `conductor chat: unknown role "${roleId}".${hint} Known roles: ${known || "(none)"}.`;
 }
 
 /**

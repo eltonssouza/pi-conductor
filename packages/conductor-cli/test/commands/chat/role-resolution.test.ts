@@ -41,6 +41,27 @@ describe("resolveChatRole", () => {
 		const result = resolveChatRole("Backend-Engineer");
 		expect(result.status).toBe("not-found");
 	});
+
+	it(
+		"FR-2 (Gate 8 fix): carries @conductor/config's own proximity suggestion through on the " +
+			"not-found branch, instead of dropping it -- a typo close to a real role id resolves with a " +
+			"named suggestion, not just roleId",
+		() => {
+			const result = resolveChatRole("backedn-engineer");
+			expect(result.status).toBe("not-found");
+			if (result.status === "not-found") {
+				expect(result.suggestion).toBe("backend-engineer");
+			}
+		},
+	);
+
+	it("carries no suggestion when nothing in the registry is close", () => {
+		const result = resolveChatRole("totally-unrelated-xyz");
+		expect(result.status).toBe("not-found");
+		if (result.status === "not-found") {
+			expect(result.suggestion).toBeUndefined();
+		}
+	});
 });
 
 describe("describeUnknownChatRole", () => {
@@ -51,6 +72,16 @@ describe("describeUnknownChatRole", () => {
 	it("lists real known roles so the fix is obvious without a separate lookup", () => {
 		const message = describeUnknownChatRole("bogus");
 		expect(message).toContain("backend-engineer");
+	});
+
+	it("FR-2 (Gate 8 fix): leads with a 'Did you mean' hint naming the suggestion when one is passed", () => {
+		const message = describeUnknownChatRole("backedn-engineer", loadRealRoleRegistry(), "backend-engineer");
+		expect(message).toMatch(/Did you mean "backend-engineer"/);
+	});
+
+	it("omits the 'Did you mean' hint entirely when no suggestion is passed (unchanged behavior)", () => {
+		const message = describeUnknownChatRole("bogus", loadRealRoleRegistry());
+		expect(message).not.toMatch(/Did you mean/);
 	});
 });
 
