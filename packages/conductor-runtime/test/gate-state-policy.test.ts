@@ -210,6 +210,38 @@ describe("evaluateAdvance / isMandatorySatisfied — the mandatory floor (R23/T4
 
 		expect(isMandatorySatisfied(state, 6, MANDATORY_GATES)).toBe(false);
 	});
+
+	// Gate 9 pentest finding B (SEV BAIXA, latente/defense-in-depth): isGateGenuinelyApproved did NOT
+	// check `approval.method` -- an Approval keyed CORRECTLY to (gate, demandId, branch) but carrying
+	// `method: "auto"` would satisfy a MANDATORY gate, violating FR-11 ("mandatory gate is never
+	// auto-approved") the moment any producer of an auto approval on a mandatory gate existed. Not
+	// reachable today (zero call sites mint "auto" for a mandatory gate) -- but the predicate itself is
+	// supposed to ENCODE the invariant, not depend on "nobody produces that value yet" as the only
+	// guarantee (Security Engineering §1.12, already the grounding cited for this exact finding at Gate
+	// 9: "the value of a control is measured by the failure it prevents", not by whether the dangerous
+	// path is exercised today).
+	it("FR-11 (new invariant, Gate 9 finding B): an Approval structurally keyed CORRECTLY to (gate, demandId, branch) but with method:'auto' does NOT satisfy a MANDATORY gate -- the predicate must encode 'a mandatory gate is never auto-approved' itself, not rely on the absence of an auto-approval producer for a mandatory gate as the only guarantee", () => {
+		const base = makeGateState(6);
+		const autoApproved = approvedRecord(3, {
+			approvals: [
+				{
+					gate: 3,
+					demandId: DEMAND_ID,
+					branch: BRANCH,
+					method: "auto",
+					source: "autonomous-loop",
+					approvedAt: "2026-08-06T00:00:00.000Z",
+				},
+			],
+		});
+		const state: GateState = { ...base, gates: { ...base.gates, 3: autoApproved } };
+
+		expect(isMandatorySatisfied(state, 6, MANDATORY_GATES)).toBe(false);
+
+		const verdict = evaluateAdvance(state, 6, MANDATORY_GATES);
+		expect(verdict.kind).toBe("refused");
+		if (verdict.kind === "refused") expect(verdict.missingMandatoryGates).toContain(3);
+	});
 });
 
 // ---------------------------------------------------------------------------------------------

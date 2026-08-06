@@ -321,7 +321,29 @@ factory is proof a signal was attempted"). Aplicando isso **literalmente** à Fa
 obrigatório aqui é **`could-not-verify`** (R26 ii, "loud e registrado") — logo, **se** algum token existisse
 nesta máquina de verdict, seu lar natural seria `could-not-verify` (garantir que o registro loud foi tentado),
 **jamais `approved`**. E o controle de não-forjabilidade **durável** que de fato importa não está no verdict
-transitório — está no `Approval{method:"human"}` **persistido** (§6/R22), objeto de vida e exposição diferentes.
+transitório — está em **como o `Approval{method:"human"}` foi construído e onde ele mora** (§6/R22 sole-mint +
+§9.1 protected-path), **não** em recomputar `isGenuineHumanApproval`/o brand `HUMAN_MINT` sobre um registro **já
+persistido e relido**.
+
+**Correção (Gate 9 pentest, achado A, SEV BAIXA — o parágrafo acima super-afirmava isto):** `HUMAN_MINT` é um
+`Symbol()` module-private; `JSON.stringify` **não serializa chaves `Symbol`**, então depois que um `Approval` é
+persistido em disco (§3) e relido, a propriedade `[HUMAN_MINT]` **some** — `isGenuineHumanApproval` retorna
+`false` para **todo** `Approval` persistido, genuíno ou forjado igualmente. Ou seja: `isGenuineHumanApproval` é
+uma checagem **EM MEMÓRIA, no mesmo processo, logo após o mint** (o exato momento em que `mintHumanApproval`
+devolve seu valor a `gate approve`, antes de qualquer `JSON.stringify`) — **não** é uma auditoria de um registro
+já em disco, e o `GateState` não tenta recomputá-la ao ler um `GateStateEnvelopeV1` de volta (§3/§9.2 só
+recomputam o checksum `sha256`, que é anti-acidente, não anti-forja — ver §9.3). A garantia **durável** de
+verdade — a que sobrevive a um processo terminar e o arquivo ser relido depois — é a soma de duas propriedades
+**estruturais**, não uma verificação em tempo de leitura: (1) **sole-mint** — `mintHumanApproval` é o único
+lugar do pacote que escreve o literal `method: "human"` (confirmado por scan estático,
+`gate-approval-sole-mint.test.ts`); (2) **protected-path** (§9.1) — `.conductor/gates/` é protegido, então
+nada fora dos comandos `gate *` escreve o arquivo sem passar por (1). Consertar a checagem em tempo de leitura
+para que sobreviva à serialização (ex.: uma assinatura HMAC persistida fora do brand-symbol) **seria** a fix de
+verdade para tamper-evidence real contra um editor local — mas isso é exatamente o residual criptográfico já
+adiado e re-declarado em §9.3 (GAP-4D); este parágrafo só corrige a afirmação, não implementa essa fix agora.
+*Grounding:* **Spec-Driven Development §19.1/19.5** (top **0.706** — "governance preserves the *why*... a
+record that has fallen out of date is worse than none, because people still read it": a razão para corrigir a
+afirmação em vez de deixá-la, mesmo sem mudar código).
 
 ---
 

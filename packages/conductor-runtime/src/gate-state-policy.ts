@@ -68,15 +68,30 @@ export type GateAdvanceVerdict =
  *   4. At least one `Approval` structurally keyed to (this gate, `state.demandId`, `state.branch`) —
  *      the anti-spoofing form of `gate_land.py`'s `_is_approval`/D7-D8 (R23(iv)): an `Approval`
  *      borrowed from a different gate, demand, or branch never counts, however well-formed.
+ *   5. When `gate` is itself a member of `mandatory`, that keyed `Approval` MUST also carry
+ *      `method === "human"` (Gate 9 pentest finding B, FR-11: "a mandatory gate is never
+ *      auto-approved"). Before this, the predicate accepted a correctly-keyed `method:"auto"`
+ *      Approval on a mandatory gate — harmless only because zero call sites mint "auto" for a
+ *      mandatory gate today, which is an environmental fact about current callers, not a property
+ *      of this function. The predicate now ENCODES the invariant itself instead of depending on
+ *      that absence as the only guarantee (Security Engineering §1.12: a control's value is the
+ *      failure it prevents, not whether the dangerous path happens to be exercised yet). A
+ *      NON-mandatory gate is deliberately exempt from this fifth check — `mintAutoApproval` remains
+ *      a legitimate way to close a non-mandatory gate (FR-10), so `mandatory.has(gate)` gates the
+ *      extra condition rather than applying it unconditionally.
  */
-function isGateGenuinelyApproved(state: GateState, gate: number): boolean {
+function isGateGenuinelyApproved(state: GateState, gate: number, mandatory: ReadonlySet<number>): boolean {
 	const record = state.gates[gate];
 	if (!record) return false;
 	if (record.status !== "approved") return false;
 	if (record.evidence.length === 0) return false;
 	if (!hasSufficientEvidenceForMandatoryGate(record.evidence)) return false;
 	return record.approvals.some(
-		(approval) => approval.gate === gate && approval.demandId === state.demandId && approval.branch === state.branch,
+		(approval) =>
+			approval.gate === gate &&
+			approval.demandId === state.demandId &&
+			approval.branch === state.branch &&
+			(!mandatory.has(gate) || approval.method === "human"),
 	);
 }
 
@@ -86,7 +101,7 @@ function isGateGenuinelyApproved(state: GateState, gate: number): boolean {
 function collectMissingMandatoryGates(state: GateState, upToGate: number, mandatory: ReadonlySet<number>): number[] {
 	const missing: number[] = [];
 	for (const gate of mandatory) {
-		if (gate < upToGate && !isGateGenuinelyApproved(state, gate)) missing.push(gate);
+		if (gate < upToGate && !isGateGenuinelyApproved(state, gate, mandatory)) missing.push(gate);
 	}
 	return missing.sort((a, b) => a - b);
 }
