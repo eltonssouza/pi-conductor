@@ -56,7 +56,28 @@ export function buildMergedGraph(
 	builtin: ReadonlyArray<{ id: string; canSpawn: string[] }>,
 	projectAdditions: ReadonlyArray<{ id: string; canSpawn: string[] }>,
 ): DelegationGraph {
-	throw new Error("not implemented");
+	const builtinById = new Map(builtin.map((role) => [role.id, role.canSpawn] as const));
+	const projectById = new Map(projectAdditions.map((role) => [role.id, role.canSpawn] as const));
+	const allIds = new Set<string>([...builtinById.keys(), ...projectById.keys()]);
+
+	const merged = new Map<string, string[]>();
+	for (const id of allIds) {
+		const builtinEdges = builtinById.get(id) ?? [];
+		const projectEdges = projectById.get(id) ?? [];
+		// Union never override, first-seen order: the built-in edges always come first (never
+		// silently stripped by a project addition of the same role id), a project edge already
+		// present in builtin is deduped rather than duplicated.
+		const seen = new Set<string>();
+		const edges: string[] = [];
+		for (const target of [...builtinEdges, ...projectEdges]) {
+			if (!seen.has(target)) {
+				seen.add(target);
+				edges.push(target);
+			}
+		}
+		merged.set(id, edges);
+	}
+	return merged;
 }
 
 /**
@@ -66,7 +87,46 @@ export function buildMergedGraph(
  * caller are proven acyclic by ONE algorithm.
  */
 export function findCycle(graph: DelegationGraph): string[] | null {
-	throw new Error("not implemented");
+	// White/gray/black DFS (roles.py's find_cycle behavior, ported): "gray" = on the current
+	// recursion stack (an ancestor of the node being visited), "black" = fully explored, no path to
+	// a cycle through it. A node not in `colors` is implicitly white (unvisited) — using a Map
+	// rather than pre-sizing from graph.keys() lets a canSpawn target that is not itself a graph key
+	// (an edge to a leaf that never appears as its own `id`) still be visited as a childless node,
+	// without findCycle needing to know about validateDelegationGraph's separate unknown-target check.
+	const colors = new Map<string, "gray" | "black">();
+	const stack: string[] = [];
+
+	function visit(node: string): string[] | null {
+		colors.set(node, "gray");
+		stack.push(node);
+
+		for (const neighbor of graph.get(node) ?? []) {
+			const color = colors.get(neighbor);
+			if (color === "gray") {
+				// Closed a cycle back to an ancestor still on the stack: the exact path is that
+				// ancestor's position onward, plus the repeated node to make the closure explicit
+				// (FR-10/FR-11: "the exact path", e.g. ["A", "B", "A"], never a generic message).
+				const cycleStart = stack.indexOf(neighbor);
+				return [...stack.slice(cycleStart), neighbor];
+			}
+			if (color !== "black") {
+				const cycle = visit(neighbor);
+				if (cycle) return cycle;
+			}
+		}
+
+		stack.pop();
+		colors.set(node, "black");
+		return null;
+	}
+
+	for (const node of graph.keys()) {
+		if (!colors.has(node)) {
+			const cycle = visit(node);
+			if (cycle) return cycle;
+		}
+	}
+	return null;
 }
 
 /**
@@ -79,5 +139,28 @@ export function validateDelegationGraph(
 	builtin: ReadonlyArray<{ id: string; canSpawn: string[] }>,
 	projectAdditions: ReadonlyArray<{ id: string; canSpawn: string[] }>,
 ): ValidateDelegationGraphResult {
-	throw new Error("not implemented");
+	const graph = buildMergedGraph(builtin, projectAdditions);
+	const errors: DelegationGraphError[] = [];
+
+	// FR-12: named, never a silent drop. Checked against the MERGED graph's own key set (the union
+	// of every `id` declared by builtin OR project) rather than re-deriving it from the two input
+	// lists a second time — one source of truth for "what counts as a known role".
+	const knownIds = new Set(graph.keys());
+	for (const [from, targets] of graph) {
+		for (const target of targets) {
+			if (!knownIds.has(target)) {
+				errors.push({ kind: "unknown-target", from, target });
+			}
+		}
+	}
+
+	// R17b/T32: acyclicity is checked over the MERGED graph, fail-closed for the built-in — a
+	// project addition that closes a cycle the built-in alone did not have is rejected exactly like
+	// a cycle the built-in shipped with; validateDelegationGraph does not distinguish the two.
+	const cycle = findCycle(graph);
+	if (cycle) {
+		errors.push({ kind: "cycle", path: cycle });
+	}
+
+	return { ok: errors.length === 0, graph, errors };
 }

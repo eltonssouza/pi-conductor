@@ -17,8 +17,8 @@ import {
 	type ConductorRole,
 	isToolAllowed,
 	listRoles,
-	resolveRole,
 	type RoleRegistry,
+	resolveRole,
 } from "../src/role-loader.ts";
 
 function makeRole(overrides: Partial<ConductorRole> & { name: string }): ConductorRole {
@@ -207,15 +207,30 @@ describe("listRoles", () => {
 			skills: ["model-threats"],
 			gates: [3],
 		});
-		const registry = buildRoleRegistry([backendEngineer, securityEngineer], new Set(["design-service", "model-threats"]));
+		const registry = buildRoleRegistry(
+			[backendEngineer, securityEngineer],
+			new Set(["design-service", "model-threats"]),
+		);
 
 		const rows = listRoles(registry);
 
 		expect(rows).toHaveLength(2);
 		expect(rows).toEqual(
 			expect.arrayContaining([
-				{ id: "backend-engineer", area: "engineering", modelRole: "standard", skills: ["design-service"], gates: [4, 6] },
-				{ id: "security-engineer", area: "security", modelRole: "strategic", skills: ["model-threats"], gates: [3] },
+				{
+					id: "backend-engineer",
+					area: "engineering",
+					modelRole: "standard",
+					skills: ["design-service"],
+					gates: [4, 6],
+				},
+				{
+					id: "security-engineer",
+					area: "security",
+					modelRole: "strategic",
+					skills: ["model-threats"],
+					gates: [3],
+				},
 			]),
 		);
 	});

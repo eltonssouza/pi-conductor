@@ -38,7 +38,8 @@
  *     this function resolves may still be rejected downstream by `validateDelegationGraph`.
  */
 
-import type { ConductorRole } from "./role-loader.ts";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import type { ConductorRole, RoleApprovalPolicy } from "./role-loader.ts";
 
 export const ROLE_TRUST_STORE_SCHEMA_VERSION = 1;
 
@@ -77,8 +78,60 @@ export interface RoleTrustStoreOptions {
  * filesystem error all produce a `RoleTrustStore` whose `isTrusted()` always returns `false` — never
  * a thrown exception, never a store that resolves to "trusted" for anything.
  */
+function isRoleTrustEntry(value: unknown): value is RoleTrustEntry {
+	if (typeof value !== "object" || value === null) return false;
+	const entry = value as Record<string, unknown>;
+	return (
+		typeof entry.roleId === "string" && typeof entry.contentHash === "string" && typeof entry.grantedAt === "string"
+	);
+}
+
+function isRoleTrustStoreDocument(value: unknown): value is RoleTrustStoreDocument {
+	if (typeof value !== "object" || value === null) return false;
+	const doc = value as Record<string, unknown>;
+	return (
+		doc.schema === ROLE_TRUST_STORE_SCHEMA_VERSION &&
+		Array.isArray(doc.trusted) &&
+		doc.trusted.every(isRoleTrustEntry)
+	);
+}
+
+/**
+ * Same single-try/catch, collapse-everything-to-empty shape as `policy-trust-store.ts`'s
+ * `readTrustedEntries` (R15's role-registry analogue of R11a): missing file, invalid JSON, schema
+ * mismatch, or any filesystem error (permission denied, path is a directory, a race between
+ * existsSync/statSync and the actual read, ...) all collapse to an empty ledger — never a thrown
+ * exception, never a partially-trusted result. `onError` fires only for the genuinely-unexpected
+ * subset (not `SyntaxError`, which is just "corrupt JSON", already named by the empty-result
+ * contract) and can never change the fail-closed return value even if the callback itself throws.
+ */
+function readTrustedRoleEntries(filePath: string, onError?: (error: unknown) => void): RoleTrustEntry[] {
+	try {
+		if (!existsSync(filePath)) return [];
+		if (!statSync(filePath).isFile()) return [];
+		const raw = readFileSync(filePath, "utf-8");
+		const parsed: unknown = JSON.parse(raw);
+		if (!isRoleTrustStoreDocument(parsed)) return [];
+		return parsed.trusted;
+	} catch (error) {
+		if (!(error instanceof SyntaxError)) {
+			try {
+				onError?.(error);
+			} catch {
+				// Observability must never affect the fail-closed contract above.
+			}
+		}
+		return [];
+	}
+}
+
 export function loadRoleTrustStore(filePath: string, options: RoleTrustStoreOptions = {}): RoleTrustStore {
-	throw new Error("not implemented");
+	const entries = readTrustedRoleEntries(filePath, options.onError);
+	return {
+		isTrusted(roleId: string, contentHash: string): boolean {
+			return entries.some((entry) => entry.roleId === roleId && entry.contentHash === contentHash);
+		},
+	};
 }
 
 /**
@@ -86,10 +139,108 @@ export function loadRoleTrustStore(filePath: string, options: RoleTrustStoreOpti
  * asymmetric split-trust merge documented above. `builtinRole` is `undefined` when the project role
  * has no built-in counterpart of the same name (a wholly project-defined role).
  */
+/**
+ * Effective tools/canSpawn = (builtin ∩ project) ∪ (trusted ? (project \ builtin) : ∅) — the exact
+ * arithmetic from this module's header. The intersection term is what makes a NARROWING project
+ * list (a restriction) apply unconditionally: an item the project drops relative to builtin is
+ * simply absent from the intersection regardless of trust. The `trusted`-gated remainder term is
+ * what makes a WIDENING project list (a grant) require trust-on-first-use. `builtinList: []` (no
+ * builtin counterpart) collapses the intersection to empty and the remainder to the full project
+ * list, which is exactly T37's "falls to the most restrictive posture until trusted".
+ */
+function mergeAuthorityList(
+	builtinList: readonly string[],
+	projectList: readonly string[],
+	trusted: boolean,
+): string[] {
+	const builtinSet = new Set(builtinList);
+	const intersection = projectList.filter((item) => builtinSet.has(item));
+	const grantedExtras = trusted ? projectList.filter((item) => !builtinSet.has(item)) : [];
+
+	const seen = new Set<string>();
+	const merged: string[] = [];
+	for (const item of [...intersection, ...grantedExtras]) {
+		if (!seen.has(item)) {
+			seen.add(item);
+			merged.push(item);
+		}
+	}
+	return merged;
+}
+
+/** Ordinal rank for `maxRiskTier`, most-restrictive first. An absent tier is treated as the WIDEST
+ * value (no extra ceiling declared beyond the hardcoded "high/critical always confirm" rule), so a
+ * project role that adds a tier where builtin declared none is judged a grant (loosening from
+ * "no stated cap"), not a restriction — the fail-closed direction for an ambiguous case. */
+function approvalTierRank(tier: RoleApprovalPolicy["maxRiskTier"]): number {
+	if (tier === "low") return 0;
+	if (tier === "medium") return 1;
+	return 2;
+}
+
+/**
+ * `approvalPolicy.maxRiskTier`: tightening (a lower rank than builtin's) applies unconditionally,
+ * same restriction-always-wins direction as tools/canSpawn; loosening (a higher rank) requires
+ * trust, same grant-needs-trust direction. `autoApprove` carries no variable state to merge (its
+ * type only ever allows the literal `false`), so it is passed through from whichever policy object
+ * is chosen as the base.
+ */
+function resolveApprovalPolicy(
+	builtinPolicy: RoleApprovalPolicy | undefined,
+	projectPolicy: RoleApprovalPolicy | undefined,
+	trusted: boolean,
+): RoleApprovalPolicy | undefined {
+	if (!projectPolicy) return builtinPolicy;
+	if (!builtinPolicy) return trusted ? projectPolicy : undefined;
+
+	const builtinRank = approvalTierRank(builtinPolicy.maxRiskTier);
+	const projectRank = approvalTierRank(projectPolicy.maxRiskTier);
+	const tightening = projectRank < builtinRank;
+	const loosening = projectRank > builtinRank;
+
+	const maxRiskTier = tightening || (loosening && trusted) ? projectPolicy.maxRiskTier : builtinPolicy.maxRiskTier;
+	return { ...builtinPolicy, maxRiskTier };
+}
+
+/** T37(d): even a persona (systemPrompt) diff is a grant. An untrusted project role shadowing a
+ * builtin of the same name never gets its persona honored, only the builtin's — a project role
+ * with no builtin counterpart has nothing to shadow, so its own systemPrompt always applies. */
+function resolveSystemPrompt(
+	builtinRole: ConductorRole | undefined,
+	projectRole: ConductorRole,
+	trusted: boolean,
+): string {
+	if (!builtinRole) return projectRole.systemPrompt;
+	return trusted ? projectRole.systemPrompt : builtinRole.systemPrompt;
+}
+
 export function resolveRoleGrants(
 	builtinRole: ConductorRole | undefined,
 	projectRole: ConductorRole,
 	trustStore: RoleTrustStore,
 ): ConductorRole {
-	throw new Error("not implemented");
+	const trusted = trustStore.isTrusted(projectRole.name, projectRole.contentHash);
+
+	// Everything that is not a tools/canSpawn/approvalPolicy/systemPrompt grant follows the same
+	// trust gate: with no builtin counterpart there is nothing to fall back to, and once trusted the
+	// project's own declaration is authoritative; untrusted-with-a-counterpart keeps the builtin's
+	// identity fields rather than honoring an unreviewed project declaration.
+	const useProjectIdentity = !builtinRole || trusted;
+
+	return {
+		name: projectRole.name,
+		description: useProjectIdentity ? projectRole.description : builtinRole.description,
+		systemPrompt: resolveSystemPrompt(builtinRole, projectRole, trusted),
+		model: useProjectIdentity ? projectRole.model : builtinRole.model,
+		tools: mergeAuthorityList(builtinRole?.tools ?? [], projectRole.tools, trusted),
+		modelRole: useProjectIdentity ? projectRole.modelRole : builtinRole.modelRole,
+		skills: useProjectIdentity ? projectRole.skills : builtinRole.skills,
+		canSpawn: mergeAuthorityList(builtinRole?.canSpawn ?? [], projectRole.canSpawn, trusted),
+		gates: useProjectIdentity ? projectRole.gates : builtinRole.gates,
+		approvalPolicy: resolveApprovalPolicy(builtinRole?.approvalPolicy, projectRole.approvalPolicy, trusted),
+		source: projectRole.source,
+		contentHash: projectRole.contentHash,
+		filePath: projectRole.filePath,
+		area: useProjectIdentity ? projectRole.area : builtinRole.area,
+	};
 }

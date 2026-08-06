@@ -21,6 +21,8 @@ import { runChat } from "./commands/chat.ts";
 import { runConfigGet, runConfigSet, runConfigShow } from "./commands/config.ts";
 import { doctorExitCode, formatDoctorReport, runDoctor } from "./commands/doctor.ts";
 import { describeInitOutcome, initExitCode, runInit } from "./commands/init.ts";
+import { formatRolesListReport, runRolesList } from "./commands/roles.ts";
+import { formatSkillsListReport, runSkillsList } from "./commands/skills.ts";
 
 export interface CliWriter {
 	write(chunk: string): void;
@@ -41,9 +43,12 @@ Usage:
   conductor config get <key>
   conductor config set <key> <value>
   conductor chat
+  conductor roles list
+  conductor skills list
   conductor --help
 
-See docs/adr/0002-fase1-cli-foundation.md for the full command contract.
+See docs/adr/0002-fase1-cli-foundation.md for the full command contract, and
+docs/adr/0004-fase3-roles-skills-subagents.md for roles/skills.
 `;
 
 function describeError(error: unknown): string {
@@ -130,6 +135,50 @@ async function runConfigCommand(args: string[], io: CliIO): Promise<number> {
 	return 1;
 }
 
+async function runRolesCommand(args: string[], io: CliIO): Promise<number> {
+	const [sub, ...rest] = args;
+
+	if (sub === "list") {
+		if (rest.length > 0) {
+			io.stderr.write(`conductor roles list: unrecognized argument(s): ${rest.join(" ")}\n`);
+			return 1;
+		}
+		try {
+			const report = await runRolesList({ cwd: io.cwd });
+			io.stdout.write(formatRolesListReport(report));
+			return 0;
+		} catch (error) {
+			io.stderr.write(`conductor roles list: ${describeError(error)}\n`);
+			return 1;
+		}
+	}
+
+	io.stderr.write(`conductor roles: unknown subcommand "${sub ?? ""}". Usage: list\n`);
+	return 1;
+}
+
+async function runSkillsCommand(args: string[], io: CliIO): Promise<number> {
+	const [sub, ...rest] = args;
+
+	if (sub === "list") {
+		if (rest.length > 0) {
+			io.stderr.write(`conductor skills list: unrecognized argument(s): ${rest.join(" ")}\n`);
+			return 1;
+		}
+		try {
+			const report = await runSkillsList({ cwd: io.cwd });
+			io.stdout.write(formatSkillsListReport(report));
+			return 0;
+		} catch (error) {
+			io.stderr.write(`conductor skills list: ${describeError(error)}\n`);
+			return 1;
+		}
+	}
+
+	io.stderr.write(`conductor skills: unknown subcommand "${sub ?? ""}". Usage: list\n`);
+	return 1;
+}
+
 export async function runCli(argv: string[], io: CliIO): Promise<number> {
 	const [command, ...rest] = argv;
 
@@ -141,6 +190,10 @@ export async function runCli(argv: string[], io: CliIO): Promise<number> {
 				return await runDoctorCommand(rest, io);
 			case "config":
 				return await runConfigCommand(rest, io);
+			case "roles":
+				return await runRolesCommand(rest, io);
+			case "skills":
+				return await runSkillsCommand(rest, io);
 			case "chat":
 				return await runChat({ cwd: io.cwd, args: rest, stdout: io.stdout, stderr: io.stderr });
 			case "--help":

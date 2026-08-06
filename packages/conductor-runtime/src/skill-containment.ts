@@ -26,6 +26,8 @@
  * fields still satisfies this shape.
  */
 
+import { isWithinRoot, resolveRealPath } from "./workspace-policy.ts";
+
 export interface SkillCatalogEntry {
 	name: string;
 	description: string;
@@ -64,5 +66,50 @@ export function filterSkillsWithinRoots(
 	skills: SkillCatalogEntry[],
 	skillsRoots: string[],
 ): FilterSkillsWithinRootsResult {
-	throw new Error("not implemented");
+	const included: ContainedSkillCatalogEntry[] = [];
+	const excluded: SkillContainmentViolation[] = [];
+
+	let resolvedRoots: string[];
+	try {
+		// Each root is canonicalized against itself (mirrors workspace-policy.ts's own
+		// `realpathOfExistingAncestorOrLexical` pattern for a path that is its own base directory).
+		resolvedRoots = skillsRoots.map((root) => resolveRealPath(root, root));
+	} catch (error) {
+		// Fail-closed (R20): if a configured skills-root itself cannot be resolved, no skill can be
+		// PROVEN contained against it — exclude every skill in this batch rather than silently
+		// treating an unresolvable root as "no root, so nothing is contained" or worse "anything
+		// goes".
+		const reason = `unable to resolve a configured skills-root: ${error instanceof Error ? error.message : String(error)}`;
+		for (const skill of skills) {
+			excluded.push({ name: skill.name, declaredLocation: skill.location, reason });
+		}
+		return { included, excluded };
+	}
+
+	for (const skill of skills) {
+		try {
+			const realPath = resolveRealPath(skill.location, skill.location);
+			const contained = resolvedRoots.some((root) => isWithinRoot(realPath, root));
+			if (contained) {
+				included.push({ ...skill, realPath });
+			} else {
+				excluded.push({
+					name: skill.name,
+					declaredLocation: skill.location,
+					reason: `"${skill.location}" resolves outside every known skills-root`,
+				});
+			}
+		} catch (error) {
+			// A genuine I/O oddity resolving this one skill's location never poisons the rest of the
+			// batch (R20 extends BR-2's non-partial guarantee from roles to skills) — exclude just
+			// this skill with a named reason.
+			excluded.push({
+				name: skill.name,
+				declaredLocation: skill.location,
+				reason: `unable to resolve location: ${error instanceof Error ? error.message : String(error)}`,
+			});
+		}
+	}
+
+	return { included, excluded };
 }

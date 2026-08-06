@@ -115,6 +115,73 @@ describe("parseResumeArgs (pure)", () => {
 			if (result.ok) expect(result.yesFlagActive).toBe(false);
 		});
 	});
+
+	// Fase 3 (gate2-spec-fase3.md FR-1/FR-2): --role composes with every existing shape the same
+	// position-independent way --yes already does. This function only EXTRACTS the raw role id --
+	// resolving it against real role data (found/not-found, FR-2) is chat.ts's own job one level up
+	// (role-resolution.ts), the same split --resume <id> already draws (this function never touches
+	// the filesystem to check the id is real).
+	describe("--role <role-id> composes with every existing shape, position-independent", () => {
+		it("--role alone (no other args) -> fresh + roleId set", () => {
+			expect(parseResumeArgs(["--role", "backend-engineer"])).toEqual({
+				ok: true,
+				resume: { kind: "fresh" },
+				yesFlagActive: false,
+				roleId: "backend-engineer",
+			});
+		});
+
+		it("--role --resume -> recent + roleId set", () => {
+			expect(parseResumeArgs(["--role", "backend-engineer", "--resume"])).toEqual({
+				ok: true,
+				resume: { kind: "recent" },
+				yesFlagActive: false,
+				roleId: "backend-engineer",
+			});
+		});
+
+		it("--resume <id> --role <role> -> specific + roleId set, regardless of --role's position", () => {
+			expect(parseResumeArgs(["--resume", "abc123", "--role", "backend-engineer"])).toEqual({
+				ok: true,
+				resume: { kind: "specific", idOrPrefix: "abc123" },
+				yesFlagActive: false,
+				roleId: "backend-engineer",
+			});
+		});
+
+		it("--role composes with --yes too, either order", () => {
+			expect(parseResumeArgs(["--yes", "--role", "backend-engineer"])).toEqual({
+				ok: true,
+				resume: { kind: "fresh" },
+				yesFlagActive: true,
+				roleId: "backend-engineer",
+			});
+			expect(parseResumeArgs(["--role", "backend-engineer", "--yes"])).toEqual({
+				ok: true,
+				resume: { kind: "fresh" },
+				yesFlagActive: true,
+				roleId: "backend-engineer",
+			});
+		});
+
+		it("no --role anywhere -> roleId stays undefined (regression pin, not just absence-implies-default)", () => {
+			const result = parseResumeArgs(["--resume", "abc123"]);
+			expect(result.ok).toBe(true);
+			if (result.ok) expect(result.roleId).toBeUndefined();
+		});
+
+		it("rejects --role with no value at all", () => {
+			const result = parseResumeArgs(["--role"]);
+			expect(result.ok).toBe(false);
+			if (!result.ok) expect(result.error).toMatch(/--role requires a role id/);
+		});
+
+		it("rejects --role followed by what looks like another flag, instead of treating it as a role id", () => {
+			const result = parseResumeArgs(["--role", "--resume"]);
+			expect(result.ok).toBe(false);
+			if (!result.ok) expect(result.error).toMatch(/--role requires a role id/);
+		});
+	});
 });
 
 describe("resolveSessionManager (real filesystem, real SessionManager, scoped to .conductor/sessions/)", () => {

@@ -48,14 +48,41 @@ export {
 	type ConductorSession,
 	type CreateConductorSessionOptions,
 	createConductorSession,
+	type TaskDelegationOptions,
 } from "./session.ts";
 export { installSessionRedactionGuard } from "./session-redaction-guard.ts";
+export {
+	BudgetExhaustedError,
+	type BudgetReservation,
+	type BudgetUsage,
+	createBudgetGuardedModelRuntime,
+	createSharedBudget,
+	type SharedBudget,
+} from "./shared-budget.ts";
+export {
+	type ContainedSkillCatalogEntry,
+	type FilterSkillsWithinRootsResult,
+	filterSkillsWithinRoots,
+	type SkillCatalogEntry,
+	type SkillContainmentViolation,
+} from "./skill-containment.ts";
 export { sanitizeForTerminal } from "./terminal-sanitize.ts";
 export {
 	type ConductorNoteRecord,
 	type ConductorNoteToolHandle,
 	createConductorNoteTool,
 } from "./tools/conductor-note.ts";
+export {
+	type ConductorRoleView,
+	type CreateTaskToolDependencies,
+	createTaskTool,
+	DEFAULT_MAX_DELEGATION_DEPTH,
+	type DelegationEvidence,
+	type ModelRoleView,
+	type RoleRegistryView,
+	type TaskToolParams,
+	type TaskToolResult,
+} from "./tools/task.ts";
 export {
 	defaultProtectedPaths,
 	evaluateToolPath,

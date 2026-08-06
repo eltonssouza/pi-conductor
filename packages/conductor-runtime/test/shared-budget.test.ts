@@ -51,7 +51,7 @@ describe("SharedBudget: FR-17/R16a — exhaustion is a graceful, fail-closed sig
 	});
 });
 
-describe("SharedBudget: R16a — an invalid estimate is treated as \"uncertain\" and denied, never silently allowed", () => {
+describe('SharedBudget: R16a — an invalid estimate is treated as "uncertain" and denied, never silently allowed', () => {
 	it("rejects NaN and negative estimates instead of treating them as zero-cost or unlimited", () => {
 		const budget = createSharedBudget(100);
 		expect(budget.reserve(Number.NaN)).toBeNull();

@@ -1,5 +1,6 @@
 import type { InlineExtension } from "@earendil-works/pi-coding-agent";
 import { type CreateAgentSessionResult, DefaultResourceLoader } from "@earendil-works/pi-coding-agent";
+import type { AuditTrailWriter } from "./audit-trail.ts";
 import type { EffectivePolicyInput } from "./permission-engine.ts";
 import { createPermissionGateExtension, type PermissionGateDecision } from "./permission-gate.ts";
 
@@ -84,6 +85,21 @@ export interface ConductorResourceLoaderOptions {
 	yesFlagActive?: boolean;
 	/** Test-only: extra inline extensions -- same contract as `CreateConductorSessionOptions.extraExtensions`. */
 	extraExtensions?: InlineExtension[];
+	/**
+	 * R13/R14/T41 (ADR 0004 §2.2/§6/§8) -- same contract as `PermissionGateOptions.auditTrailWriter`:
+	 * when supplied, this class's own internal `createPermissionGateExtension(...)` call is fiared to
+	 * this SAME writer instance instead of building its own default, so `session.ts`'s composition
+	 * root (and, through it, a registered `task` tool) shares the one audit trail this branch's gate
+	 * writes to. Omitted entirely: behaves exactly as before (this class's own default writer).
+	 */
+	auditTrailWriter?: AuditTrailWriter;
+	/**
+	 * Fase 3 (`conductor chat --role <slug>`, ADR 0004 §16 appendix `ConductorRole.systemPrompt`):
+	 * when supplied, replaces `buildFase1SystemPrompt(config)` outright as this loader's system
+	 * prompt -- the mechanism a role's own persona becomes the basis of the session. Omitted
+	 * entirely: this class's Fase 1 behavior (`buildFase1SystemPrompt(options.config)`) is unchanged.
+	 */
+	systemPromptOverride?: string;
 }
 
 /**
@@ -110,7 +126,10 @@ export class ConductorResourceLoader {
 		this.inner = new DefaultResourceLoader({
 			cwd: options.workspaceRoot,
 			agentDir: options.agentDir,
-			systemPromptOverride: () => buildFase1SystemPrompt(options.config),
+			// Fase 3: a role's own persona (systemPromptOverride passed in) takes precedence over the
+			// Fase 1 config-derived prompt when supplied -- both are still a static string/thunk, never
+			// re-derived per turn.
+			systemPromptOverride: () => options.systemPromptOverride ?? buildFase1SystemPrompt(options.config),
 			// Secure defaults inherited from Gate 3 (Fase 0 threat model, §5 item 5/§7) unchanged: no
 			// third-party extension/skill/prompt-template/theme/context-file ever enters the TCB --
 			// only this first-party permission-gate extension is loaded.
@@ -127,6 +146,7 @@ export class ConductorResourceLoader {
 					onDecision: options.onDecision,
 					policy: options.policy,
 					yesFlagActive: options.yesFlagActive,
+					auditTrailWriter: options.auditTrailWriter,
 				}),
 				...(options.extraExtensions ?? []),
 			],
@@ -138,7 +158,7 @@ export class ConductorResourceLoader {
 		return this.inner.getExtensions();
 	}
 
-	/** Repassed as `resourceLoader` to createAgentSession()/createConductorSession(). */
+	/** Repassed as `resourceLoader` to the Pi SDK's session factory / createConductorSession. */
 	get pi(): DefaultResourceLoader {
 		return this.inner;
 	}

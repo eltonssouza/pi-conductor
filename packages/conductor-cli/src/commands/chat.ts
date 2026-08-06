@@ -31,9 +31,15 @@ import {
 	ConfigNotFoundError,
 	ConfigParseError,
 	ConfigValidationError,
+	type RoleRegistry,
 	readConfig,
 } from "@conductor/config";
-import { createConductorSession, defaultProtectedPaths, type PermissionGateDecision } from "@conductor/runtime";
+import {
+	createConductorSession,
+	createSharedBudget,
+	defaultProtectedPaths,
+	type PermissionGateDecision,
+} from "@conductor/runtime";
 import type { Model } from "@earendil-works/pi-ai";
 import { ModelRuntime, type SessionEntry, type SessionManager } from "@earendil-works/pi-coding-agent";
 import {
@@ -47,6 +53,14 @@ import {
 } from "@earendil-works/pi-tui";
 import { getGitStatus, resolveTimeoutMs } from "../git-status.ts";
 import { resolveEffectivePolicy } from "./chat/policy-resolution.ts";
+import {
+	type ChatRole,
+	describeUnknownChatRole,
+	loadRealRoleRegistry,
+	ROOT_CALLER_ROLE_ID,
+	resolveChatRoleFromRegistry,
+	toTaskRoleRegistryView,
+} from "./chat/role-resolution.ts";
 import {
 	parseResumeArgs,
 	resolveConductorAgentDir,
@@ -62,6 +76,23 @@ import { createConductorChatUiContext } from "./chat/tui-ui-context.ts";
 const DEFAULT_CHAT_GIT_TIMEOUT_MS = 5000;
 const EXIT_COMMANDS = new Set(["/exit", "/quit"]);
 
+/**
+ * Gate 6 real-wiring loop-back (Grupo G, ADR 0004 §5/§16 appendix): the ONE `SharedBudget` ceiling
+ * for this `conductor chat` invocation's entire delegation tree (R16b -- constructed once, here, at
+ * this composition root, never per-`task`-call). No `--task-budget` CLI flag exists yet (a real
+ * follow-up, not invented speculatively here) -- this is a conservative, documented DEFAULT, not a
+ * value the library prescribes: `SharedBudget` itself only has to be BOUNDED, never unbounded, to
+ * satisfy the bulkhead reasoning `shared-budget.ts`'s own header already grounds (Stability Patterns
+ * for Production / Release It! §3.3/§3.8/§3.12, "partition resources, shed the non-essential" --
+ * `cdt library --gate 6`, top score 0.625); the library has no opinion on the exact token count, so
+ * this number is an engineering judgment call, documented as one rather than left unexplained. Sized
+ * at 50x `tools/task.ts`'s own `DEFAULT_TASK_TOKEN_ESTIMATE` (4_000) -- generous enough for a real
+ * interactive session to delegate several non-trivial sub-tasks without hitting the ceiling
+ * mid-conversation, while still finite (never `Infinity`/`Number.MAX_SAFE_INTEGER`, which would
+ * defeat the whole point of a shared ceiling existing at all).
+ */
+const DEFAULT_CHAT_TASK_BUDGET_TOKENS = 200_000;
+
 export interface ChatOptions {
 	cwd: string;
 	args: string[];
@@ -75,6 +106,25 @@ export interface ChatOptions {
 
 function describeError(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * The `--role <slug>` session-shape override (FR-20): a resolved role's `tools` REPLACES the
+ * default allowlist outright and its `systemPrompt` REPLACES the Fase 1 config-derived one; omitted
+ * entirely when no role was resolved (round A/B1's unrestricted shape, byte-for-byte unchanged).
+ * Extracted as its own pure function so this mechanism is unit-testable directly against a
+ * synthetic `ChatRole` with a non-empty `tools` list, independent of whether any REAL built-in role
+ * currently declares one (none do today -- Gap 2's own finding, see role-resolution.ts's header) --
+ * a test fixture standing in for a role's shape is not the "invent a tools list for a real role"
+ * this phase's instructions warn against; it is the same test-double reasoning "Outside-In
+ * Development" already grounds elsewhere in this codebase for isolating a mechanism from data nobody
+ * has authored yet.
+ */
+export function buildRoleSessionOverrides(role: ChatRole | undefined): {
+	toolsOverride?: string[];
+	systemPromptOverride?: string;
+} {
+	return role !== undefined ? { toolsOverride: role.tools, systemPromptOverride: role.systemPrompt } : {};
 }
 
 function splitProviderModel(value: string): [string, string] {
@@ -99,11 +149,74 @@ interface PreparedChat {
 	sessionManager: SessionManager;
 	/** FR-19 (ADR 0003 §4): parsed fresh from this invocation's argv, never persisted. */
 	yesFlagActive: boolean;
+	/**
+	 * `--role <slug>` (Fase 3, gate2-spec-fase3.md FR-1/FR-2): resolved here, one level up from
+	 * `runChat`, so a bad role name fails prepareChat's own clean, terminal-free error path exactly
+	 * like every other prepareChat failure (no `.conductor/config.json`, no matching model, ...) --
+	 * never a session that starts anyway and then discovers the role doesn't exist. `undefined` when
+	 * no `--role` flag was passed at all -- the unrestricted, round A/B1 session shape.
+	 */
+	role?: ChatRole;
+	/**
+	 * Gate 6 real-wiring loop-back: the REAL, file-backed Role Registry (`role-resolution.ts`'s
+	 * `loadRealRoleRegistry`), loaded exactly ONCE per invocation here and reused by `runChat` to
+	 * build `task`'s `RoleRegistryView` -- regardless of whether `--role` was passed. `--role`
+	 * resolution above and `task`'s own delegation authorization are two different consumers of the
+	 * SAME registry snapshot, never two independent loads that could observe different on-disk state.
+	 */
+	roleRegistry: RoleRegistry;
 }
 
 type PrepareResult = { ok: true; prepared: PreparedChat } | { ok: false; message: string };
 
 async function prepareChat(options: ChatOptions): Promise<PrepareResult> {
+	// argv parsing + --role resolution come FIRST, before any I/O (config read, model runtime
+	// construction) -- both are pure/cheap, so a typo'd flag (an unrecognized argument, or a role id
+	// that does not exist, FR-2) fails in microseconds rather than only after paying for a real
+	// ModelRuntime.create() round trip (which, using Pi's global default credential paths when no
+	// `createModelRuntime` override is supplied, can itself be slow/blocking) just to discover the
+	// invocation was never going to proceed anyway.
+	const parsedArgs = parseResumeArgs(options.args);
+	if (!parsedArgs.ok) {
+		return { ok: false, message: parsedArgs.error };
+	}
+
+	// Gate 6 real-wiring loop-back: loaded exactly ONCE per invocation, regardless of whether --role
+	// was passed -- runChat reuses this same snapshot to build task's RoleRegistryView (Gap 1), and
+	// --role resolution below is the OTHER consumer of it (never two independent loads that could
+	// observe different on-disk state within the same invocation).
+	const roleRegistry = loadRealRoleRegistry({ cwd: options.cwd });
+
+	// --role <slug> (FR-1/FR-2): resolved before the session is ever opened -- an unknown role id is a
+	// clean, terminal-free CLI error, never a session that starts anyway and only fails once the model
+	// tries to act like a role that doesn't exist.
+	let role: ChatRole | undefined;
+	if (parsedArgs.roleId !== undefined) {
+		const resolved = resolveChatRoleFromRegistry(roleRegistry, parsedArgs.roleId);
+		if (resolved.status === "not-found") {
+			return { ok: false, message: describeUnknownChatRole(resolved.roleId, roleRegistry) };
+		}
+		// GAP 2 (orchestrator finding): NONE of the 37 real built-in roles declare a tools allowlist
+		// yet (role-catalog.ts's own header) -- role.tools is `[]` for every one of them today. Silently
+		// proceeding would open a real session with ZERO usable tools (not even `read`), which is a
+		// confusing, effectively-broken command for any real role, not a security boundary anyone
+		// intended. Fail closed WITH a clear, actionable signal instead (same "honest failure over a
+		// silent, confusing bug" discipline the rest of this file already applies to every other
+		// prepareChat failure) -- see role-resolution.ts's own header for why this is not "invent a
+		// tools list to work around it".
+		if (resolved.role.tools.length === 0) {
+			return {
+				ok: false,
+				message:
+					`conductor chat: role "${resolved.role.name}" does not declare a tools allowlist yet ` +
+					"(no built-in role currently does -- an open, pending decision, see " +
+					"src/commands/role-catalog.ts's header) -- refusing to start a session with zero usable " +
+					"tools. Run `conductor chat` without --role.",
+			};
+		}
+		role = resolved.role;
+	}
+
 	let config: ConductorConfig;
 	try {
 		config = readConfig(options.cwd);
@@ -138,11 +251,6 @@ async function prepareChat(options: ChatOptions): Promise<PrepareResult> {
 		};
 	}
 
-	const parsedArgs = parseResumeArgs(options.args);
-	if (!parsedArgs.ok) {
-		return { ok: false, message: parsedArgs.error };
-	}
-
 	const sessionsDir = resolveConductorSessionsDir(options.cwd);
 	let sessionManager: SessionManager;
 	try {
@@ -160,7 +268,15 @@ async function prepareChat(options: ChatOptions): Promise<PrepareResult> {
 
 	return {
 		ok: true,
-		prepared: { config, model, modelRuntime, sessionManager, yesFlagActive: parsedArgs.yesFlagActive },
+		prepared: {
+			config,
+			model,
+			modelRuntime,
+			sessionManager,
+			yesFlagActive: parsedArgs.yesFlagActive,
+			role,
+			roleRegistry,
+		},
 	};
 }
 
@@ -170,7 +286,7 @@ export async function runChat(options: ChatOptions): Promise<number> {
 		options.stderr.write(`${prepared.message}\n`);
 		return 1;
 	}
-	const { config, model, modelRuntime, sessionManager, yesFlagActive } = prepared.prepared;
+	const { config, model, modelRuntime, sessionManager, yesFlagActive, role, roleRegistry } = prepared.prepared;
 
 	const agentDir = resolveConductorAgentDir(options.cwd);
 
@@ -179,6 +295,26 @@ export async function runChat(options: ChatOptions): Promise<number> {
 	// call site -- see policy-resolution.ts's own header for why this composition lives here rather
 	// than in @conductor/runtime.
 	const policy = resolveEffectivePolicy(options.cwd);
+
+	// --role <slug> (FR-1/FR-2, Fase 3): the role's own persona replaces the Fase 1 config-derived
+	// system prompt, and its `tools` list REPLACES the round A/B1 default `["read","write","edit",
+	// "bash"]` outright -- a role's `tools` is a closed allowlist (FR-20: "OBRIGATÓRIO ... nunca
+	// 'undefined = tudo'"), not an addition to the default. `role.modelRole` selecting a concrete
+	// model is an OPEN, DECLARED follow-up (same gap already named by the parallel Gate 6 task-tool
+	// stream: "modelRole -> Model resolution ... no such registry exists anywhere in the codebase
+	// yet"): this wiring does not invent one, so `model`/`config.provider.model` are left exactly as
+	// resolved above regardless of `--role`.
+	//
+	// Gap 1 (orchestrator finding, Gate 6 real-wiring loop-back): `taskDelegation` was never built
+	// here before -- `task` was implemented and unit-tested end to end, but no real `conductor chat`
+	// invocation ever passed the collaborators `createConductorSession` requires to register it, so it
+	// was reachable from NO real session. `callerRole` is the resolved `--role`'s own name when one was
+	// given (its `canSpawn` list from the real, ported roles.py graph governs what it may delegate to);
+	// otherwise it is `ROOT_CALLER_ROLE_ID`, the unrestricted top-level session's own identity (see
+	// role-resolution.ts's header for the grounded reasoning on why that identity is not further
+	// restricted by canSpawn the way a real, constrained role is).
+	const callerRole = role !== undefined ? role.name : ROOT_CALLER_ROLE_ID;
+	const sharedBudget = createSharedBudget(DEFAULT_CHAT_TASK_BUDGET_TOKENS);
 
 	const decisions: PermissionGateDecision[] = [];
 	const conductorSession = await createConductorSession({
@@ -192,6 +328,12 @@ export async function runChat(options: ChatOptions): Promise<number> {
 		onDecision: (decision) => decisions.push(decision),
 		policy,
 		yesFlagActive,
+		taskDelegation: {
+			roleRegistry: toTaskRoleRegistryView(roleRegistry),
+			sharedBudget,
+			callerRole,
+		},
+		...buildRoleSessionOverrides(role),
 	});
 
 	const terminal = options.terminal ?? new ProcessTerminal();

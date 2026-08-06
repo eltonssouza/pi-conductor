@@ -30,11 +30,10 @@
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createAuditTrailWriter } from "../../src/audit-trail.ts";
 import type { EffectivePolicyInput } from "../../src/permission-engine.ts";
-import type { BudgetReservation, BudgetUsage, SharedBudget } from "../../src/shared-budget.ts";
+import type { BudgetReservation, SharedBudget } from "../../src/shared-budget.ts";
 import {
 	assertValidTaskToolResult,
 	type ConductorRoleView,
@@ -56,7 +55,10 @@ type RoleFixture = { tools: string[]; canSpawn: string[] };
  * exists exactly to make this decoupling possible. */
 function makeRoleRegistry(roles: Record<string, RoleFixture>): RoleRegistryView {
 	const views: Record<string, ConductorRoleView> = Object.fromEntries(
-		Object.entries(roles).map(([name, r]) => [name, { name, tools: r.tools, canSpawn: r.canSpawn, modelRole: "standard" }]),
+		Object.entries(roles).map(([name, r]) => [
+			name,
+			{ name, tools: r.tools, canSpawn: r.canSpawn, modelRole: "standard" },
+		]),
 	);
 	return {
 		get: (roleId) => views[roleId],
@@ -351,7 +353,12 @@ describe("assertValidTaskToolResult — G6/BR-9/BR-10: evidence is an explicit, 
 	it("rejects a result whose details is missing a transcript reference", () => {
 		const malformed = {
 			content: [{ type: "text", text: "done" }],
-			details: { role: "software-engineer", depth: 1, tokenCost: { input: 1, output: 1, total: 2 }, budgetRemaining: 99 },
+			details: {
+				role: "software-engineer",
+				depth: 1,
+				tokenCost: { input: 1, output: 1, total: 2 },
+				budgetRemaining: 99,
+			},
 		};
 		expect(() => assertValidTaskToolResult(malformed)).toThrow(/transcript/i);
 	});
@@ -402,7 +409,14 @@ describe("runTask: T42 (gate3-addendum-fase3.md §9) — the evidence transcript
 				api: "messages",
 				provider: "anthropic",
 				model: "claude-sonnet-5",
-				usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+				usage: {
+					input: 1,
+					output: 1,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 2,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
 				stopReason: "stop",
 				timestamp: Date.now(),
 			});

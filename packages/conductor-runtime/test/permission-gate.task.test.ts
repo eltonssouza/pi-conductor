@@ -13,7 +13,13 @@
  * calls `ctx.ui.confirm()` at all -- these tests fail RED for that reason.
  */
 
-import type { CustomToolCallEvent, ExtensionAPI, ExtensionContext, ToolCallEvent, ToolCallEventResult } from "@earendil-works/pi-coding-agent";
+import type {
+	CustomToolCallEvent,
+	ExtensionAPI,
+	ExtensionContext,
+	ToolCallEvent,
+	ToolCallEventResult,
+} from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createPermissionGateExtension } from "../src/permission-gate.ts";
 import { createTestUiContext, type TestUiContext } from "./support/test-ui.ts";

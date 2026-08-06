@@ -14,8 +14,9 @@ import { join } from "node:path";
 import { writeConfig } from "@conductor/config";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type { ChatRole } from "../../src/commands/chat/role-resolution.ts";
 import { resolveConductorAgentDir, resolveConductorSessionsDir } from "../../src/commands/chat/session-resolution.ts";
-import { runChat } from "../../src/commands/chat.ts";
+import { buildRoleSessionOverrides, runChat } from "../../src/commands/chat.ts";
 import { registerFakeModel } from "../support/fake-model.ts";
 import { FakeTerminal } from "../support/fake-terminal.ts";
 import { createCapturingIo } from "../support/io.ts";
@@ -244,6 +245,94 @@ describe("runChat -- full happy path (injected FakeTerminal + scripted model, no
 });
 
 /**
+ * `conductor chat --role <slug>` (Gate 6 real-wiring loop-back, gate2-spec-fase3.md FR-1/FR-2; ADR
+ * 0004 §16 appendix). `role-resolution.ts` now resolves against the REAL, file-backed 37-role
+ * catalog (a parallel Gate 6 stream's `role-catalog.ts`/`builtin-roles-data.ts`) instead of the small
+ * hand-written placeholder this file used to test against. That real catalog surfaced GAP 2 (the
+ * orchestrator's finding): no built-in role declares a `tools` allowlist yet, so `role.tools` is `[]`
+ * for every one of the 37 roles today -- the second test below pins `chat.ts`'s own fail-closed
+ * refusal for that case, replacing the old "restricts tools"/"uses persona" tests, which depended on
+ * the placeholder's own non-empty, made-up tools lists that no real role actually has. The mechanism
+ * those old tests proved (`toolsOverride`/`systemPromptOverride` actually reaching the live session)
+ * is still covered, independent of real per-role data: `buildRoleSessionOverrides`'s own unit test
+ * below (a pure function, synthetic `ChatRole` fixture) plus
+ * `packages/conductor-runtime/test/session-role-overrides.test.ts` (the live-session mechanism, one
+ * layer down, exercised directly via `toolsOverride`/`systemPromptOverride` rather than through a
+ * resolved `ChatRole`).
+ */
+describe("runChat -- --role <slug> (Fase 3, FR-1/FR-2)", () => {
+	it("returns a clear error and exit code 1 for an unknown role, before any session/terminal is touched", async () => {
+		writeValidConfig(project.root);
+		const { io, stderr } = createCapturingIo(project.root);
+
+		const code = await runChat({
+			cwd: project.root,
+			args: ["--role", "role-that-does-not-exist"],
+			stdout: io.stdout,
+			stderr: io.stderr,
+		});
+
+		expect(code).toBe(1);
+		expect(stderr()).toMatch(/unknown role "role-that-does-not-exist"/);
+	});
+
+	it(
+		"GAP 2: refuses a real role that does not declare a tools allowlist yet, instead of silently " +
+			"opening a session with zero usable tools -- exit code 1, before any session/terminal is touched",
+		async () => {
+			writeValidConfig(project.root);
+			const { io, stderr } = createCapturingIo(project.root);
+
+			// "backend-engineer" is a real, registered built-in role (role-catalog.ts's own real
+			// templates/agents/backend-engineer.md) -- and, like every one of the 37 today, its `tools`
+			// is `[]` (role-catalog.ts's own documented gap). Before Gap 2's fix this would have opened a
+			// real session with no tools at all, silently; now it must be refused up front.
+			const code = await runChat({
+				cwd: project.root,
+				args: ["--role", "backend-engineer"],
+				stdout: io.stdout,
+				stderr: io.stderr,
+			});
+
+			expect(code).toBe(1);
+			expect(stderr()).toMatch(/role "backend-engineer" does not declare a tools allowlist yet/);
+			expect(stderr()).toMatch(/Run `conductor chat` without --role/);
+		},
+	);
+});
+
+describe("buildRoleSessionOverrides -- the --role override mechanism, independent of real per-role data", () => {
+	it("returns no overrides when no role was resolved (round A/B1's unrestricted shape, unchanged)", () => {
+		expect(buildRoleSessionOverrides(undefined)).toEqual({});
+	});
+
+	it(
+		"threads a resolved role's own tools/systemPrompt through verbatim -- proven against a synthetic " +
+			"fixture since no real built-in role declares tools yet (Gap 2)",
+		() => {
+			const fixtureRole: ChatRole = {
+				name: "fixture-role",
+				description: "A synthetic role fixture -- not a real built-in role.",
+				systemPrompt: "You are a fixture role.",
+				tools: ["read"],
+				modelRole: "standard",
+				skills: [],
+				canSpawn: [],
+				gates: [],
+				source: "builtin",
+				contentHash: "0".repeat(64),
+				filePath: "/dev/null",
+			};
+
+			expect(buildRoleSessionOverrides(fixtureRole)).toEqual({
+				toolsOverride: ["read"],
+				systemPromptOverride: "You are a fixture role.",
+			});
+		},
+	);
+});
+
+/**
  * T14 gap (gate3-fase1-addendum.md §2 T14; ADR 0002 §7.4, "o transcrito"; Gate 8 finding §6.1,
  * docs/conductor/gate8-validation-fase1.md): confirm.ts's sanitization only ever protected the
  * approval-dialog sink (proven adversarially by tui-integration.test.ts). The live chat transcript
@@ -354,4 +443,66 @@ describe("runChat -- live transcript sanitization (T14 gap, gate8-validation-fas
 		terminal.sendInput("\r");
 		expect(await runPromise).toBe(0);
 	}, 45_000);
+});
+
+/**
+ * Gate 6 real-wiring loop-back (Gap 1, the orchestrator's finding): before this fix,
+ * `createConductorSession`'s own `tools: [...]` array never named "task" for a REAL `conductor chat`
+ * invocation -- `taskDelegation` was never built by `runChat`. This test drives `task` through the
+ * literal, unmodified `runChat` entry point (the exact function `conductor chat` invokes), not a
+ * hand-assembled equivalent call -- `test/commands/chat/task-delegation.test.ts` covers the deeper
+ * authorization/evidence/denial semantics (against the same real role registry) by calling
+ * `createConductorSession` directly, the way `runChat` itself does internally.
+ */
+describe("runChat -- task delegation reachable at the real command entry point (Gap 1)", () => {
+	it('"task" is a genuinely reachable tool of a real `conductor chat` session -- the permission-gate\'s own real task branch asks for approval, naming the target role', async () => {
+		writeValidConfig(project.root);
+		const terminal = new FakeTerminal();
+		const { io } = createCapturingIo(project.root);
+
+		const runPromise = runChat({
+			cwd: project.root,
+			args: [],
+			stdout: io.stdout,
+			stderr: io.stderr,
+			terminal,
+			createModelRuntime: async () => {
+				const runtime = await ModelRuntime.create({
+					authPath: join(project.root, ".conductor", "auth.json"),
+					modelsPath: join(project.root, ".conductor", "models.json"),
+					allowModelNetwork: false,
+				});
+				registerFakeModel(runtime, "conductor-fake", [
+					{ toolCalls: [{ name: "task", args: { role: "sdet", prompt: "Summarize the test strategy." } }] },
+					{ text: "delegation attempt finished" },
+				]);
+				return runtime;
+			},
+		});
+
+		await waitUntil(() => terminal.allWrites().includes("conductor-fake/conductor-cli-fake-1"));
+		terminal.sendInput("delegate a task to sdet");
+		terminal.sendInput("\r");
+
+		// The permission-gate's REAL "task" branch (permission-gate.ts) rendered a real approval
+		// overlay naming the target role -- an unregistered tool name would never reach the gate as a
+		// decision at all (role-resolution.test.ts's own header documents that stronger contrast), so
+		// this overlay appearing IS the proof "task" is a genuinely reachable tool of this session.
+		await waitUntil(() => terminal.allWrites().includes('Approve delegating to role "sdet"?'));
+		terminal.sendInput("\r"); // Enter = approve (default first choice)
+
+		// Approving lets runTask actually attempt a real child spawn (a second, real
+		// ModelRuntime.create() + AgentSession construction, which then fails gracefully -- no model
+		// is configured for the child in this test -- before the outer session's own second scripted
+		// response completes the turn). That is genuinely more real work than this file's other tests
+		// do after their own approval step, so this wait gets extra headroom under full-suite
+		// concurrent load (this file's own "generous default" reasoning, observed directly: 20s
+		// occasionally wasn't enough here specifically, while every other test in this file reliably
+		// clears it well within 20s).
+		await waitUntil(() => terminal.allWrites().includes("delegation attempt finished"), 40_000);
+
+		terminal.sendInput("/exit");
+		terminal.sendInput("\r");
+		expect(await runPromise).toBe(0);
+	}, 60_000);
 });

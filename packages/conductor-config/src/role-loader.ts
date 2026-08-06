@@ -96,12 +96,69 @@ export function buildRoleRegistry(
 	roleSources: ReadonlyArray<ConductorRole>,
 	knownSkills: ReadonlySet<string>,
 ): RoleRegistry {
-	throw new Error("not implemented");
+	const roles = new Map<string, ConductorRole>();
+	const diagnostics: RoleDiagnostic[] = [];
+
+	for (const role of roleSources) {
+		const missingSkills = role.skills.filter((skill) => !knownSkills.has(skill));
+		if (missingSkills.length > 0) {
+			// Fail-closed, non-partial (BR-1/R21/T39): the role does not enter the registry AT ALL —
+			// not with the missing skill silently dropped, not with a hole where it should be. Every
+			// missing skill gets its own named diagnostic (not just the first) so a project fixing
+			// the role sees the whole gap in one pass. This role's failure never poisons any other
+			// role in the same batch — the loop simply continues.
+			for (const skill of missingSkills) {
+				diagnostics.push({ kind: "unknown-skill", roleId: role.name, skill });
+			}
+			continue;
+		}
+		roles.set(role.name, role);
+	}
+
+	return { roles, diagnostics };
 }
 
 export type ResolveRoleResult =
 	| { status: "found"; role: ConductorRole }
 	| { status: "not-found"; roleId: string; suggestion?: string };
+
+/** Standard Levenshtein edit distance (insert/delete/substitute), used only for FR-2's
+ * suggestion-by-proximity — not a security boundary, so no need for the Damerau-Levenshtein
+ * transposition variant `difflib` uses; a plain edit distance already scores an adjacent-letter
+ * swap low enough (2, one substitution each way) to clear the similarity threshold below. */
+function levenshteinDistance(a: string, b: string): number {
+	const rows = a.length + 1;
+	const cols = b.length + 1;
+	const dp: number[][] = Array.from({ length: rows }, () => new Array<number>(cols).fill(0));
+	for (let i = 0; i < rows; i++) dp[i][0] = i;
+	for (let j = 0; j < cols; j++) dp[0][j] = j;
+	for (let i = 1; i < rows; i++) {
+		for (let j = 1; j < cols; j++) {
+			dp[i][j] =
+				a[i - 1] === b[j - 1] ? dp[i - 1][j - 1] : 1 + Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
+		}
+	}
+	return dp[rows - 1][cols - 1];
+}
+
+/** `difflib.get_close_matches`'s default similarity cutoff (0.6) ported to a plain edit-distance
+ * ratio: `1 - distance / max(len(a), len(b))`. Below this, two ids are unrelated enough that a
+ * suggestion would be noise rather than help (task.py:152-162's UX problem, not its algorithm). */
+const SUGGESTION_SIMILARITY_CUTOFF = 0.6;
+
+function closestKnownRoleId(roleId: string, candidates: Iterable<string>): string | undefined {
+	let best: string | undefined;
+	let bestRatio = 0;
+	for (const candidate of candidates) {
+		const maxLen = Math.max(roleId.length, candidate.length, 1);
+		const ratio = 1 - levenshteinDistance(roleId, candidate) / maxLen;
+		if (ratio > bestRatio) {
+			bestRatio = ratio;
+			best = candidate;
+		}
+	}
+	return bestRatio >= SUGGESTION_SIMILARITY_CUTOFF ? best : undefined;
+}
 
 /**
  * FR-1/FR-2: look up a role by id (name). An unknown id is never a generic silent session — it names
@@ -112,7 +169,11 @@ export type ResolveRoleResult =
  * same algorithm (gate2-spec-fase3.md FR-2).
  */
 export function resolveRole(registry: RoleRegistry, roleId: string): ResolveRoleResult {
-	throw new Error("not implemented");
+	const role = registry.roles.get(roleId);
+	if (role) return { status: "found", role };
+
+	const suggestion = closestKnownRoleId(roleId, registry.roles.keys());
+	return suggestion ? { status: "not-found", roleId, suggestion } : { status: "not-found", roleId };
 }
 
 /** FR-3: the minimal fields `conductor roles list` needs per row — enough to answer "what role do I
@@ -126,7 +187,16 @@ export interface RoleListEntry {
 }
 
 export function listRoles(registry: RoleRegistry): RoleListEntry[] {
-	throw new Error("not implemented");
+	// registry.roles already contains only BR-1/BR-2-passing roles (buildRoleRegistry's own
+	// invariant) — an excluded role is absent from the map, never present with a hole, so this
+	// function needs no additional filtering to keep FR-3's "an excluded role never appears".
+	return Array.from(registry.roles.values()).map((role) => ({
+		id: role.name,
+		area: role.area,
+		modelRole: role.modelRole,
+		skills: role.skills,
+		gates: role.gates,
+	}));
 }
 
 /**
@@ -136,5 +206,7 @@ export function listRoles(registry: RoleRegistry): RoleListEntry[] {
  * refused — this predicate is the pure decision; wiring it into the tool-call path is Gate 6.
  */
 export function isToolAllowed(role: ConductorRole, toolName: string): boolean {
-	throw new Error("not implemented");
+	// tools is REQUIRED and never "undefined = everything" (ADR §3.1) — role.tools.includes on an
+	// empty array already returns false for anything, so an empty allowlist needs no special case.
+	return role.tools.includes(toolName);
 }

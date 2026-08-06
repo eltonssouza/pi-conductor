@@ -17,9 +17,9 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { ConductorRole } from "../src/role-loader.ts";
 import {
 	loadRoleTrustStore,
-	resolveRoleGrants,
 	type RoleTrustStore,
 	type RoleTrustStoreDocument,
+	resolveRoleGrants,
 } from "../src/role-trust-store.ts";
 import { createScratchWorkspace, type ScratchWorkspace } from "./support/workspace.ts";
 
