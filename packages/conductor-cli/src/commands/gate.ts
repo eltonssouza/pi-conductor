@@ -62,6 +62,17 @@ export interface GateRecordSnapshot {
 	completedAt?: string;
 }
 
+/** ADR 0005 §5 bullet 3 (R24/T45): "gate status mostra quais gates foram colapsados e por qual
+ * método" -- a reviewer sees the calibration trail without reopening the session, same G1/FR-4 spirit
+ * applied to a `Decision` instead of a `GateRecord`. GATE 8 (QA validation) finding: this was
+ * persisted correctly by `calibrate()` from the start but never projected into `GateStatusSnapshot`
+ * nor rendered by `formatGateStatusReport` -- a real, reproducible display/auditability gap, not a
+ * data-loss bug (confirmed live: the raw envelope JSON always had `state.calibration` populated). */
+export interface CalibrationSnapshot {
+	collapsedGates: number[];
+	method: GateApprovalMethod;
+}
+
 /** FR-4: the minimum `gate status` must show to answer "can this demand advance?" without reopening
  * the session that produced the state. */
 export interface GateStatusSnapshot {
@@ -70,6 +81,9 @@ export interface GateStatusSnapshot {
 	currentGate: number;
 	gates: GateRecordSnapshot[];
 	mandatoryGates: number[];
+	/** Absent when no calibration has ever been registered for this demand (R24: a calibration is
+	 * always an explicit, attributed `Decision` -- never inferred from its absence). */
+	calibration?: CalibrationSnapshot;
 }
 
 export class GateCommandError extends Error {}
@@ -208,8 +222,14 @@ export function formatGateStatusReport(snapshot: GateStatusSnapshot): string {
 		`Demand: ${snapshot.demandId} (branch: ${snapshot.branch})`,
 		`currentGate: ${snapshot.currentGate}`,
 		`mandatoryGates: [${snapshot.mandatoryGates.join(", ")}]`,
-		"",
 	];
+
+	if (snapshot.calibration) {
+		lines.push(
+			`Calibration: collapsed gate(s) ${snapshot.calibration.collapsedGates.join(", ")} (method: ${snapshot.calibration.method})`,
+		);
+	}
+	lines.push("");
 
 	if (snapshot.gates.length === 0) {
 		lines.push("(no gate has been started yet for this demand)");

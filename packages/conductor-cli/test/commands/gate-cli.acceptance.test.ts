@@ -198,6 +198,31 @@ describe("conductor gate (end-to-end dispatch) -- substantive behavior, against 
 		expect(stderr()).toMatch(/mandatory/i);
 	});
 
+	// GATE 8 (QA validation) finding: ADR 0005 §5 bullet 3 explicitly requires "`gate status` mostra
+	// quais gates foram colapsados e por qual método" (a reviewer sees the collapse trail without
+	// reopening the session -- the whole point of G1/FR-4). Confirmed live against the real CLI: a
+	// registered calibration IS persisted to disk correctly (verified by reading the raw envelope JSON
+	// directly), but `gate status`'s own rendered report never mentions it at all -- `GateStatusSnapshot`
+	// has no `calibration` field and `formatGateStatusReport` has no line for it. This is a real,
+	// reproducible display/auditability gap, not a data-loss bug. RED test, mirrors this file's own
+	// "substantive behavior" acceptance style (real CLI, real persisted store, two separate concerns:
+	// registering the calibration and then reading it back via a plain `gate status`).
+	it("`gate status` shows which gates were collapsed by calibration and by which method (ADR 0005 §5)", async () => {
+		const calibrate = createCapturingIo(project.root);
+		const calibrateCode = await runCli(["gate", "calibrate", "--collapse", "2,4"], calibrate.io);
+		expect(calibrateCode).toBe(0);
+
+		const status = createCapturingIo(project.root);
+		const statusCode = await runCli(["gate", "status"], status.io);
+
+		expect(statusCode).toBe(0);
+		const output = status.stdout();
+		expect(output).toMatch(/collaps/i); // "collapsed"/"collapse" -- wording is this test's business, not a fixed string
+		expect(output).toContain("2");
+		expect(output).toContain("4");
+		expect(output).toMatch(/auto/); // headless confirm channel -> method "auto" (never fabricated "human")
+	});
+
 	// -----------------------------------------------------------------------------------------------
 	// Gate 6 wiring-closure integration tests (Fase 4 pendency 1): the state PERSISTED store, proven
 	// end-to-end -- two SEPARATE `runCli` calls, never the same in-memory object held alive across them

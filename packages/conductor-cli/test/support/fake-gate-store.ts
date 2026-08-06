@@ -33,6 +33,7 @@ interface FakeDemand {
 	branch: string;
 	currentGate: number;
 	gates: Map<number, GateRecordSnapshot>;
+	calibration?: { collapsedGates: number[]; method: "human" | "auto" };
 }
 
 export interface FakeGateStore extends GateStateStoreView {
@@ -73,6 +74,9 @@ export function createFakeGateStore(options: { branch?: string } = {}): FakeGate
 			currentGate: demand.currentGate,
 			gates: [...demand.gates.values()].sort((a, b) => a.gate - b.gate),
 			mandatoryGates: [...MANDATORY_GATES].sort((a, b) => a - b),
+			// Gate 8 (QA validation) finding, ADR 0005 §5 bullet 3 -- mirrors the real
+			// createPersistedGateStateStore's own projectSnapshot (commands/gate-store.ts).
+			...(demand.calibration ? { calibration: demand.calibration } : {}),
 		};
 	}
 
@@ -149,13 +153,14 @@ export function createFakeGateStore(options: { branch?: string } = {}): FakeGate
 			return snapshot(demandId);
 		},
 
-		calibrate(demandId, collapsedGates, _method) {
+		calibrate(demandId, collapsedGates, method) {
 			// R24: a calibration can never name a mandatory gate.
 			const offending = collapsedGates.filter((g) => MANDATORY_GATES.has(g)).sort((a, b) => a - b);
 			if (offending.length > 0) {
 				throw new GateCommandError(`calibration refused: cannot collapse mandatory gate(s) ${offending.join(", ")}`);
 			}
-			ensureDemand(demandId);
+			const demand = ensureDemand(demandId);
+			demand.calibration = { collapsedGates, method };
 			return snapshot(demandId);
 		},
 

@@ -130,6 +130,13 @@ function projectSnapshot(state: GateState): GateStatusSnapshot {
 		currentGate: state.currentGate,
 		gates,
 		mandatoryGates: [...MANDATORY_GATES].sort((a, b) => a - b),
+		// GATE 8 (QA validation) finding, ADR 0005 §5 bullet 3: `state.calibration` was already
+		// persisted correctly (verified against the raw envelope JSON) but never projected here, so
+		// `gate status` had no way to ever show it -- closed alongside `formatGateStatusReport`'s own
+		// new rendering branch (commands/gate.ts).
+		...(state.calibration
+			? { calibration: { collapsedGates: state.calibration.collapsedGates, method: state.calibration.method } }
+			: {}),
 	};
 }
 
