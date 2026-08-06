@@ -9,6 +9,7 @@ import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
 import { confirmOrDeny, DEFAULT_APPROVAL_TIMEOUT_MS } from "./confirm.ts";
 import { evaluatePolicyFailClosed, type PolicyDecision } from "./fail-closed.ts";
 import { decide } from "./permission-engine.ts";
+import { redactSecrets } from "./redaction.ts";
 import { evaluateToolPath, type WorkspacePolicyOptions } from "./workspace-policy.ts";
 
 /**
@@ -180,8 +181,16 @@ export function createPermissionGateExtension(options: PermissionGateOptions): N
 					}
 
 					if (decision.block) {
+						// T21 sink #2 / GAP-C (gate3-addendum-fase2.md; ADR 0003 §6.2 sink #2; BR-12):
+						// `decision.reason` can embed model/tool-controlled input (a path, a bash command
+						// operand, an echoed value) -- e.g. command-classifier.ts's target-protected-path
+						// signal builds its detail from workspace-policy.ts's evaluateToolPath `reason`,
+						// which quotes the raw resolved path verbatim. Redact BEFORE this string reaches
+						// ctx.ui.notify -- a DIFFERENT sink from the transcript's own redaction (FR-13),
+						// per R6: "cada um redige independente".
 						if (ctx.hasUI) {
-							ctx.ui.notify(`Blocked ${event.toolName}: ${decision.reason ?? "denied by policy"}`, "warning");
+							const notifyReason = redactSecrets(decision.reason ?? "denied by policy");
+							ctx.ui.notify(`Blocked ${event.toolName}: ${notifyReason}`, "warning");
 						}
 						return { block: true, reason: decision.reason ?? "denied by policy" };
 					}

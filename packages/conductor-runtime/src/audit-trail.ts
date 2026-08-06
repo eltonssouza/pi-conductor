@@ -23,15 +23,18 @@
  * `policy.json` (T13) — this closes the write/edit half of T25; the `bash` half is the Command
  * Classifier's job (command-classifier.ts signal 8).
  *
- * `reason`/`egress.destination` are assumed ALREADY redacted by the time they reach this writer —
- * redaction is out of this stream's scope (see redaction.ts, owned in parallel); wiring the audit
- * sink into that pipeline is a follow-up gate.
+ * `reason`/`egress.destination` are redacted INSIDE `appendAuditEntry` itself (Gate 8 fix, T21 sink
+ * #4 / R6: "cada um redige independente" — this sink must not rely on an upstream caller to have
+ * redacted first, the same discipline every other closed sink already applies). A caller that ALSO
+ * redacts before constructing the `AuditEntry` is fine — `redactSecrets` is idempotent on its own
+ * placeholder output — but this writer never assumes it.
  */
 
 import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import type { RiskTier } from "./command-classifier.ts";
 import type { PermissionLevel } from "./permission-engine.ts";
+import { redactSecrets } from "./redaction.ts";
 
 export type ApprovalMethod = "human" | "yes-flag" | "allowlist" | "none";
 
@@ -91,7 +94,19 @@ export function createAuditTrailWriter(filePath: string): AuditTrailWriter {
 				);
 			}
 
-			const line = `${JSON.stringify(entry)}\n`;
+			// T21 sink #4 / R6 (Gate 8 fix): redact reason/egress.destination HERE, at this sink's own
+			// boundary, rather than trusting a caller upstream to have done it — the same
+			// "redact-at-each-sink-independently" discipline transcript.ts (FR-13) and
+			// permission-gate.ts's notify call (T21 sink #2) already apply. Idempotent against an
+			// already-redacted string (a `[REDACTED:label]` placeholder does not itself look
+			// secret-shaped), so a caller that also redacts upstream is harmless, never double-damaged.
+			const redactedEntry: AuditEntry = {
+				...entry,
+				reason: entry.reason !== undefined ? redactSecrets(entry.reason) : entry.reason,
+				egress: entry.egress ? { destination: redactSecrets(entry.egress.destination) } : entry.egress,
+			};
+
+			const line = `${JSON.stringify(redactedEntry)}\n`;
 			// mkdirSync is itself part of the fail-closed contract here: if `dirname(filePath)`
 			// exists as a non-directory (the disk-full/blocked-path scenario spec edge case #12
 			// names), this throws synchronously and appendAuditEntry never reaches appendFileSync —

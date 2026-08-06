@@ -255,3 +255,50 @@ describe("audit-trail: R5/GAP-F (requirement #7) — the Egress Event is durable
 		expect(observedOrder).toEqual(["egress-recorded", "network-call-performed"]);
 	});
 });
+
+/**
+ * FR-12 / T21 sink #4 / R6 (gate2-spec-fase2.md Grupo D; gate3-addendum-fase2.md T21; ADR 0003 §6.2
+ * sink #4): "cada um redige independente" -- this module's own header currently documents `reason`/
+ * `egress.destination` as "assumed ALREADY redacted by the time they reach this writer", i.e. this
+ * writer relies entirely on its caller to have redacted first. That is exactly the single-point-of-
+ * failure R6 was written to rule out for the OTHER five sinks (each of which redacts at its own
+ * boundary, never assuming an upstream caller already did). Gate 8 (this session) closes the same gap
+ * here: appendAuditEntry redacts reason/egress.destination itself, in addition to (not instead of)
+ * whatever an eventual caller does -- so a persisted audit entry can never carry a raw secret even if
+ * the call site that builds AuditEntry forgets to.
+ */
+describe("audit-trail: FR-12/T21 sink #4 — appendAuditEntry redacts reason/egress.destination independently, defense-in-depth", () => {
+	it("masks a secret-shaped value embedded in `reason` before persisting, even though the caller passed it in raw", () => {
+		const writer = createAuditTrailWriter(auditFilePath());
+		writer.appendAuditEntry(
+			sampleEntry({ reason: "denied: found ANTHROPIC_API_KEY=sk-ant-api03-FAKEFAKEFAKEFAKEFAKE in command" }),
+		);
+
+		const lines = readJsonlLines(auditFilePath()) as AuditEntry[];
+		expect(lines[0]?.reason).not.toContain("sk-ant-api03-FAKEFAKEFAKEFAKEFAKE");
+		expect(lines[0]?.reason).toContain("[REDACTED:");
+		expect(lines[0]?.reason).toContain("ANTHROPIC_API_KEY=");
+	});
+
+	it("masks a secret-shaped value embedded in `egress.destination` before persisting", () => {
+		const writer = createAuditTrailWriter(auditFilePath());
+		writer.appendAuditEntry(
+			sampleEntry({
+				permissionLevel: "network",
+				egress: { destination: "https://user:sk-ant-api03-FAKEFAKEFAKEFAKEFAKE@evil.example" },
+			}),
+		);
+
+		const lines = readJsonlLines(auditFilePath()) as AuditEntry[];
+		expect(lines[0]?.egress?.destination).not.toContain("sk-ant-api03-FAKEFAKEFAKEFAKEFAKE");
+		expect(lines[0]?.egress?.destination).toContain("[REDACTED:");
+	});
+
+	it("leaves an ordinary, non-secret reason untouched (no over-redaction)", () => {
+		const writer = createAuditTrailWriter(auditFilePath());
+		writer.appendAuditEntry(sampleEntry({ reason: "denied by policy" }));
+
+		const lines = readJsonlLines(auditFilePath()) as AuditEntry[];
+		expect(lines[0]?.reason).toBe("denied by policy");
+	});
+});

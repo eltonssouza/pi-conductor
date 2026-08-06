@@ -34,7 +34,7 @@
  * terminal-sanitize.ts's own header already discloses).
  */
 
-import { sanitizeForTerminal } from "@conductor/runtime";
+import { redactSecrets, sanitizeForTerminal } from "@conductor/runtime";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 
 const MAX_TOOL_RESULT_PREVIEW_CHARS = 200;
@@ -65,10 +65,24 @@ function summarizeToolCalls(content: unknown): string[] {
 
 /** Formats one `SessionEntry` as zero or more transcript lines (a message can carry both text and
  * tool-call blocks, e.g. an assistant turn that explains itself then calls a tool). Every returned
- * line is sanitized (T14, see module header) -- this is the single funnel both the resume-replay and
- * live-rendering callers share, so sanitization cannot be forgotten by either. */
+ * line is redacted THEN sanitized (T14 + FR-13, see module header) -- this is the single funnel both
+ * the resume-replay and live-rendering callers share, so neither transform can be forgotten by
+ * either caller.
+ *
+ * FR-13 (gate2-spec-fase2.md Grupo D; gate3-addendum-fase2.md T21 sink #1; ADR 0003 §6.2 sink #1):
+ * "sanitização de terminal != redação de segredo" -- Fase 1's T14 fix only stripped ANSI/CSI/OSC
+ * control sequences here; it never masked a secret VALUE arriving as ordinary printable text (e.g. a
+ * `bash` result echoing `ANTHROPIC_API_KEY=sk-ant-...`). `redactSecrets` runs FIRST, per ADR §6.2's
+ * sink #1 ("redactSecrets antes de sanitizeForTerminal, no mesmo funil") -- masking a secret's bytes
+ * before terminal-sanitization runs means the two transforms cannot interact (a control byte hiding
+ * inside a would-be secret span is still caught by sanitizeForTerminal afterward, since redaction
+ * only ever replaces a span with the fixed, control-byte-free `[REDACTED:label]` placeholder). Reuses
+ * the exact `@conductor/secrets` matcher instance the Fase 1 Secret Scanner and the audit-trail
+ * redaction wrapper already use (one definition of "secret-shaped" in the monorepo) -- never a second
+ * regex list to drift out of sync with FR-14/FR-15's word-boundary/entropy corrections.
+ */
 export function summarizeEntryForTranscript(entry: SessionEntry): string[] {
-	return rawSummarizeEntryForTranscript(entry).map(sanitizeForTerminal);
+	return rawSummarizeEntryForTranscript(entry).map((line) => sanitizeForTerminal(redactSecrets(line)));
 }
 
 function rawSummarizeEntryForTranscript(entry: SessionEntry): string[] {

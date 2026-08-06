@@ -578,3 +578,39 @@ describe("permission-gate: conductor_note (custom tool PoC, gate8-validation.md 
 		expect(ui.confirmCalls[0]?.message).toContain("innocuous note");
 	});
 });
+
+/**
+ * T21 sink #2 / GAP-C (gate3-addendum-fase2.md; docs/adr/0003-fase2-security-architecture.md §6.2
+ * sink #2; gate2-spec-fase2.md BR-12): `ctx.ui.notify("Blocked ${toolName}: ${decision.reason}")`
+ * surfaces a `reason` string that can embed model/tool-controlled input (a path, a bash command, an
+ * echoed value) — the same class of leak T21 named for the transcript (FR-13) applies equally here.
+ * Gate 8 (this session) found this call site was NOT redacted: only T14 terminal-sanitization ever
+ * ran on decision.reason-derived strings elsewhere in this file, never `redactSecrets`.
+ */
+describe("permission-gate: notify redaction (T21 sink #2)", () => {
+	it("masks a secret-shaped value embedded in a denied bash command's reason before it reaches ctx.ui.notify", async () => {
+		const handler = makeHandler();
+		const ui = createTestUiContext({ confirmResult: true });
+
+		// A destructive verb targeting a protected-path whose own filename happens to be
+		// secret-shaped: command-classifier.ts's target-protected-path signal builds its `detail`
+		// directly from workspace-policy.ts's evaluateToolPath `reason`, which embeds the raw
+		// resolved path text verbatim — a realistic path for a secret value (e.g. leaked into a
+		// filename by an earlier step) to ride along into the "critical, denied outright" reason,
+		// and from there into permission-gate.ts's ctx.ui.notify(...) call.
+		const event: BashToolCallEvent = {
+			type: "tool_call",
+			toolCallId: "1",
+			toolName: "bash",
+			input: { command: "rm ~/.ssh/sk-ant-api03-FAKEFAKEFAKEFAKEFAKE" },
+		};
+		const result = await handler(event, fakeContext(ui, true));
+
+		expect(result?.block).toBe(true); // sanity: this must be the immediate-deny path (critical tier, no confirm)
+		expect(ui.confirmCalls).toHaveLength(0);
+		expect(ui.notifications.length).toBeGreaterThan(0);
+		const notified = ui.notifications.map((n) => n.message).join("\n");
+		expect(notified).not.toContain("sk-ant-api03-FAKEFAKEFAKEFAKEFAKE");
+		expect(notified).toContain("[REDACTED:");
+	});
+});
