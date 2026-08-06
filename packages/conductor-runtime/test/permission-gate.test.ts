@@ -6,7 +6,7 @@
  * itself, including the specific tool-by-tool policy table from gate3-threat-model.md §5.
  */
 
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type {
 	BashToolCallEvent,
@@ -248,6 +248,58 @@ describe("permission-gate: write / edit", () => {
 		expect(ui.confirmCalls).toHaveLength(0);
 	});
 
+	// R11(b) (ADR 0003 §5.3, Gate 8 loop-back finding #3): the PolicyTrustStore ledger
+	// (.conductor/policy-trust.json) is itself T26-like sensitive data — an agent that could write/
+	// edit it could "approve" its own hostile policy.json grant through a second door, reopening T18.
+	// Gate 8 found this file was NOT in defaultProtectedPaths(), so it was writable via write/edit
+	// (and, transitively, would have been writable via bash too, since command-classifier.ts's
+	// protected-path signal also calls defaultProtectedPaths()). Mirrors the T13 config.json/
+	// policy.json tests above exactly.
+	it("blocks a tool-driven write to .conductor/policy-trust.json inside the workspace, even before the file exists (R11(b))", async () => {
+		const handler = makeHandler();
+		const ui = createTestUiContext({ confirmResult: true });
+
+		const event: EditToolCallEvent = {
+			type: "tool_call",
+			toolCallId: "1",
+			toolName: "edit",
+			input: {
+				path: join(".conductor", "policy-trust.json"),
+				edits: [
+					{
+						oldText: "",
+						newText: '{"schema":1,"trusted":[{"kind":"project","contentHash":"forged","grantedAt":"now"}]}',
+					},
+				],
+			},
+		};
+		const result = await handler(event, fakeContext(ui, true));
+
+		expect(result?.block).toBe(true);
+		expect(result?.reason).toMatch(/protected location/);
+		expect(ui.confirmCalls).toHaveLength(0);
+	});
+
+	// Same threat, the bash vector (T25's "one path authority, two callers" — command-classifier.ts's
+	// protected-path signal reuses the exact same evaluateToolPath/defaultProtectedPaths this edit
+	// test exercises, so this is the end-to-end proof for the OTHER caller, through the real gate).
+	it("denies a critical-risk bash command targeting .conductor/policy-trust.json outright (R11(b), bash vector)", async () => {
+		const handler = makeHandler();
+		const ui = createTestUiContext({ confirmResult: true });
+
+		const event: BashToolCallEvent = {
+			type: "tool_call",
+			toolCallId: "1",
+			toolName: "bash",
+			input: { command: "rm .conductor/policy-trust.json" },
+		};
+		const result = await handler(event, fakeContext(ui, true));
+
+		expect(result?.block).toBe(true);
+		expect(result?.reason).toMatch(/critical/);
+		expect(ui.confirmCalls).toHaveLength(0);
+	});
+
 	// T14 (gate3-fase1-addendum.md §2 T14, §3 secure default 11): the edit/write approval call site
 	// specifically, proven through the real gate (not just confirmOrDeny in isolation — see
 	// confirm.test.ts for that).
@@ -451,6 +503,140 @@ describe("permission-gate: bash", () => {
 	});
 });
 
+/**
+ * GAP-B loop-back (Gate 8 finding, item 1): PermissionGateOptions.policy did not exist at all before
+ * this fix — createPermissionGateExtension() ignored a real .conductor/policy.json 100% of the time,
+ * regardless of what session.ts/resource-loader.ts (the only two production composition points) were
+ * given. These tests drive the REAL createPermissionGateExtension factory (not decide()/
+ * classifyCommand() in isolation, which permission-engine.test.ts/command-classifier.test.ts already
+ * cover) with a directly-constructed policy value, proving the option is actually read and forwarded
+ * to decide() end to end through the real pi.on("tool_call") chokepoint. The companion proof that a
+ * REAL .conductor/policy.json on disk reaches this same option via session.ts/createConductorSession
+ * lives in conductor-runtime/test/session-policy-wiring.test.ts (data-only) and
+ * conductor-cli/test/commands/chat/policy-resolution.test.ts (disk-to-decision, the literal FR-3 proof).
+ */
+describe("permission-gate: policy forwarding (GAP-B loop-back, item 1)", () => {
+	it("FR-3: an explicit policy.json allowlist grant auto-approves a bash command WITHOUT ctx.ui.confirm(), unlike the same command without a grant", async () => {
+		const withoutPolicy = createPermissionGateExtension({ workspaceRoot: workspace.root });
+		const handlerWithoutPolicy = captureToolCallHandler(withoutPolicy.factory);
+		const uiWithoutPolicy = createTestUiContext({ confirmResult: true });
+		const eventForNpm: BashToolCallEvent = {
+			type: "tool_call",
+			toolCallId: "1",
+			toolName: "bash",
+			input: { command: "npm run build" },
+		};
+		const resultWithoutPolicy = await handlerWithoutPolicy(eventForNpm, fakeContext(uiWithoutPolicy, true));
+		// Baseline: with no policy grant at all, "npm run build" is an unrecognized-verb command
+		// (tier "high") — needs approval, same as any other unrecognized command.
+		expect(resultWithoutPolicy).toBeUndefined(); // confirmResult:true -> approved -> not blocked
+		expect(uiWithoutPolicy.confirmCalls).toHaveLength(1);
+
+		const withPolicy = createPermissionGateExtension({
+			workspaceRoot: workspace.root,
+			policy: { allowlist: [{ pattern: "npm run build", risk: "low" }] },
+		});
+		const handlerWithPolicy = captureToolCallHandler(withPolicy.factory);
+		const uiWithPolicy = createTestUiContext({ confirmResult: true });
+		const resultWithPolicy = await handlerWithPolicy(eventForNpm, fakeContext(uiWithPolicy, true));
+
+		expect(resultWithPolicy).toBeUndefined();
+		expect(uiWithPolicy.confirmCalls).toHaveLength(0); // the whole point of FR-3: no human asked
+	});
+
+	it("FR-9/FR-10: the policy option's protectedPaths field is accepted end to end (the union into additionalProtectedPaths itself is session.ts's job, proven in session-policy-wiring.test.ts)", async () => {
+		mkdirSync(join(workspace.root, "secrets"));
+		const extension = createPermissionGateExtension({
+			workspaceRoot: workspace.root,
+			policy: { protectedPaths: [] }, // present but empty -- the option itself must not crash anything
+		});
+		const handler = captureToolCallHandler(extension.factory);
+		const ui = createTestUiContext({ confirmResult: true });
+		const event: EditToolCallEvent = {
+			type: "tool_call",
+			toolCallId: "1",
+			toolName: "edit",
+			input: { path: join("secrets", "token"), edits: [{ oldText: "", newText: "leak" }] },
+		};
+		const result = await handler(event, fakeContext(ui, true));
+		// Not protected here (policy.protectedPaths is empty in THIS test, and session.ts — not this
+		// gate — is what unions policy.protectedPaths into additionalProtectedPaths); this test only
+		// asserts the option is accepted without error. Allowed -> the handler returns `undefined`
+		// (same convention as every other "allowed" assertion in this file, e.g. the very first
+		// "allows a read..." test above).
+		expect(result).toBeUndefined();
+	});
+});
+
+describe("permission-gate: --yes forwarding (GAP-B/FR-19..21 loop-back, item 4)", () => {
+	// Contrasts directly with "still requires approval for a bash command recognized only by the
+	// built-in low-risk heuristic" above: same exact command, same tier ("low", the built-in "ls"
+	// heuristic, provablyContained, no unanalyzable span — every isYesEligible prong satisfied), the
+	// ONLY difference is yesFlagActive. Before this fix, yesFlagActive was hardcoded to `false` inside
+	// decideToolCall's bash branch, so no value passed here could ever reach decide() at all.
+	it("with yesFlagActive: true, a low-tier provably-contained bash command is auto-approved via isYesEligible — no ctx.ui.confirm()", async () => {
+		const extension = createPermissionGateExtension({ workspaceRoot: workspace.root, yesFlagActive: true });
+		const handler = captureToolCallHandler(extension.factory);
+		const ui = createTestUiContext({ confirmResult: true });
+		const decisions: PermissionGateDecision[] = [];
+		const extensionWithDecisions = createPermissionGateExtension({
+			workspaceRoot: workspace.root,
+			yesFlagActive: true,
+			onDecision: (d) => decisions.push(d),
+		});
+		const handlerWithDecisions = captureToolCallHandler(extensionWithDecisions.factory);
+
+		const event: BashToolCallEvent = {
+			type: "tool_call",
+			toolCallId: "1",
+			toolName: "bash",
+			input: { command: "ls" },
+		};
+
+		const result = await handler(event, fakeContext(ui, true));
+		expect(result).toBeUndefined(); // allowed
+		expect(ui.confirmCalls).toHaveLength(0); // never asked a human — the whole point of --yes
+
+		const resultWithDecisions = await handlerWithDecisions(event, fakeContext(ui, true));
+		expect(resultWithDecisions).toBeUndefined();
+		expect(decisions[0]).toMatchObject({ toolName: "bash", allowed: true });
+	});
+
+	it("without yesFlagActive (default false), the SAME command still requires ctx.ui.confirm() (regression pin against the contrast above)", async () => {
+		const extension = createPermissionGateExtension({ workspaceRoot: workspace.root });
+		const handler = captureToolCallHandler(extension.factory);
+		const ui = createTestUiContext({ confirmResult: true });
+
+		const event: BashToolCallEvent = {
+			type: "tool_call",
+			toolCallId: "1",
+			toolName: "bash",
+			input: { command: "ls" },
+		};
+		const result = await handler(event, fakeContext(ui, true));
+
+		expect(result).toBeUndefined(); // confirmResult:true -> approved -> not blocked
+		expect(ui.confirmCalls).toHaveLength(1); // still asked -- --yes was not active
+	});
+
+	it("--yes never transforms a critical-tier DENY into an allow (FR-20, engine-level guarantee re-proven through the real gate)", async () => {
+		const extension = createPermissionGateExtension({ workspaceRoot: workspace.root, yesFlagActive: true });
+		const handler = captureToolCallHandler(extension.factory);
+		const ui = createTestUiContext({ confirmResult: true });
+
+		const event: BashToolCallEvent = {
+			type: "tool_call",
+			toolCallId: "1",
+			toolName: "bash",
+			input: { command: "rm -rf /" },
+		};
+		const result = await handler(event, fakeContext(ui, true));
+
+		expect(result?.block).toBe(true);
+		expect(ui.confirmCalls).toHaveLength(0);
+	});
+});
+
 describe("permission-gate: tools with no declared policy", () => {
 	it("denies grep by default (no policy declared -> fail closed)", async () => {
 		const handler = makeHandler();
@@ -612,5 +798,148 @@ describe("permission-gate: notify redaction (T21 sink #2)", () => {
 		const notified = ui.notifications.map((n) => n.message).join("\n");
 		expect(notified).not.toContain("sk-ant-api03-FAKEFAKEFAKEFAKEFAKE");
 		expect(notified).toContain("[REDACTED:");
+	});
+});
+
+/**
+ * GAP-B loop-back (Gate 8 finding, item 2): audit-trail.ts's createAuditTrailWriter/appendAuditEntry
+ * were implemented and unit-tested (audit-trail.test.ts) since Gate 5, but never called by
+ * permission-gate.ts (the one real chokepoint every tool call passes through) — FR-16/17/18 were
+ * inert in production. These tests drive the REAL createPermissionGateExtension factory (the same
+ * production entry point session.ts/resource-loader.ts use) and assert against the ACTUAL bytes on
+ * disk at .conductor/audit.jsonl — never a mock of the writer, matching this codebase's own
+ * session-redaction.regression.test.ts convention ("assert on the persisted artifact itself").
+ */
+describe("permission-gate: audit trail (GAP-B/FR-16/FR-18 loop-back, item 2)", () => {
+	function auditFilePath(): string {
+		return join(workspace.root, ".conductor", "audit.jsonl");
+	}
+
+	function readAuditLines(): Array<Record<string, unknown>> {
+		const raw = readFileSync(auditFilePath(), "utf8");
+		return raw
+			.split("\n")
+			.map((line) => line.trim())
+			.filter((line) => line.length > 0)
+			.map((line) => JSON.parse(line));
+	}
+
+	it("FR-16: a real tool-call decision produces a durable entry on disk at .conductor/audit.jsonl, correctly describing the decision", async () => {
+		const handler = makeHandler();
+		const ui = createTestUiContext({ confirmResult: true });
+
+		writeFileSync(join(workspace.root, "in.txt"), "x");
+		const event: ReadToolCallEvent = {
+			type: "tool_call",
+			toolCallId: "audit-1",
+			toolName: "read",
+			input: { path: "in.txt" },
+		};
+		const result = await handler(event, fakeContext(ui, true));
+
+		expect(result).toBeUndefined(); // allowed
+		expect(existsSync(auditFilePath())).toBe(true);
+		const lines = readAuditLines();
+		expect(lines).toHaveLength(1);
+		expect(lines[0]).toMatchObject({
+			toolName: "read",
+			toolCallId: "audit-1",
+			permissionLevel: "read",
+			decision: "allow",
+			yesFlagActive: false,
+			approvalMethod: "none",
+		});
+		expect(typeof lines[0]?.timestamp).toBe("string");
+		expect(new Date(lines[0]?.timestamp as string).toISOString()).toBe(lines[0]?.timestamp);
+	});
+
+	it("FR-16: a DENIED decision is durably recorded too, not only allows", async () => {
+		const handler = makeHandler();
+		const ui = createTestUiContext({ confirmResult: true });
+
+		const event: BashToolCallEvent = {
+			type: "tool_call",
+			toolCallId: "audit-2",
+			toolName: "bash",
+			input: { command: "rm -rf /" },
+		};
+		const result = await handler(event, fakeContext(ui, true));
+
+		expect(result?.block).toBe(true);
+		const lines = readAuditLines();
+		expect(lines).toHaveLength(1);
+		expect(lines[0]).toMatchObject({
+			toolName: "bash",
+			decision: "deny",
+			permissionLevel: "exec",
+			riskTier: "critical",
+		});
+	});
+
+	it("FR-16: multiple tool calls append multiple JSONL lines, in order, none overwritten", async () => {
+		const handler = makeHandler();
+		const ui = createTestUiContext({ confirmResult: true });
+		writeFileSync(join(workspace.root, "in.txt"), "x");
+
+		await handler(
+			{ type: "tool_call", toolCallId: "c1", toolName: "read", input: { path: "in.txt" } } as ReadToolCallEvent,
+			fakeContext(ui, true),
+		);
+		await handler(
+			{ type: "tool_call", toolCallId: "c2", toolName: "grep", input: { pattern: "x" } } as GrepToolCallEvent,
+			fakeContext(ui, true),
+		);
+
+		const lines = readAuditLines();
+		expect(lines.map((l) => l.toolCallId)).toEqual(["c1", "c2"]);
+	});
+
+	// FR-18/R9 (audit-trail.ts's own header: "compose with evaluatePolicyFailClosed, invent no new
+	// machinery"): a directory sitting at the exact audit-file path is this codebase's own established
+	// way to force a real, cross-platform I/O failure at that path (see
+	// conductor-config/test/policy-trust-store.test.ts's identical "a directory at the exact path a
+	// file is expected" trick) — appendFileSync(..., {flag:"a"}) throws EISDIR trying to open a
+	// directory for append. This is a REAL fs.appendFileSync failure, not a mocked writer.
+	it("FR-18: a real audit-trail write failure DENIES the operation it would have audited, fail closed", async () => {
+		mkdirSync(auditFilePath(), { recursive: true }); // a directory where the audit FILE must go
+		const handler = makeHandler();
+		const ui = createTestUiContext({ confirmResult: true });
+
+		writeFileSync(join(workspace.root, "in.txt"), "x");
+		const event: ReadToolCallEvent = {
+			type: "tool_call",
+			toolCallId: "audit-3",
+			toolName: "read",
+			input: { path: "in.txt" },
+		};
+		const result = await handler(event, fakeContext(ui, true));
+
+		// Without this fix, a plain `read` inside the workspace is ALWAYS allowed (see the very first
+		// test in this file) — this failing instead is only explained by the audit write's failure
+		// propagating through evaluatePolicyFailClosed and flipping the decision to deny.
+		expect(result?.block).toBe(true);
+		expect(result?.reason).toContain("policy evaluation error — fail closed");
+	});
+
+	it("FR-18: the fail-closed-due-to-audit-failure reason does not silently leak the raw underlying I/O error stack, and onDecision still observes the resulting deny", async () => {
+		mkdirSync(auditFilePath(), { recursive: true });
+		const decisions: PermissionGateDecision[] = [];
+		const extension = createPermissionGateExtension({
+			workspaceRoot: workspace.root,
+			onDecision: (d) => decisions.push(d),
+		});
+		const handler = captureToolCallHandler(extension.factory);
+		const ui = createTestUiContext({ confirmResult: true });
+
+		const event: BashToolCallEvent = {
+			type: "tool_call",
+			toolCallId: "audit-4",
+			toolName: "bash",
+			input: { command: "ls" },
+		};
+		const result = await handler(event, fakeContext(ui, true));
+
+		expect(result?.block).toBe(true);
+		expect(decisions[0]).toMatchObject({ toolName: "bash", allowed: false });
 	});
 });

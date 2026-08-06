@@ -192,7 +192,9 @@ describe("summarizeEntryForTranscript / replayTranscript -- secret redaction (FR
 	});
 
 	it("masks a secret embedded as a substring (FR-14's word-boundary correction, reused here)", () => {
-		const [line] = summarizeEntryForTranscript(assistantTextEntry("token is anthropic/sk-ant-api03-FAKEFAKEFAKEFAKE"));
+		const [line] = summarizeEntryForTranscript(
+			assistantTextEntry("token is anthropic/sk-ant-api03-FAKEFAKEFAKEFAKE"),
+		);
 		expect(line).not.toContain("sk-ant-api03-FAKEFAKEFAKEFAKE");
 		expect(line).toContain("anthropic/[REDACTED:");
 	});

@@ -46,6 +46,7 @@ import {
 	TuiMainScreen,
 } from "@earendil-works/pi-tui";
 import { getGitStatus, resolveTimeoutMs } from "../git-status.ts";
+import { resolveEffectivePolicy } from "./chat/policy-resolution.ts";
 import {
 	parseResumeArgs,
 	resolveConductorAgentDir,
@@ -96,6 +97,8 @@ interface PreparedChat {
 	model: Model<any>;
 	modelRuntime: ModelRuntime;
 	sessionManager: SessionManager;
+	/** FR-19 (ADR 0003 §4): parsed fresh from this invocation's argv, never persisted. */
+	yesFlagActive: boolean;
 }
 
 type PrepareResult = { ok: true; prepared: PreparedChat } | { ok: false; message: string };
@@ -155,7 +158,10 @@ async function prepareChat(options: ChatOptions): Promise<PrepareResult> {
 		return { ok: false, message: `conductor chat: could not resolve the session: ${describeError(error)}` };
 	}
 
-	return { ok: true, prepared: { config, model, modelRuntime, sessionManager } };
+	return {
+		ok: true,
+		prepared: { config, model, modelRuntime, sessionManager, yesFlagActive: parsedArgs.yesFlagActive },
+	};
 }
 
 export async function runChat(options: ChatOptions): Promise<number> {
@@ -164,9 +170,15 @@ export async function runChat(options: ChatOptions): Promise<number> {
 		options.stderr.write(`${prepared.message}\n`);
 		return 1;
 	}
-	const { config, model, modelRuntime, sessionManager } = prepared.prepared;
+	const { config, model, modelRuntime, sessionManager, yesFlagActive } = prepared.prepared;
 
 	const agentDir = resolveConductorAgentDir(options.cwd);
+
+	// GAP-B loop-back (Gate 8 finding): loadPolicyDocument/loadPolicyTrustStore/mergePolicies were
+	// implemented and unit-tested but never called by any production path. `conductor chat` is that
+	// call site -- see policy-resolution.ts's own header for why this composition lives here rather
+	// than in @conductor/runtime.
+	const policy = resolveEffectivePolicy(options.cwd);
 
 	const decisions: PermissionGateDecision[] = [];
 	const conductorSession = await createConductorSession({
@@ -178,6 +190,8 @@ export async function runChat(options: ChatOptions): Promise<number> {
 		config,
 		additionalProtectedPaths: config.workspace.additionalProtectedPaths,
 		onDecision: (decision) => decisions.push(decision),
+		policy,
+		yesFlagActive,
 	});
 
 	const terminal = options.terminal ?? new ProcessTerminal();

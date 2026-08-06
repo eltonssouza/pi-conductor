@@ -95,6 +95,13 @@ export function isWithinRoot(candidateRealPath: string, rootRealPath: string): b
  * write/edit half of T25 by construction; the `bash` half (an agent cannot achieve via free-text
  * shell what write/edit already can't) is the Command Classifier's job (command-classifier.ts
  * signal 8, which calls this same function — "one path authority, two callers", ADR §3.3).
+ *
+ * `.conductor/policy-trust.json` (ADR 0003 §5.3, R11(b), gate8-validation §7 loop-back): the
+ * trust-on-first-use ledger `policy-trust-store.ts` reads is itself T26-like sensitive data — an
+ * agent under prompt injection that could write/edit this file would "approve" its own hostile
+ * policy.json grant by another door, reopening T18 through the very store meant to gate it (ADR
+ * §5.3: "o ledger... é ele próprio um store sensível"). Folded in here for the same
+ * secure-by-default reason as its three siblings above: no future caller can forget it.
  */
 export function defaultProtectedPaths(workspaceRoot?: string): string[] {
 	const home = homedir();
@@ -111,6 +118,7 @@ export function defaultProtectedPaths(workspaceRoot?: string): string[] {
 		paths.push(
 			join(workspaceRoot, ".conductor", "config.json"),
 			join(workspaceRoot, ".conductor", "policy.json"),
+			join(workspaceRoot, ".conductor", "policy-trust.json"),
 			join(workspaceRoot, ".conductor", "audit.jsonl"),
 		);
 	}

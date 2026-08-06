@@ -29,47 +29,61 @@ export function resolveConductorSessionsDir(workspaceRoot: string): string {
 
 export type ResumeSelection = { kind: "fresh" } | { kind: "recent" } | { kind: "specific"; idOrPrefix: string };
 
-export type ParseResumeArgsResult = { ok: true; resume: ResumeSelection } | { ok: false; error: string };
+export type ParseResumeArgsResult =
+	| { ok: true; resume: ResumeSelection; yesFlagActive: boolean }
+	| { ok: false; error: string };
+
+const YES_FLAG = "--yes";
 
 /**
- * Parses `conductor chat`'s own argv tail (everything after "chat"). Accepted forms:
- *   - []                      -> fresh
- *   - ["--resume"]            -> recent
- *   - ["--resume", "<id>"]    -> specific (an id/id-prefix, must not itself look like a flag)
- * Anything else is rejected with a clear, actionable message rather than silently guessing.
+ * Parses `conductor chat`'s own argv tail (everything after "chat"). Accepted forms (FR-19, ADR 0003
+ * §4: "--yes só existe como flag explícita de invocação, nunca como default persistido" -- it is
+ * parsed fresh from argv on every single invocation, never read from `.conductor/config.json` or any
+ * other persisted state):
+ *   - []                              -> fresh
+ *   - ["--resume"]                    -> recent
+ *   - ["--resume", "<id>"]            -> specific (an id/id-prefix, must not itself look like a flag)
+ *   - "--yes" may additionally appear ANYWHERE in the above (e.g. ["--yes"], ["--yes", "--resume"],
+ *     ["--resume", "--yes"], ["--resume", "<id>", "--yes"]) -- it is stripped out before the
+ *     `--resume` shape is validated, so its position relative to `--resume`/the id never matters.
+ * Anything else (an unrecognized flag, extra positional arguments) is rejected with a clear,
+ * actionable message rather than silently guessing.
  */
 export function parseResumeArgs(args: string[]): ParseResumeArgsResult {
-	if (args.length === 0) {
-		return { ok: true, resume: { kind: "fresh" } };
+	const yesFlagActive = args.includes(YES_FLAG);
+	const rest = args.filter((arg) => arg !== YES_FLAG);
+
+	if (rest.length === 0) {
+		return { ok: true, resume: { kind: "fresh" }, yesFlagActive };
 	}
 
-	if (args[0] !== "--resume") {
+	if (rest[0] !== "--resume") {
 		return {
 			ok: false,
-			error: `conductor chat: unrecognized argument(s): ${args.join(" ")}. Usage: conductor chat [--resume [session-id]]`,
+			error: `conductor chat: unrecognized argument(s): ${rest.join(" ")}. Usage: conductor chat [--resume [session-id]] [--yes]`,
 		};
 	}
 
-	const rest = args.slice(1);
-	if (rest.length === 0) {
-		return { ok: true, resume: { kind: "recent" } };
+	const afterResume = rest.slice(1);
+	if (afterResume.length === 0) {
+		return { ok: true, resume: { kind: "recent" }, yesFlagActive };
 	}
 
-	const [idOrPrefix, ...extra] = rest;
+	const [idOrPrefix, ...extra] = afterResume;
 	if (extra.length > 0) {
 		return {
 			ok: false,
-			error: `conductor chat: unrecognized argument(s) after --resume: ${extra.join(" ")}. Usage: conductor chat [--resume [session-id]]`,
+			error: `conductor chat: unrecognized argument(s) after --resume: ${extra.join(" ")}. Usage: conductor chat [--resume [session-id]] [--yes]`,
 		};
 	}
 	if (idOrPrefix.startsWith("-")) {
 		return {
 			ok: false,
-			error: `conductor chat: --resume expects a session id, not a flag ("${idOrPrefix}"). Usage: conductor chat [--resume [session-id]]`,
+			error: `conductor chat: --resume expects a session id, not a flag ("${idOrPrefix}"). Usage: conductor chat [--resume [session-id]] [--yes]`,
 		};
 	}
 
-	return { ok: true, resume: { kind: "specific", idOrPrefix } };
+	return { ok: true, resume: { kind: "specific", idOrPrefix }, yesFlagActive };
 }
 
 export class SessionNotFoundError extends Error {

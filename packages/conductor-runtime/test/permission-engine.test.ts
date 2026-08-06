@@ -201,6 +201,75 @@ describe("decide: FR-6/FR-7/FR-8/R5 — Network level is default-deny except an 
 	});
 });
 
+// GAP-B loop-back (Gate 8 finding): mergePolicies (@conductor/config) has computed denyAllPrivileged
+// correctly since Gate 5, but nothing in this file ever consumed it — decide() had no plug for it at
+// all. This describe block is that plug's own unit coverage (the real, disk-to-decision proof that a
+// composition root actually forwards a merged policy's denyAllPrivileged lives in
+// conductor-runtime/test/session-policy-wiring.test.ts and conductor-cli's policy-resolution.test.ts).
+describe("decide: FR-23/FR-24 — denyAllPrivileged (ADR 0003 §5.2/§16): a bad policy source is never outvoted by good ones", () => {
+	it("FR-23: denies bash outright when denyAllPrivileged is true, even for an otherwise-trivial low-risk command", () => {
+		const options: PermissionEngineOptions = {
+			workspace: { workspaceRoot: workspace.root },
+			yesFlagActive: false,
+			policy: { denyAllPrivileged: true },
+		};
+		const result = decide("bash", { command: "ls" }, options);
+		expect(result.outcome.kind).toBe("deny");
+		expect((result.outcome as { kind: "deny"; reason: string }).reason).toMatch(/denied for this session/);
+	});
+
+	it("FR-23: denies write/edit outright when denyAllPrivileged is true", () => {
+		const options: PermissionEngineOptions = {
+			workspace: { workspaceRoot: workspace.root },
+			yesFlagActive: false,
+			policy: { denyAllPrivileged: true },
+		};
+		expect(decide("write", {}, options).outcome.kind).toBe("deny");
+		expect(decide("edit", {}, options).outcome.kind).toBe("deny");
+	});
+
+	it("FR-23: denies network outright when denyAllPrivileged is true, even to an otherwise-consented destination", () => {
+		const options: PermissionEngineOptions = {
+			workspace: { workspaceRoot: workspace.root },
+			yesFlagActive: false,
+			permissionLevelOverride: "network",
+			networkDestination: "library.internal:8080",
+			policy: { denyAllPrivileged: true, network: [{ destination: "library.internal:8080" }] },
+		};
+		const result = decide("doctor_library_ping", { destination: "library.internal:8080" }, options);
+		expect(result.outcome.kind).toBe("deny");
+	});
+
+	it("FR-23: does NOT deny read — 'read segue normal' is the one level denyAllPrivileged leaves untouched", () => {
+		const options: PermissionEngineOptions = {
+			workspace: { workspaceRoot: workspace.root },
+			yesFlagActive: false,
+			policy: { denyAllPrivileged: true },
+		};
+		expect(decide("read", {}, options).outcome.kind).toBe("allow");
+	});
+
+	it("FR-20/BR-3 corollary: --yes cannot override denyAllPrivileged either (never a bypass of a session-wide fail-closed flag)", () => {
+		const options: PermissionEngineOptions = {
+			workspace: { workspaceRoot: workspace.root },
+			yesFlagActive: true,
+			policy: { denyAllPrivileged: true, allowlist: [{ pattern: "ls", risk: "low" }] },
+		};
+		const result = decide("bash", { command: "ls" }, options);
+		expect(result.outcome.kind).toBe("deny");
+	});
+
+	it("absent/false denyAllPrivileged (the common case) does not deny by itself — regression pin against an over-broad check", () => {
+		const options: PermissionEngineOptions = {
+			workspace: { workspaceRoot: workspace.root },
+			yesFlagActive: false,
+			policy: { denyAllPrivileged: false },
+		};
+		expect(decide("read", {}, options).outcome.kind).toBe("allow");
+		expect(decide("bash", { command: "ls" }, options).outcome.kind).toBe("needs-approval");
+	});
+});
+
 describe("isYesEligible: R8/T24 — structural impossibility of --yes reaching a protected path or a 'critical' tier (requirement #4)", () => {
 	function safeClassification(overrides: Partial<ClassificationResult> = {}): ClassificationResult {
 		return {

@@ -10,6 +10,7 @@ import {
 	SessionManager,
 	type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
+import type { EffectivePolicyInput } from "./permission-engine.ts";
 import { createPermissionGateExtension, type PermissionGateDecision } from "./permission-gate.ts";
 import { ConductorResourceLoader, type Fase1ProjectConfig } from "./resource-loader.ts";
 // Side-effecting import: installs the T29/R12c write-path redaction guard on SessionManager's shared
@@ -59,6 +60,23 @@ export interface CreateConductorSessionOptions {
 	customTools?: ToolDefinition[];
 	onDecision?: (decision: PermissionGateDecision) => void;
 	/**
+	 * FR-3/FR-6/FR-7/FR-9/FR-10/FR-11/FR-23/FR-24 (ADR 0003 §5/§16, GAP-B loop-back): the merged,
+	 * trust-checked `EffectivePolicy` for this workspace — loaded and merged by the caller (e.g.
+	 * conductor-cli's `commands/chat/policy-resolution.ts`; this package cannot load
+	 * `.conductor/policy.json` itself, ADR 0002 §3.1). `policy.protectedPaths` is unioned into
+	 * `additionalProtectedPaths` below BEFORE either resourceLoader branch is built, so a policy.json
+	 * restriction is enforced the same secure-by-default way `additionalProtectedPaths` already is —
+	 * no caller of `createConductorSession` has to remember to do that split itself. The remaining
+	 * fields (`allowlist`/`network`/`denyAllPrivileged`) are forwarded as-is to the permission-gate.
+	 * Omitted entirely: behaves exactly like Fase 0/1 (no policy at all).
+	 */
+	policy?: EffectivePolicyInput;
+	/**
+	 * FR-19/FR-20/FR-21 (ADR 0003 §4, R8): forwarded to the permission-gate's own `--yes` handling.
+	 * Defaults to `false` (`conductor chat` had no `--yes` flag before this loop-back closed FR-19..21).
+	 */
+	yesFlagActive?: boolean;
+	/**
 	 * When supplied, the resourceLoader is built through `ConductorResourceLoader` (resource-loader.ts,
 	 * ADR 0002 §4) instead of the inline `DefaultResourceLoader` below, so the session's system prompt
 	 * is the Fase 1 prompt built from real project config (ADR 0002 §7.4's "prompt customizado" exit
@@ -87,6 +105,16 @@ export async function createConductorSession(options: CreateConductorSessionOpti
 			allowModelNetwork: false,
 		}));
 
+	// FR-9/FR-10/BR-5 (GAP-B loop-back): a policy.json restriction is unioned into
+	// additionalProtectedPaths here, ONCE, for whichever branch is taken below — the same
+	// secure-by-default reasoning workspace-policy.ts's own defaultProtectedPaths() already applies
+	// to its own fixed list ("cannot be omitted by a caller that forgets"). Harmless when
+	// options.policy is absent: additionalProtectedPaths passes through unchanged.
+	const mergedProtectedPaths = [
+		...(options.additionalProtectedPaths ?? []),
+		...(options.policy?.protectedPaths ?? []),
+	];
+
 	// ADR 0002 §3.2/§4: when `config` is supplied, delegate resourceLoader construction to
 	// ConductorResourceLoader (round B2's `conductor chat` wiring) so the Fase 1 system prompt is
 	// injected. Otherwise, build the same inline DefaultResourceLoader this function has always
@@ -99,9 +127,11 @@ export async function createConductorSession(options: CreateConductorSessionOpti
 				workspaceRoot: options.workspaceRoot,
 				agentDir,
 				config: options.config,
-				additionalProtectedPaths: options.additionalProtectedPaths,
+				additionalProtectedPaths: mergedProtectedPaths,
 				approvalTimeoutMs: options.approvalTimeoutMs,
 				onDecision: options.onDecision,
+				policy: options.policy,
+				yesFlagActive: options.yesFlagActive,
 				extraExtensions: options.extraExtensions,
 			}).pi
 		: new DefaultResourceLoader({
@@ -115,9 +145,11 @@ export async function createConductorSession(options: CreateConductorSessionOpti
 				extensionFactories: [
 					createPermissionGateExtension({
 						workspaceRoot: options.workspaceRoot,
-						additionalProtectedPaths: options.additionalProtectedPaths,
+						additionalProtectedPaths: mergedProtectedPaths,
 						approvalTimeoutMs: options.approvalTimeoutMs,
 						onDecision: options.onDecision,
+						policy: options.policy,
+						yesFlagActive: options.yesFlagActive,
 					}),
 					...(options.extraExtensions ?? []),
 				],

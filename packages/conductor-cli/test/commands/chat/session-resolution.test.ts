@@ -35,19 +35,19 @@ describe("resolveConductorAgentDir / resolveConductorSessionsDir (pure path scop
 });
 
 describe("parseResumeArgs (pure)", () => {
-	it("no arguments -> fresh", () => {
+	it("no arguments -> fresh, yesFlagActive false", () => {
 		const result = parseResumeArgs([]);
-		expect(result).toEqual({ ok: true, resume: { kind: "fresh" } });
+		expect(result).toEqual({ ok: true, resume: { kind: "fresh" }, yesFlagActive: false });
 	});
 
-	it("--resume alone -> recent", () => {
+	it("--resume alone -> recent, yesFlagActive false", () => {
 		const result = parseResumeArgs(["--resume"]);
-		expect(result).toEqual({ ok: true, resume: { kind: "recent" } });
+		expect(result).toEqual({ ok: true, resume: { kind: "recent" }, yesFlagActive: false });
 	});
 
-	it("--resume <id> -> specific", () => {
+	it("--resume <id> -> specific, yesFlagActive false", () => {
 		const result = parseResumeArgs(["--resume", "abc123"]);
-		expect(result).toEqual({ ok: true, resume: { kind: "specific", idOrPrefix: "abc123" } });
+		expect(result).toEqual({ ok: true, resume: { kind: "specific", idOrPrefix: "abc123" }, yesFlagActive: false });
 	});
 
 	it("rejects an unrecognized leading argument", () => {
@@ -66,6 +66,54 @@ describe("parseResumeArgs (pure)", () => {
 		const result = parseResumeArgs(["--resume", "--force"]);
 		expect(result.ok).toBe(false);
 		if (!result.ok) expect(result.error).toMatch(/expects a session id/);
+	});
+
+	// FR-19 (ADR 0003 §4): --yes is parsed fresh from argv every invocation -- never persisted, never
+	// defaulted from config. These cases prove it composes with every existing --resume shape
+	// regardless of where it appears in argv (Gate 8 loop-back: this flag previously did not exist at
+	// all -- decideToolCall's bash branch hardcoded `yesFlagActive: false`).
+	describe("--yes composes with every --resume shape, position-independent", () => {
+		it("--yes alone -> fresh + yesFlagActive true", () => {
+			expect(parseResumeArgs(["--yes"])).toEqual({ ok: true, resume: { kind: "fresh" }, yesFlagActive: true });
+		});
+
+		it("--yes --resume -> recent + yesFlagActive true", () => {
+			expect(parseResumeArgs(["--yes", "--resume"])).toEqual({
+				ok: true,
+				resume: { kind: "recent" },
+				yesFlagActive: true,
+			});
+		});
+
+		it("--resume --yes (yes AFTER resume, no id) -> recent + yesFlagActive true", () => {
+			expect(parseResumeArgs(["--resume", "--yes"])).toEqual({
+				ok: true,
+				resume: { kind: "recent" },
+				yesFlagActive: true,
+			});
+		});
+
+		it("--resume <id> --yes -> specific + yesFlagActive true", () => {
+			expect(parseResumeArgs(["--resume", "abc123", "--yes"])).toEqual({
+				ok: true,
+				resume: { kind: "specific", idOrPrefix: "abc123" },
+				yesFlagActive: true,
+			});
+		});
+
+		it("--yes --resume <id> -> specific + yesFlagActive true", () => {
+			expect(parseResumeArgs(["--yes", "--resume", "abc123"])).toEqual({
+				ok: true,
+				resume: { kind: "specific", idOrPrefix: "abc123" },
+				yesFlagActive: true,
+			});
+		});
+
+		it("no --yes anywhere -> yesFlagActive stays false (regression pin, not just absence-implies-default)", () => {
+			const result = parseResumeArgs(["--resume", "abc123"]);
+			expect(result.ok).toBe(true);
+			if (result.ok) expect(result.yesFlagActive).toBe(false);
+		});
 	});
 });
 

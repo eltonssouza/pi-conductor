@@ -18,6 +18,7 @@ export { confirmOrDeny, DEFAULT_APPROVAL_TIMEOUT_MS } from "./confirm.ts";
 export { evaluatePolicyFailClosed, type PolicyDecision } from "./fail-closed.ts";
 export {
 	decide,
+	type EffectivePolicyInput,
 	type EngineOutcome,
 	isYesEligible,
 	type PermissionEngineOptions,

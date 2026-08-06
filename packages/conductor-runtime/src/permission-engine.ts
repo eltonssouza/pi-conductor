@@ -33,6 +33,39 @@ export type DecideResult = {
 };
 
 /**
+ * The structural seam this file and permission-gate.ts share with the real, trust-checked
+ * `EffectivePolicy` `@conductor/config`'s `mergePolicies` produces (ADR 0003 §5/§16). conductor-runtime
+ * cannot import that type nominally — not even type-only, per `@conductor/config`'s own
+ * `policy-loader.ts` header: "not even a type-only import edge is needed" (ADR 0002 §3.1's dependency
+ * graph: conductor-config and conductor-runtime never depend on one another). A structurally-identical
+ * local type lets any real `EffectivePolicy` value flow in as plain data from whichever package
+ * composes both (conductor-cli — see its `commands/chat/policy-resolution.ts`), the same seam
+ * `ClassificationContext.policy` already used for `allowlist` alone. Gate 6 (this loop-back closing
+ * GAP-B) is the "future gate" that file's header named to reconcile the two — reconciliation here means
+ * widening this seam to also carry `protectedPaths`/`denyAllPrivileged` (FR-9/FR-10/FR-23/FR-24), not
+ * importing the nominal type.
+ */
+export interface EffectivePolicyInput {
+	/**
+	 * FR-9/FR-10/BR-5: restrictions from policy.json. Read and unioned into
+	 * `WorkspacePolicyOptions.additionalProtectedPaths` by the composition root (session.ts) BEFORE
+	 * this options object is built — `decide()`/`classifyCommand()` never read this field directly,
+	 * they only ever see the already-merged `additionalProtectedPaths`. Present here only so a caller
+	 * can pass one `EffectivePolicy`-shaped value through instead of splitting it apart at every call
+	 * site.
+	 */
+	protectedPaths?: string[];
+	allowlist?: Array<{ pattern: string; risk: "low" | "medium" }>;
+	network?: Array<{ destination: string }>;
+	/**
+	 * FR-23/FR-24 (ADR 0003 §5.2/§16): true the instant any policy source failed to load validly —
+	 * "a bad source is never outvoted by a majority of good ones". `read` is unaffected; every other
+	 * level is denied outright for the whole session — see `decide()`'s own check below.
+	 */
+	denyAllPrivileged?: boolean;
+}
+
+/**
  * Minimal option surface `decide()` needs. `policy` mirrors the effective-policy shape
  * command-classifier.ts's `ClassificationContext` uses — the real, trust-checked `EffectivePolicy`
  * is policy-engine.ts's responsibility (parallel stream); reconciled at a later gate.
@@ -46,10 +79,7 @@ export type DecideResult = {
 export interface PermissionEngineOptions {
 	workspace: WorkspacePolicyOptions;
 	yesFlagActive: boolean;
-	policy?: {
-		allowlist?: Array<{ pattern: string; risk: "low" | "medium" }>;
-		network?: Array<{ destination: string }>;
-	};
+	policy?: EffectivePolicyInput;
 	permissionLevelOverride?: PermissionLevel;
 	networkDestination?: string;
 }
@@ -165,6 +195,22 @@ function decideNetwork(options: PermissionEngineOptions): DecideResult {
  */
 export function decide(toolName: string, input: unknown, options: PermissionEngineOptions): DecideResult {
 	const level = options.permissionLevelOverride ?? resolvePermissionLevel(toolName);
+
+	// FR-23/FR-24 (ADR 0003 §5.2/§16, GAP-B loop-back): checked before the level-specific switch so
+	// nothing below it — tier, an allowlist grant, --yes — can ever override a session-wide
+	// denyAllPrivileged. Defensive-programming discipline already applied by resolvePermissionLevel's
+	// own exhaustive map above (fail fast, bad data can't travel far — Software Construction Practices
+	// — Complete Professional Guide §2.8/§2.9, cited for this file's fail-closed shape at Gate 5/6).
+	if (level !== "read" && options.policy?.denyAllPrivileged === true) {
+		return {
+			outcome: {
+				kind: "deny",
+				reason:
+					"a policy.json source failed to load validly — all privileged operations denied for this session (FR-23, fail closed)",
+			},
+			permissionLevel: level,
+		};
+	}
 
 	switch (level) {
 		case "security":
