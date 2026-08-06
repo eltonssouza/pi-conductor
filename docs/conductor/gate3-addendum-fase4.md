@@ -615,6 +615,60 @@ voltar à spec** (`gate2-spec-fase4.md`) antes do Gate 5:
 
 ---
 
+## 5b. T47 — Achado durante a implementação do Gate 6 (não modelado no Gate 3 original): `isTTY` é um sinal local, não uma prova
+
+**Contexto.** O loop-back Gate 8→6 implementou o canal positivo de `mintHumanApproval`
+(R22/T40): `resolveConfirmChannel` decide entre o prompt TTY real e o canal headless
+checando `stdin.isTTY && stdout.isTTY`. Ao demonstrar a fiação de ponta a ponta contra o
+binário real (não o teste, que usa dupla de streams em memória — prática padrão, sem
+ameaça), o próprio subagente precisou de um wrapper que força `isTTY` pra rodar a
+demonstração sem teclado físico disponível — e isso **prova por construção** que o sinal
+é falsificável.
+
+**A ameaça (STRIDE: Spoofing).** `process.stdin.isTTY` não é uma propriedade
+criptograficamente ancorada — é um booleano que reflete `isatty()` no processo real, mas
+**qualquer código JS no mesmo processo pode reatribuí-lo antes de chamar `resolveConfirmChannel`**
+(ex.: um script que importa `runCli`/`tty-confirm.ts` diretamente e injeta um par
+`TtyStreams` fabricado com `isTTY:true` e um "y" pré-escrito). Um vetor irmão, sem
+precisar de acesso ao módulo interno: **emulação real de pty** via `script`/`unbuffer`/
+`expect`/`node-pty` — aí `isatty()` retorna verdadeiro de forma genuína (é um pty real,
+só que dirigido por script, não por um humano), então nem é "falsificação" no sentido
+estrito, é automação disfarçada de interatividade.
+
+**Por que não bloqueia o landing desta fase (mitigação por camada, não por este mecanismo
+sozinho).** Ambos os vetores exigem que o chamador já tenha capacidade de rodar código
+arbitrário (`node -e`/escrever e rodar um script, ou invocar `script`/`expect`) — e
+`bash`/execução de comando já é uma superfície **separadamente** gated pelo command
+classifier da Fase 2 (T17/R1: comando não reconhecido nunca fica abaixo de `high`, exige
+aprovação humana). Um agente autônomo que ainda não tem uma aprovação de bash já
+concedida não alcança este vetor de graça; um que já tem (via `--yes` amplo ou aprovação
+prévia) já teria meios mais diretos de causar dano (escrever/apagar arquivos), então
+falsificar especificamente um `Approval` de gate não é uma escalação de privilégio nova
+nesse cenário — é a mesma superfície de "usuário único, sem sandbox" aceita desde a
+Fase 0 (§0 deste documento).
+
+**O que muda de verdade:** isso é **mais forte** que o residual já declarado em T40/R22
+("canal ≠ pessoa" — prova que o canal foi usado, não a identidade). Aqui o achado é que
+**o próprio canal pode ser inteiramente simulado** por automação com privilégio de
+execução de código já equivalente. Reportado honestamente, não escondido atrás do
+disclaimer mais fraco de T40.
+
+**Mitigação (residual aceito, não mecanismo novo nesta fase):**
+- Nenhum hardware/segundo-fator está no escopo de um CLI local single-user (desproporcional
+  ao estágio do produto — mesmo julgamento já aplicado a outros residuais desta demanda).
+- **Backstop real:** a superfície de execução que habilita este vetor (`bash`) já é gated
+  pela Fase 2; a defesa em profundidade certa é manter esse gate rígido, não tentar
+  endurecer `isTTY` além do que ele pode structurally garantir.
+- **Vinculante pro Gate 9 desta fase:** tentar de verdade os dois vetores (wrapper
+  in-process forçando `isTTY`; emulação de pty via ferramenta disponível no ambiente)
+  contra o binário real `bin/conductor.js`, não só documentar — confirmar se o command
+  classifier da Fase 2 de fato intercepta o caminho de execução necessário, ou se há uma
+  lacuna real de camada.
+- **Não é um novo item da lista 31-37** (não é um secure default novo desta fase — é a
+  documentação honesta do limite do secure default 31 já declarado).
+
+---
+
 ## 6. Secure defaults acrescentados na Fase 4 (append aos itens 1–30 das fases anteriores)
 
 Os itens 1–30 (Fases 0–3) permanecem. A Fase 4 acrescenta:
