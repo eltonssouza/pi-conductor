@@ -10,7 +10,7 @@ import { Type } from "typebox";
  * real journal/library wiring — that is Fase 6 (see docs/conductor/pi-conductor-feature-matrix.md,
  * row 12: "Custom tools — mechanism yes, tools no").
  *
- * Registered via the SDK-level `customTools` option of createAgentSession() (recon
+ * Registered via the SDK-level `customTools` option of the Pi SDK's session factory (recon
  * `_recon-pi-architecture.md` §3 point 1; `packages/coding-agent/docs/sdk.md:565-597`), wired
  * through src/session.ts's createConductorSession(). Deliberately does NOT get any special
  * treatment from the permission-gate's default routing: see src/permission-gate.ts's explicit
