@@ -31,6 +31,29 @@
  * `resolveEvidenceRef`'s `file` branch reuses `resolveRealPath`/`isWithinRoot` (workspace-policy.ts) —
  * the SAME fail-closed containment primitives write/edit already trust — rather than a second,
  * ad-hoc path check (ADR 0005 §8's own note names this precedent explicitly).
+ *
+ * GATE 8 LOOP-BACK (interim widening of `hasSufficientEvidenceForMandatoryGate`, until Fase 6's runtime
+ * ledgers exist): Gate 8 ran the real CLI end-to-end and found `status:"approved"` structurally
+ * UNREACHABLE for every mandatory gate — confirmed live, a real `git-commit` sha resolved and attached
+ * to Gate 3 still refused approval, because the only two `EvidenceRef` kinds capable of producing
+ * `"runtime-derived"` provenance (`test-run`/`journal-entry`) are fed by sets `cli.ts` always passes
+ * EMPTY (no durable ledger exists yet — Fase 6 scope, see `ResolveEvidenceRefContext`'s own doc above).
+ * Re-reading R25/T41 (the orchestrator, extending the decision directly rather than opening a full new
+ * Gate 3/4 cycle): the golden rule was always Tier-1 (does `--ref` RESOLVE to a real object? —
+ * mechanically imponible, fail-closed) vs Tier-2 (does it actually PROVE the gate's work? — an explicit
+ * spec Non-goal, left to the Gate 8/9 human reviewer). A `git-commit` ref that resolved via
+ * `resolveEvidenceRef`'s own `gitCommitExists` check is NOT the same kind of unverifiable, free-text
+ * claim a `file` ref is — it had to correspond to a real object this repo's own commit graph already
+ * contains, which is exactly as mechanically-enforced as `test-run`/`journal-entry`'s runtime-recorded-id
+ * lookup. `hasSufficientEvidenceForMandatoryGate` below therefore accepts a resolved `git-commit` item
+ * alone as sufficient, WITHOUT touching the existing `runtime-derived` branch or its priority —
+ * `test-run`/`journal-entry` still wins outright once Fase 6 lands; `git-commit` is the interim
+ * fallback; a `file` ref alone is still, deliberately, never enough (weaker anti-forgery: existsSync +
+ * isWithinRoot only proves SOME file the caller pointed at sits inside the workspace). This is NOT a
+ * relaxation of R25's fail-closed direction — empty evidence and file-only evidence are still refused
+ * exactly as before; it is applying the Tier-1/Tier-2 split as it was already designed, to a kind
+ * (`git-commit`) the original Gate 5/6 pass had not yet reconciled against it. See this function's own
+ * doc comment below and `test/gate-evidence.test.ts`'s updated suite for the full before/after.
  */
 
 import { existsSync } from "node:fs";
@@ -144,25 +167,45 @@ export function resolveEvidenceRef(ref: EvidenceRef, ctx: ResolveEvidenceRefCont
 
 /** The minimal shape `hasSufficientEvidenceForMandatoryGate` needs from an attached evidence item --
  * deliberately NOT importing `gate-state.ts`'s own `Evidence` record (that file's aggregate is a
- * PARALLEL stream's scope); any object carrying a `provenance` field (e.g. a `gate-state.ts` `Evidence`
- * value) satisfies this structurally, with zero import edge required. */
+ * PARALLEL stream's scope); any object carrying `provenance`/`ref.kind` fields (e.g. a `gate-state.ts`
+ * `Evidence` value, whose `ref: EvidenceRef` always carries a `kind` discriminant) satisfies this
+ * structurally, with zero import edge required.
+ *
+ * `ref.kind` (GATE 8 LOOP-BACK addition): needed so the golden-rule check below can tell a genuinely
+ * resolved `git-commit` apart from a resolved `file` — both currently share the identical
+ * `provenance: "author-declared"` (see `resolveEvidenceRef` above), so `provenance` ALONE cannot make
+ * that distinction; only the ref's own kind can. */
 export interface EvidenceProvenanceInfo {
 	provenance: EvidenceProvenance;
+	ref: { kind: EvidenceRef["kind"] };
 }
 
 /**
  * R25 "golden rule", operationalized as a pure predicate (ADR 0005 §8: "onde o runtime PODE derivar a
  * evidência, ele deriva, e isso vence um --ref digitado à mão... um ref de texto livre
  * não-verificável NÃO é tratado como suficiente para fechar um obrigatório sozinho"): a MANDATORY gate
- * (BR-6: "não pode ser aprovado vazio") is only considered to have SUFFICIENT evidence once at least one
- * attached item is "runtime-derived" — any number of "author-declared" items alone, even though each
- * individually resolved at Tier-1, is not enough on its own to close a mandatory gate.
+ * (BR-6: "não pode ser aprovado vazio") is considered to have SUFFICIENT evidence when either:
+ *   1. at least one attached item is "runtime-derived" (`test-run`/`journal-entry`, once Fase 6's
+ *      ledgers exist) — the strongest signal, checked and preferred FIRST, exactly as before this
+ *      loop-back; or
+ *   2. (GATE 8 LOOP-BACK, interim until (1) has real producers) at least one attached item is a
+ *      genuinely-resolved `git-commit` ref (`provenance === "author-declared" && ref.kind ===
+ *      "git-commit"`) — `provenance: "author-declared"` is a value ONLY `resolveEvidenceRef` ever
+ *      produces (never a caller-supplied guess: `gate.ts`'s `runGateEvidence` always OVERWRITES
+ *      whatever provenance the caller declared with `resolveEvidenceRef`'s own verified result before
+ *      persisting), so this branch can only fire for a sha that actually resolved against this repo's
+ *      real commit graph via `gitCommitExists` — not a free-text, unverifiable claim.
+ * A `file` ref sharing that same "author-declared" provenance is deliberately EXCLUDED from (2): it only
+ * proves some path the caller pointed at exists inside the workspace, a strictly weaker anti-forgery bar
+ * than a sha this repo's own history had to already contain. Any number of "author-declared" `file`-only
+ * items, alone, still never closes a mandatory gate — unchanged from before this loop-back.
  *
  * Pure — no I/O, no gate-state mutation. This is the INPUT SIGNAL the parallel GateStateStore stream's
- * own `isMandatorySatisfied`/BR-6 check should consult once it lands (pending integration, documented in
- * this file's header) — this function does not itself decide whether a gate MAY be approved, only
- * whether its attached evidence clears this one bar.
+ * own `isMandatorySatisfied`/BR-6 check (and `gate-store.ts`'s own `approve()`) consult — this function
+ * does not itself decide whether a gate MAY be approved, only whether its attached evidence clears this
+ * one bar.
  */
 export function hasSufficientEvidenceForMandatoryGate(evidence: readonly EvidenceProvenanceInfo[]): boolean {
-	return evidence.some((item) => item.provenance === "runtime-derived");
+	if (evidence.some((item) => item.provenance === "runtime-derived")) return true;
+	return evidence.some((item) => item.provenance === "author-declared" && item.ref.kind === "git-commit");
 }

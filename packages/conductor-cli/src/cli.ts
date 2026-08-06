@@ -38,6 +38,7 @@ import { describeInitOutcome, initExitCode, runInit } from "./commands/init.ts";
 import { formatRolesListReport, runRolesList } from "./commands/roles.ts";
 import { formatSkillsListReport, runSkillsList } from "./commands/skills.ts";
 import { gitCommitExistsSync } from "./git-status.ts";
+import { resolveConfirmChannel, type TtyStreams } from "./tty-confirm.ts";
 
 export interface CliWriter {
 	write(chunk: string): void;
@@ -47,6 +48,18 @@ export interface CliIO {
 	cwd: string;
 	stdout: CliWriter;
 	stderr: CliWriter;
+	/**
+	 * Real interactive TTY streams for `gate approve`/`gate calibrate`'s confirmation prompt (Gate 6,
+	 * Fase 4 loop-back). Deliberately SEPARATE from `stdout`/`stderr` above (those are the minimal
+	 * `CliWriter` capturing sink every other command already writes plain text through) — a `readline`
+	 * prompt needs a real stream pair (`.isTTY`, `.on(...)`, `.write(...)`), a different, richer shape
+	 * (`tty-confirm.ts`'s own `TtyStreams`). Optional and backward-compatible: every existing caller/test
+	 * that never touches `gate approve`/`calibrate` keeps working unchanged; omitting it here means those
+	 * two commands fall back to the headless, always-`false` channel (the fail-closed default is
+	 * unaffected either way). Production wiring is `bin/conductor.js`, passing real
+	 * `process.stdin`/`process.stdout`.
+	 */
+	tty?: TtyStreams;
 }
 
 const USAGE = `conductor -- Conductor CLI (Fase 1)
@@ -113,17 +126,6 @@ function parseFlags(
 	}
 
 	return { positional, flags, unrecognized };
-}
-
-/** Headless-by-default confirm channel: today's `conductor gate ...` is a bare, non-interactive CLI
- * invocation (never a live chat/TUI session) -- there is no interactive channel wired at this call
- * site yet (Gate 6 follow-up: a real TTY prompt satisfying the SAME two invariants `confirmOrDeny`
- * already has, `!hasUI -> false` / `timeout/reject -> false`). Resolving `false` unconditionally is
- * the fail-closed, honest placeholder: it can never be mistaken for "human said yes" (R22) -- a
- * mandatory gate approved this way correctly falls through to `needs-human` (FR-11) rather than
- * silently blocking forever on a channel nothing will ever answer. */
-async function headlessConfirmChannel(): Promise<boolean> {
-	return false;
 }
 
 function parseGateNumber(raw: string | undefined, label: string): number | { error: string } {
@@ -420,7 +422,11 @@ async function runGateCommand(args: string[], io: CliIO): Promise<number> {
 				demandId: flags.demand ?? DEFAULT_DEMAND_ID,
 				store,
 				gate: gateArg ?? 0,
-				confirm: headlessConfirmChannel,
+				// Gate 6 loop-back: a real TTY on both stdin+stdout (io.tty, production: bin/conductor.js's
+				// process.stdin/process.stdout) gets a genuine interactive y/n prompt; anything else
+				// (io.tty omitted, piped/redirected streams, CI, the autonomous loop) stays on the
+				// headless, always-false channel -- never a second way to fabricate "human".
+				confirm: resolveConfirmChannel(io.tty),
 				source: "cli:gate-approve",
 			});
 			io.stdout.write(formatGateStatusReport(snapshot));
@@ -490,7 +496,7 @@ async function runGateCommand(args: string[], io: CliIO): Promise<number> {
 				demandId: flags.demand ?? DEFAULT_DEMAND_ID,
 				store,
 				collapse,
-				confirm: headlessConfirmChannel,
+				confirm: resolveConfirmChannel(io.tty),
 				source: "cli:gate-calibrate",
 			});
 			io.stdout.write(formatGateStatusReport(snapshot));

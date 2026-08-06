@@ -144,6 +144,33 @@ describe("evaluateAdvance / isMandatorySatisfied — the mandatory floor (R23/T4
 		expect(isMandatorySatisfied(state, 6, MANDATORY_GATES)).toBe(false);
 	});
 
+	// GATE 8 LOOP-BACK: re-read of R25/T41 (gate-evidence.ts's own updated header has the full
+	// reasoning) -- a git-commit ref that genuinely RESOLVED (provenance "author-declared", the only
+	// value resolveEvidenceRef ever produces for it) is now, alone, sufficient to satisfy the mandatory
+	// floor at the FULL integration level (isMandatorySatisfied -> isGateGenuinelyApproved ->
+	// hasSufficientEvidenceForMandatoryGate), not just at gate-evidence.ts's own unit level. This is the
+	// exact scenario Gate 8 reproduced live and found blocked: a real commit sha attached to a mandatory
+	// gate, with a genuine keyed Approval, still could not close it before this loop-back.
+	it("R25 golden rule extension (Gate 8 loop-back): a genuinely RESOLVED git-commit ref alone (author-declared) DOES satisfy a mandatory gate -- interim Tier-1 acceptance until Fase 6's runtime ledgers exist", () => {
+		const base = makeGateState(6);
+		const gitCommitOnly = approvedRecord(3, {
+			evidence: [
+				{
+					gate: 3,
+					ref: { kind: "git-commit", sha: "deadbeefcafefeed0000000000000000000000" },
+					provenance: "author-declared",
+					recordedAt: "2026-08-06T00:00:00.000Z",
+				},
+			],
+		});
+		const state: GateState = { ...base, gates: { ...base.gates, 3: gitCommitOnly } };
+
+		expect(isMandatorySatisfied(state, 6, MANDATORY_GATES)).toBe(true);
+
+		const verdict = evaluateAdvance(state, 6, MANDATORY_GATES);
+		expect(verdict.kind).toBe("approved");
+	});
+
 	it("R23(iv) anti-spoofing (the _is_approval/D7-D8 form of gate_land.py): an Approval structurally borrowed from a DIFFERENT gate does not count for Gate 3, even though it is otherwise well-formed and the record has evidence", () => {
 		const base = makeGateState(6);
 		const borrowedApproval = approvedRecord(3, {

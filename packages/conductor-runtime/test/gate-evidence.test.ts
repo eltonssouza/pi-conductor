@@ -133,24 +133,67 @@ describe("resolveEvidenceRef (R25 Tier-1: every variant has to resolve, fail-clo
 	});
 });
 
-describe("hasSufficientEvidenceForMandatoryGate (R25 golden rule: runtime-derived preferred to close a mandatory gate)", () => {
+describe("hasSufficientEvidenceForMandatoryGate (R25 golden rule: runtime-derived preferred; git-commit accepted as an interim Tier-1 fallback until Fase 6 ledgers exist)", () => {
 	it("false for an empty evidence list -- a mandatory gate is never approved empty (BR-6)", () => {
 		expect(hasSufficientEvidenceForMandatoryGate([])).toBe(false);
 	});
 
-	it('false when EVERY attached item is "author-declared" -- a free-text/file/commit ref alone never closes a mandatory gate', () => {
-		const evidence: EvidenceProvenanceInfo[] = [{ provenance: "author-declared" }, { provenance: "author-declared" }];
+	// GATE 8 LOOP-BACK NOTE: this test originally asserted `false` for ANY all-"author-declared"
+	// evidence list, regardless of `ref.kind` -- correct at the time (this file's own header: Gate 5
+	// wrote this test deliberately locking that OLD behavior), but Gate 8 ran the real CLI end-to-end and
+	// found it made `status:"approved"` structurally UNREACHABLE for every mandatory gate, because the
+	// only two kinds capable of ever producing "runtime-derived" (test-run/journal-entry) have no real
+	// producer yet (no Fase 6 ledger exists). The orchestrator re-read R25/T41 and extended the golden
+	// rule (src/gate-evidence.ts's own updated header/doc comment has the full reasoning): a genuinely
+	// RESOLVED `git-commit` ref is now accepted alone. This test is NARROWED, not deleted, to keep
+	// proving the part of the old claim that is still true -- a `file` ref alone (weaker anti-forgery:
+	// only proves a path exists inside the workspace) still never closes a mandatory gate. The NEW
+	// git-commit behavior gets its own dedicated tests below instead of silently overwriting this one.
+	it('false when EVERY attached item is "author-declared" AND a "file" ref -- a file-only claim alone never closes a mandatory gate', () => {
+		const evidence: EvidenceProvenanceInfo[] = [
+			{ provenance: "author-declared", ref: { kind: "file" } },
+			{ provenance: "author-declared", ref: { kind: "file" } },
+		];
 
 		expect(hasSufficientEvidenceForMandatoryGate(evidence)).toBe(false);
 	});
 
-	it('true as soon as at least one attached item is "runtime-derived", regardless of how many author-declared items also exist', () => {
-		const evidence: EvidenceProvenanceInfo[] = [{ provenance: "author-declared" }, { provenance: "runtime-derived" }];
+	it('true as soon as at least one attached item is "runtime-derived", regardless of how many file-only author-declared items also exist', () => {
+		const evidence: EvidenceProvenanceInfo[] = [
+			{ provenance: "author-declared", ref: { kind: "file" } },
+			{ provenance: "runtime-derived", ref: { kind: "journal-entry" } },
+		];
 
 		expect(hasSufficientEvidenceForMandatoryGate(evidence)).toBe(true);
 	});
 
 	it('true for a single "runtime-derived" item alone', () => {
-		expect(hasSufficientEvidenceForMandatoryGate([{ provenance: "runtime-derived" }])).toBe(true);
+		expect(hasSufficientEvidenceForMandatoryGate([{ provenance: "runtime-derived", ref: { kind: "test-run" } }])).toBe(
+			true,
+		);
+	});
+
+	// GATE 8 LOOP-BACK: the new branch. A git-commit ref that resolved via `resolveEvidenceRef`'s own
+	// `gitCommitExists` check (the ONLY producer of `provenance: "author-declared"`, never a
+	// caller-supplied guess) is accepted alone -- interim, until Fase 6's runtime ledgers exist.
+	it('true for a single "git-commit" item alone, even though its provenance is "author-declared" -- interim Tier-1 acceptance (Gate 8 loop-back re-read of R25/T41)', () => {
+		const evidence: EvidenceProvenanceInfo[] = [{ provenance: "author-declared", ref: { kind: "git-commit" } }];
+
+		expect(hasSufficientEvidenceForMandatoryGate(evidence)).toBe(true);
+	});
+
+	it('a "file" ref together with a "git-commit" ref is sufficient -- the git-commit item alone already clears the bar (order of the two array entries must not matter)', () => {
+		const evidence: EvidenceProvenanceInfo[] = [
+			{ provenance: "author-declared", ref: { kind: "file" } },
+			{ provenance: "author-declared", ref: { kind: "git-commit" } },
+		];
+
+		expect(hasSufficientEvidenceForMandatoryGate(evidence)).toBe(true);
+	});
+
+	it('a "journal-entry" ref that never actually resolved runtime-derived (hypothetical malformed caller passing "author-declared" for it) does NOT get the git-commit exception -- the exception is narrowly keyed to ref.kind === "git-commit", not to provenance alone', () => {
+		const evidence: EvidenceProvenanceInfo[] = [{ provenance: "author-declared", ref: { kind: "journal-entry" } }];
+
+		expect(hasSufficientEvidenceForMandatoryGate(evidence)).toBe(false);
 	});
 });
