@@ -32,6 +32,7 @@
  *   (BR-1), never partially allowed, never silently trimmed to the legal subset.
  */
 
+import { hasSufficientEvidenceForMandatoryGate } from "./gate-evidence.ts";
 import type { GateState } from "./gate-state.ts";
 
 /**
@@ -56,15 +57,14 @@ export type GateAdvanceVerdict =
  *      (FR-9 generalized: `rejected` blocks exactly as hard as `not-started`).
  *   2. `record.evidence.length > 0` — BR-6: an "approved" gate with zero evidence is not trusted,
  *      however the `status` field reads.
- *   3. At least one evidence item has `provenance === "runtime-derived"` — the R25 "golden rule"
- *      (gate-evidence.ts's own `hasSufficientEvidenceForMandatoryGate`, T41/BR-6): a mandatory gate
- *      never closes on author-declared evidence alone. This logic is intentionally NOT imported from
- *      `gate-evidence.ts` — that file is a parallel Gate 5/6 stream owned by another engineer in this
- *      session and still throws "not implemented"; importing its stub would make every test in this
- *      file RED for a reason outside this file's own scope. The predicate itself is one line and the
- *      contract is pinned by `EvidenceProvenanceInfo`'s own shape (`{ provenance }`), so duplicating
- *      it here is a deliberate, narrow trade-off — not a second, drifting design — with a TODO to
- *      delete this inline copy and import the real one once that stream lands.
+ *   3. At least one evidence item has `provenance === "runtime-derived"` — the R25 "golden rule",
+ *      RECONCILED (Gate 6 wiring closure): this now calls `gate-evidence.ts`'s own
+ *      `hasSufficientEvidenceForMandatoryGate` directly rather than duplicating its one-line check
+ *      inline. The two parallel Gate 5/6 streams originally landed this as a documented, temporary
+ *      duplicate (that file was still a stub throwing "not implemented" when this file's own tests were
+ *      first written, so importing it then would have failed every test here for a reason outside this
+ *      file's own scope) — now that both streams are implemented, `isGateGenuinelyApproved` consults the
+ *      single, canonical predicate instead of a second, independently-maintained copy of R25's rule.
  *   4. At least one `Approval` structurally keyed to (this gate, `state.demandId`, `state.branch`) —
  *      the anti-spoofing form of `gate_land.py`'s `_is_approval`/D7-D8 (R23(iv)): an `Approval`
  *      borrowed from a different gate, demand, or branch never counts, however well-formed.
@@ -74,7 +74,7 @@ function isGateGenuinelyApproved(state: GateState, gate: number): boolean {
 	if (!record) return false;
 	if (record.status !== "approved") return false;
 	if (record.evidence.length === 0) return false;
-	if (!record.evidence.some((item) => item.provenance === "runtime-derived")) return false;
+	if (!hasSufficientEvidenceForMandatoryGate(record.evidence)) return false;
 	return record.approvals.some(
 		(approval) => approval.gate === gate && approval.demandId === state.demandId && approval.branch === state.branch,
 	);

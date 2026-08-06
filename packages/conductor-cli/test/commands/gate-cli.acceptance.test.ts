@@ -1,19 +1,18 @@
 /**
- * Test-first (Gate 5) end-to-end dispatch for `conductor gate *` (src/cli.ts's `runGateCommand`) —
- * Fase 4 "Gates e evidências". Mirrors `test/commands/roles.test.ts`'s own "end-to-end dispatch"
- * section style.
+ * End-to-end dispatch for `conductor gate *` (src/cli.ts's `runGateCommand`) — Fase 4 "Gates e
+ * evidências". Mirrors `test/commands/roles.test.ts`'s own "end-to-end dispatch" section style.
  *
  * Two classes of assertion here, deliberately distinguished (see this project's own Gate 5 note on
  * this point): argument-SHAPE validation (unknown subcommand, missing/extra arguments) is real,
  * ordinary CLI plumbing — the same kind `roles.test.ts`/`skills.test.ts` already exercise GREEN against
- * their own already-implemented commands — and is expected to pass today. Every assertion about
- * SUBSTANTIVE gate behavior (status actually reflecting state, start enforcing sequencing, approve
- * persisting a sign-off) fails RED today because `commands/gate.ts`'s `run*` functions are Gate-5
- * stubs that throw, and `createUnwiredGateStateStore()` deliberately fails closed until the parallel
- * GateStateStore stream's real store is wired in (Gate 6, pending integration — see
- * `commands/gate.ts`'s own header).
+ * their own already-implemented commands. SUBSTANTIVE gate behavior (status reflecting state, start
+ * enforcing sequencing, approve persisting a sign-off) now runs against the REAL, PERSISTED
+ * `GateStateStoreView` (`commands/gate-store.ts`'s `createPersistedGateStateStore`, Gate 6 wiring
+ * closure) — a genuine end-to-end proof, not the former in-process-only stand-in.
  */
 
+import { execFileSync } from "node:child_process";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { runCli } from "../../src/cli.ts";
 import { createCapturingIo } from "../support/io.ts";
@@ -28,6 +27,22 @@ beforeEach(() => {
 afterEach(() => {
 	project.cleanup();
 });
+
+/** Mirrors `test/git-status.test.ts`'s own real `git init`/`git commit` helper — never mocked. */
+function git(args: string[], cwd: string): string {
+	return execFileSync("git", args, { cwd, stdio: ["ignore", "pipe", "ignore"] })
+		.toString()
+		.trim();
+}
+
+function initRepoWithOneCommit(root: string, branch: string): string {
+	git(["init", "--initial-branch", branch], root);
+	git(["config", "user.email", "conductor-test@example.invalid"], root);
+	git(["config", "user.name", "Conductor Test"], root);
+	git(["add", "."], root);
+	git(["commit", "-m", "initial"], root);
+	return git(["rev-parse", "HEAD"], root);
+}
 
 describe("conductor gate (end-to-end dispatch) -- argument shape (real, GREEN today)", () => {
 	it("rejects an unknown gate subcommand with a non-zero exit and a usage hint on stderr", async () => {
@@ -94,7 +109,7 @@ describe("conductor gate (end-to-end dispatch) -- argument shape (real, GREEN to
 	});
 });
 
-describe("conductor gate (end-to-end dispatch) -- substantive behavior (RED today, pending Gate 6)", () => {
+describe("conductor gate (end-to-end dispatch) -- substantive behavior, against the REAL persisted store", () => {
 	it("`gate status` shows the demand's observable state (FR-4)", async () => {
 		const { io, stdout } = createCapturingIo(project.root);
 
@@ -122,13 +137,16 @@ describe("conductor gate (end-to-end dispatch) -- substantive behavior (RED toda
 		expect(stderr()).toMatch(/gate 3/);
 	});
 
-	it("`gate evidence` attaches a resolvable ref to the current gate (FR-5)", async () => {
+	it("`gate evidence` attaches a resolvable ref to the current gate (FR-5, real resolveEvidenceRef Tier-1 resolution)", async () => {
 		const { io, stdout } = createCapturingIo(project.root);
+		// A `--kind test-run` ref would ALWAYS refuse today (no durable runtime ledger exists yet, Fase 6
+		// scope -- gate-evidence.ts's own documented contract), so a genuinely resolvable ref for this
+		// generic "attaches evidence" test is a real FILE inside the workspace (Tier-1: existsSync +
+		// isWithinRoot, no ledger required).
+		project.write("evidence.txt", "proof");
+		const evidencePath = join(project.root, "evidence.txt");
 
-		const code = await runCli(
-			["gate", "evidence", "--gate", "1", "--kind", "test-run", "--ref", "run-42"],
-			io,
-		);
+		const code = await runCli(["gate", "evidence", "--gate", "1", "--kind", "file", "--ref", evidencePath], io);
 
 		expect(code).toBe(0);
 		expect(stdout()).toMatch(/evidence/i);
@@ -159,5 +177,85 @@ describe("conductor gate (end-to-end dispatch) -- substantive behavior (RED toda
 
 		expect(code).not.toBe(0);
 		expect(stderr()).toMatch(/mandatory/i);
+	});
+
+	// -----------------------------------------------------------------------------------------------
+	// Gate 6 wiring-closure integration tests (Fase 4 pendency 1): the state PERSISTED store, proven
+	// end-to-end -- two SEPARATE `runCli` calls, never the same in-memory object held alive across them
+	// (that would only prove the FAKE/former in-memory store worked, not real persistence).
+	// -----------------------------------------------------------------------------------------------
+
+	it("`gate status` after `gate approve` survives a fresh store construction -- state is PERSISTED on disk, not held only in an in-memory object (Fase 4's own promise, real createGateStateStore wiring)", async () => {
+		const first = createCapturingIo(project.root);
+		const approveCode = await runCli(["gate", "approve"], first.io);
+		expect(approveCode).toBe(0);
+		expect(first.stdout()).toMatch(/needs-human/);
+
+		// A SEPARATE runCli call -- runGateCommand constructs a brand-new store adapter from scratch
+		// here, exactly as a later, separate `conductor gate status` OS process would. Nothing keeps the
+		// first call's in-memory object alive across this boundary; only the on-disk envelope under
+		// project.root/.conductor/gates bridges the two calls.
+		const second = createCapturingIo(project.root);
+		const statusCode = await runCli(["gate", "status"], second.io);
+
+		expect(statusCode).toBe(0);
+		expect(second.stdout()).toMatch(/needs-human/);
+	});
+
+	it("`gate evidence` attached in one `runCli` call is visible in `gate status` from a SEPARATE `runCli` call (persisted evidenceCount, not in-memory)", async () => {
+		project.write("evidence.txt", "proof");
+		const evidencePath = join(project.root, "evidence.txt");
+
+		const first = createCapturingIo(project.root);
+		const evidenceCode = await runCli(
+			["gate", "evidence", "--gate", "1", "--kind", "file", "--ref", evidencePath],
+			first.io,
+		);
+		expect(evidenceCode).toBe(0);
+
+		const second = createCapturingIo(project.root);
+		const statusCode = await runCli(["gate", "status"], second.io);
+
+		expect(statusCode).toBe(0);
+		expect(second.stdout()).toMatch(/evidence=1/);
+	});
+
+	// -----------------------------------------------------------------------------------------------
+	// Gate 6 wiring-closure integration tests (Fase 4 pendency 3): `gate evidence --kind git-commit`
+	// against a REAL git repository, driven through the real `resolveEvidenceRef` (never a stub).
+	// -----------------------------------------------------------------------------------------------
+
+	it("`gate evidence --kind git-commit` resolves a REAL commit sha via resolveEvidenceRef and attaches it (R25/T41 wiring)", async () => {
+		project.write("README.md", "hello\n");
+		const sha = initRepoWithOneCommit(project.root, "feature/fase4-demo");
+		const { io, stdout } = createCapturingIo(project.root);
+
+		const code = await runCli(["gate", "evidence", "--gate", "1", "--kind", "git-commit", "--ref", sha], io);
+
+		expect(code).toBe(0);
+		expect(stdout()).toMatch(/evidence/i);
+	});
+
+	it("`gate evidence --kind git-commit` refuses fail-closed for a sha that does not resolve in this repo (R25/T41, real resolveEvidenceRef, never attached)", async () => {
+		project.write("README.md", "hello\n");
+		initRepoWithOneCommit(project.root, "feature/fase4-demo");
+		const { io, stderr } = createCapturingIo(project.root);
+
+		const code = await runCli(
+			[
+				"gate",
+				"evidence",
+				"--gate",
+				"1",
+				"--kind",
+				"git-commit",
+				"--ref",
+				"0000000000000000000000000000000000000000",
+			],
+			io,
+		);
+
+		expect(code).not.toBe(0);
+		expect(stderr()).toMatch(/does not resolve/);
 	});
 });

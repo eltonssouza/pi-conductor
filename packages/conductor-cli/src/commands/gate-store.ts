@@ -1,0 +1,350 @@
+/**
+ * `createPersistedGateStateStore` — the REAL `GateStateStoreView` adapter (Gate 6 wiring closure,
+ * Fase 4 "Gates e evidências") over `@conductor/runtime`'s `createGateStateStore`/`evaluateAdvance`/
+ * `evaluateCalibration`/`hasSufficientEvidenceForMandatoryGate`/`mintHumanApproval`. Replaces
+ * `commands/gate.ts`'s former `createInMemoryGateStateStore` — a temporary, non-persisted stand-in that
+ * file's own header always flagged as "PENDING INTEGRATION": `conductor gate status` after closing the
+ * CLI process used to lose everything, which is not what Fase 4 promises (PERSISTED gate state). This
+ * file is that pending integration, landed for real.
+ *
+ * `GateStateStoreView` (commands/gate.ts) takes `demandId` as a CALL-time argument on every method;
+ * `@conductor/runtime`'s `createGateStateStore` fixes `demandId`/`repoId`/`branch`/`gatesDir` at
+ * CONSTRUCTION time (ADR 0005 §3.1: "one store instance = one demand's file"). `storeFor()` below
+ * bridges the two by constructing a fresh, cheap `GateStateStore` per call (it only derives a file path
+ * and closes over options — no I/O happens until `.read()`/`.mutate()` is actually invoked), so this
+ * adapter's own map from "one CLI invocation" to "one demand's on-disk file" stays exactly the
+ * `GateStateStoreView` contract callers already depend on.
+ *
+ * Gate-1 auto-open (documented at length in `commands/gate.ts`'s former in-memory adapter, carried over
+ * here verbatim as a CLI-ergonomics default, NOT a `GateStateStore` contract): `createDefaultGateState`
+ * (gate-state-store.ts) deliberately bootstraps EVERY gate — including 1 — as `not-started` at
+ * `currentGate: 0`. `readOrBootstrap` below is the one place that ergonomic default is layered on top,
+ * exactly once, the first time a demand's file is ever created, so `conductor gate status` / `conductor
+ * gate evidence --gate 1 ...` stay usable on a fresh demand with no `gate start 1` warm-up — matching
+ * every demand's own real starting point (CLAUDE.md's own gate table: "Gate 1 — Domain discovery"
+ * always runs first). `gate-state-store.ts`'s own bootstrap is untouched (out of this pendency's scope,
+ * and already locked by that file's own Gate-5 tests) — the auto-open stays a layer above it.
+ */
+
+import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
+import { MANDATORY_GATES } from "@conductor/config";
+import {
+	type CalibrationDecision,
+	createGateStateStore,
+	type Decision,
+	type Evidence,
+	evaluateAdvance,
+	evaluateCalibration,
+	type GateRecord,
+	type GateState,
+	type GateStateMutationError,
+	type GateStateStore,
+	hasSufficientEvidenceForMandatoryGate,
+	mintHumanApproval,
+} from "@conductor/runtime";
+import { DEFAULT_GIT_STATUS_TIMEOUT_MS, getGitStatus, resolveTimeoutMs } from "../git-status.ts";
+import { GateCommandError, type GateRecordSnapshot, type GateStateStoreView, type GateStatusSnapshot } from "./gate.ts";
+
+export interface PersistedGateStateStoreOptions {
+	/** Absolute path to the `.conductor/gates` directory (ADR 0005 §3.1). */
+	gatesDir: string;
+	repoId: string;
+	branch: string;
+}
+
+function describeStoreError(error: GateStateMutationError): string {
+	switch (error.kind) {
+		case "could-not-verify":
+			return error.reason;
+		case "locked":
+			return `gate state is locked (held since ${error.heldSince}) -- try again`;
+		case "io-error":
+			return `gate state I/O error: ${error.cause instanceof Error ? error.cause.message : String(error.cause)}`;
+	}
+}
+
+function storeFor(options: PersistedGateStateStoreOptions, demandId: string): GateStateStore {
+	return createGateStateStore({
+		gatesDir: options.gatesDir,
+		demandId,
+		repoId: options.repoId,
+		branch: options.branch,
+	});
+}
+
+/**
+ * `existsSync(store.filePath)` is a cheap pre-check so a `gate status`/`gate evidence` call against an
+ * ALREADY-bootstrapped demand never pays for an unconditional write (and lock acquisition) — the actual
+ * correctness backstop against the check-then-act race with a concurrent first touch is `mutate()`'s own
+ * `current.currentGate !== 0` guard inside the callback below, not this pre-check.
+ */
+function readOrBootstrap(store: GateStateStore): GateState {
+	if (!existsSync(store.filePath)) {
+		const bootstrapped = store.mutate((current) => {
+			if (current.currentGate !== 0) return current; // lost the race to a concurrent first touch
+			const gateOne = current.gates[1];
+			return {
+				...current,
+				currentGate: 1,
+				gates: {
+					...current.gates,
+					1: { ...gateOne, status: "in-progress", startedAt: gateOne.startedAt ?? new Date().toISOString() },
+				},
+			};
+		});
+		if (!bootstrapped.ok) {
+			throw new GateCommandError(`gate state could not be initialized: ${describeStoreError(bootstrapped.error)}`);
+		}
+		return bootstrapped.value.next;
+	}
+	const result = store.read();
+	if (!result.ok) {
+		throw new GateCommandError(`gate state could not be read: ${describeStoreError(result.error)}`);
+	}
+	return result.value.state;
+}
+
+/** Projects the real, persisted `GateState` aggregate onto `commands/gate.ts`'s CLI-local
+ * `GateStatusSnapshot` placeholder shape (unchanged by this pendency — see that file's own header on
+ * why reshaping it is a separate, future concern). Gates still `not-started` are omitted, same
+ * ergonomic behavior the former in-memory adapter already had: a demand nobody has touched at all
+ * renders as `gates: []` (`formatGateStatusReport`'s own "(no gate has been started yet…)" fallback). */
+function projectSnapshot(state: GateState): GateStatusSnapshot {
+	const gates: GateRecordSnapshot[] = Object.values(state.gates)
+		.filter((record) => record.status !== "not-started")
+		.sort((a, b) => a.gate - b.gate)
+		.map((record) => ({
+			gate: record.gate,
+			status: record.status,
+			evidenceCount: record.evidence.length,
+			decisionsCount: record.decisions.length,
+			risksCount: record.risks.length,
+			approvalsCount: record.approvals.length,
+			startedAt: record.startedAt,
+			completedAt: record.completedAt,
+		}));
+	return {
+		demandId: state.demandId,
+		branch: state.branch,
+		currentGate: state.currentGate,
+		gates,
+		mandatoryGates: [...MANDATORY_GATES].sort((a, b) => a - b),
+	};
+}
+
+const EMPTY_GATE_RECORD: Omit<GateRecord, "gate"> = {
+	status: "not-started",
+	evidence: [],
+	decisions: [],
+	risks: [],
+	approvals: [],
+};
+
+export function createPersistedGateStateStore(options: PersistedGateStateStoreOptions): GateStateStoreView {
+	return {
+		status(demandId) {
+			const store = storeFor(options, demandId);
+			return projectSnapshot(readOrBootstrap(store));
+		},
+
+		start(demandId, gate) {
+			const store = storeFor(options, demandId);
+			readOrBootstrap(store); // ensures the demand/gate-1 auto-open exists before evaluating the floor
+			// R23/FR-2: fail-closed against the REAL mandatory-floor policy (gate-state-policy.ts's
+			// evaluateAdvance/isMandatorySatisfied), never a second, duplicated inline check -- this is
+			// exactly the wiring this pendency closes; a bug inside this callback (including the throw
+			// below) propagates straight out of store.mutate(), per that function's own documented contract.
+			const result = store.mutate((current) => {
+				const verdict = evaluateAdvance(current, gate, MANDATORY_GATES);
+				if (verdict.kind !== "approved") {
+					const detail =
+						verdict.kind === "refused"
+							? `mandatory ${verdict.missingMandatoryGates.map((g) => `gate ${g}`).join(", ")} not yet approved`
+							: verdict.reason;
+					throw new GateCommandError(`cannot start gate ${gate}: ${detail}`);
+				}
+				const existing = current.gates[gate] ?? { gate, ...EMPTY_GATE_RECORD };
+				return {
+					...current,
+					currentGate: gate,
+					gates: {
+						...current.gates,
+						[gate]: {
+							...existing,
+							status: "in-progress",
+							startedAt: existing.startedAt ?? new Date().toISOString(),
+						},
+					},
+				};
+			});
+			if (!result.ok) throw new GateCommandError(`cannot start gate ${gate}: ${describeStoreError(result.error)}`);
+			return projectSnapshot(result.value.next);
+		},
+
+		attachEvidence(demandId, gate, attachment) {
+			const store = storeFor(options, demandId);
+			readOrBootstrap(store);
+			const result = store.mutate((current) => {
+				const record = current.gates[gate];
+				// FR-6: refuse attaching evidence to a gate that was never started for this demand.
+				if (!record || record.status === "not-started") {
+					throw new GateCommandError(`cannot attach evidence: gate ${gate} was never started for this demand`);
+				}
+				// `note` is OMITTED entirely (never a present key holding `undefined`) when not supplied --
+				// gate-state-store.ts's own checksum (canonicalizeJsonForChecksum) fail-closed REJECTS any
+				// value that is not null/string/boolean/number/object (R28's own "JSON-serializable only"
+				// contract), and `undefined` fails that check the moment it is enumerated via
+				// Object.entries -- a present `note: undefined` key would make EVERY mutate() on this gate
+				// throw, not just this one attach.
+				const evidence: Evidence = {
+					gate,
+					ref: attachment.ref,
+					provenance: attachment.provenance,
+					recordedAt: new Date().toISOString(),
+					...(attachment.note !== undefined ? { note: attachment.note } : {}),
+				};
+				return {
+					...current,
+					gates: { ...current.gates, [gate]: { ...record, evidence: [...record.evidence, evidence] } },
+				};
+			});
+			if (!result.ok) {
+				throw new GateCommandError(`cannot attach evidence to gate ${gate}: ${describeStoreError(result.error)}`);
+			}
+			return projectSnapshot(result.value.next);
+		},
+
+		approve(demandId, gate, confirmResult, meta) {
+			const store = storeFor(options, demandId);
+			readOrBootstrap(store);
+			const result = store.mutate((current) => {
+				const record = current.gates[gate];
+				if (!record || record.status === "not-started" || record.status === "rejected") {
+					throw new GateCommandError(`cannot approve gate ${gate}: it was never started (or is rejected)`);
+				}
+				// FR-8/BR-6/R25: a mandatory gate needs at least one RUNTIME-DERIVED evidence item, not
+				// merely a non-empty evidence list -- the same golden rule gate-state-policy.ts's own
+				// isMandatorySatisfied now consults (this pendency's sibling fix), applied here too so
+				// approval-time and advance-time never disagree about what "enough evidence" means.
+				if (MANDATORY_GATES.has(gate) && !hasSufficientEvidenceForMandatoryGate(record.evidence)) {
+					throw new GateCommandError(
+						`cannot approve mandatory gate ${gate}: insufficient evidence -- at least one runtime-derived item is required (R25/BR-6)`,
+					);
+				}
+				// R22: this adapter never writes method:"human" itself -- it only calls the sole factory
+				// (mintHumanApproval), which itself only ever mints from a confirmResult that already came
+				// out of the one real channel (runGateApprove's own options.confirm).
+				const approval = mintHumanApproval(confirmResult, {
+					gate,
+					demandId,
+					branch: current.branch,
+					source: meta.source,
+				});
+				if (approval === null) {
+					// FR-11: never approved -- needs-human, never silently left "in-progress".
+					return { ...current, gates: { ...current.gates, [gate]: { ...record, status: "needs-human" } } };
+				}
+				return {
+					...current,
+					gates: {
+						...current.gates,
+						[gate]: {
+							...record,
+							status: "approved",
+							completedAt: new Date().toISOString(),
+							approvals: [...record.approvals, approval],
+						},
+					},
+				};
+			});
+			if (!result.ok) throw new GateCommandError(`cannot approve gate ${gate}: ${describeStoreError(result.error)}`);
+			return projectSnapshot(result.value.next);
+		},
+
+		reject(demandId, gate, reason) {
+			const store = storeFor(options, demandId);
+			readOrBootstrap(store);
+			const result = store.mutate((current) => {
+				const record: GateRecord = current.gates[gate] ?? { gate, ...EMPTY_GATE_RECORD };
+				const decision: Decision = {
+					gate,
+					kind: "decision",
+					text: reason,
+					// This code path never calls mintHumanApproval (no confirm channel is threaded through
+					// GateStateStoreView.reject at all) -- "auto" is the only honest tag it may ever write;
+					// "human" is reserved for the one real sole-mint factory (R22's own sole-mint discipline).
+					method: "auto",
+					recordedAt: new Date().toISOString(),
+				};
+				return {
+					...current,
+					gates: {
+						...current.gates,
+						[gate]: { ...record, status: "rejected", decisions: [...record.decisions, decision] },
+					},
+				};
+			});
+			if (!result.ok) throw new GateCommandError(`cannot reject gate ${gate}: ${describeStoreError(result.error)}`);
+			return projectSnapshot(result.value.next);
+		},
+
+		calibrate(demandId, collapsedGates, method) {
+			const store = storeFor(options, demandId);
+			readOrBootstrap(store);
+			// R24: refuse AT REGISTRATION time, before any Decision is persisted -- never silently trimmed
+			// to the legal subset. Checked outside the mutate() transaction (pure, no I/O, cheap) so a
+			// refusal never even attempts the lock/write.
+			const evalResult = evaluateCalibration(collapsedGates, MANDATORY_GATES);
+			if (!evalResult.ok) {
+				const offendingLabel = evalResult.offendingMandatory.map((g) => `gate ${g}`).join(", ");
+				throw new GateCommandError(`calibration refused: cannot collapse mandatory ${offendingLabel}`);
+			}
+			const result = store.mutate((current) => {
+				const decision: CalibrationDecision = {
+					gate: current.currentGate,
+					kind: "calibration",
+					text: `collapsed gate(s) ${collapsedGates.join(", ")}`,
+					method,
+					collapsedGates,
+					recordedAt: new Date().toISOString(),
+				};
+				return { ...current, calibration: decision };
+			});
+			if (!result.ok) throw new GateCommandError(`cannot register calibration: ${describeStoreError(result.error)}`);
+			return projectSnapshot(result.value.next);
+		},
+	};
+}
+
+/**
+ * Resolves the `(repoId, branch)` pair a persisted `GateStateStore` is keyed by, from `cwd` alone --
+ * this CLI already treats `cwd` as the trusted workspace root everywhere else (init.ts/doctor.ts: no
+ * upward `.git` walk), so `.conductor/gates` lives directly under it (workspace-policy.ts's own
+ * `defaultProtectedPaths(workspaceRoot)` already protects exactly this subtree).
+ *
+ * `branch`: reuses `getGitStatus` (git-status.ts) -- already this CLI's one shared git-branch check
+ * (doctor.ts / chat's own status line) -- rather than a second, drifting `git branch --show-current`
+ * call. Degrades to the fixed sentinel `"no-branch"` outside a git repository (informational-only,
+ * matching `getGitStatus`'s own "this check is informational only, never blocking" contract) -- this
+ * keeps `conductor gate *` usable against a plain (non-git) scratch/demo directory, exactly what this
+ * package's own acceptance tests exercise.
+ *
+ * `repoId`: ADR 0005 §15 leaves the real source an EXPLICIT open question ("derivar de git remote
+ * get-url origin OU um UUID persistido na 1ª escrita — sub-pergunta aberta", tagged Low risk, R5).
+ * Resolving that open ADR question is out of this wiring pendency's scope. This is a deliberate,
+ * narrow, DOCUMENTED interim choice, not a silent resolution of it: a stable sha256 hash of the
+ * resolved `cwd` itself, so gate state persisted from the same clone/location never drifts across
+ * separate `conductor gate` invocations, without requiring a git remote (this package's own scratch
+ * acceptance tests are not git repositories at all). Content-authoritative verification
+ * (gate-state-store.ts's own demandId/repoId/branch check) means a mismatch here fails closed as
+ * `could-not-verify`, never a silent cross-repo mixup -- the safer of the two failure directions while
+ * §15 stays open.
+ */
+export async function resolveGateGitContext(cwd: string): Promise<{ repoId: string; branch: string }> {
+	const timeoutMs = resolveTimeoutMs(process.env.CONDUCTOR_GATE_GIT_TIMEOUT_MS, DEFAULT_GIT_STATUS_TIMEOUT_MS);
+	const status = await getGitStatus(cwd, timeoutMs);
+	const branch = status.kind === "unavailable" ? "no-branch" : status.branch;
+	const repoId = createHash("sha256").update(cwd, "utf8").digest("hex").slice(0, 16);
+	return { repoId, branch };
+}

@@ -17,11 +17,12 @@
  * convention instead, not forced onto a weak citation.)
  */
 
+import { join } from "node:path";
+import type { ResolveEvidenceRefContext } from "@conductor/runtime";
 import { runChat } from "./commands/chat.ts";
 import { runConfigGet, runConfigSet, runConfigShow } from "./commands/config.ts";
 import { doctorExitCode, formatDoctorReport, runDoctor } from "./commands/doctor.ts";
 import {
-	createInMemoryGateStateStore,
 	type EvidenceAttachment,
 	type EvidenceRef,
 	formatGateStatusReport,
@@ -32,9 +33,11 @@ import {
 	runGateStart,
 	runGateStatus,
 } from "./commands/gate.ts";
+import { createPersistedGateStateStore, resolveGateGitContext } from "./commands/gate-store.ts";
 import { describeInitOutcome, initExitCode, runInit } from "./commands/init.ts";
 import { formatRolesListReport, runRolesList } from "./commands/roles.ts";
 import { formatSkillsListReport, runSkillsList } from "./commands/skills.ts";
+import { gitCommitExistsSync } from "./git-status.ts";
 
 export interface CliWriter {
 	write(chunk: string): void;
@@ -69,9 +72,9 @@ Usage:
 See docs/adr/0002-fase1-cli-foundation.md for the full command contract,
 docs/adr/0004-fase3-roles-skills-subagents.md for roles/skills, and
 docs/adr/0005-fase4-gate-state-machine.md for the gate state machine (gate * commands
-run against a real in-process GateStateStoreView today -- the persisted, atomic,
-checksum-protected store is a pending integration with the parallel GateStateStore
-stream, see commands/gate.ts's own header).
+run against the real, persisted, atomic, checksum-protected GateStateStore
+(commands/gate-store.ts's createPersistedGateStateStore, under .conductor/gates/) --
+state survives across separate CLI invocations, not just within one process).
 `;
 
 function describeError(error: unknown): string {
@@ -281,19 +284,44 @@ const DEFAULT_DEMAND_ID = "default";
 /**
  * `conductor gate *` (Gate 6, Fase 4 "Gates e evidências"). Argument parsing/shape validation here is
  * ordinary CLI plumbing (mirrors `runRolesCommand`/`runConfigCommand`'s own style). Every subcommand's
- * substantive behavior is delegated to `commands/gate.ts`'s `run*` functions, now implemented for
- * real. `createInMemoryGateStateStore()` is a REAL, working, in-process store (Gate 6) -- not yet the
- * persisted, atomic, checksum-protected store the parallel GateStateStore stream owns; see
- * `commands/gate.ts`'s header for the exact pending-integration point.
+ * substantive behavior is delegated to `commands/gate.ts`'s `run*` functions. `store` is the REAL,
+ * persisted `GateStateStoreView` (`commands/gate-store.ts`'s `createPersistedGateStateStore`, backed by
+ * `@conductor/runtime`'s `createGateStateStore` under `.conductor/gates/<cwd>`) -- constructed fresh on
+ * every `conductor gate ...` invocation (a new OS process each time in real use), but the ON-DISK
+ * envelope is what carries state between invocations, not this in-memory object (Gate 6 wiring
+ * closure: the former `createInMemoryGateStateStore` lost everything once the process exited, which is
+ * not what Fase 4 promises).
+ *
+ * `evidenceContext` is `gate evidence`'s own `resolveEvidenceRef` collaborator bundle (R25/T41,
+ * `commands/gate.ts`'s `runGateEvidence`): `repoRoot`/`workspaceRoot` are `io.cwd` (this CLI's own
+ * established convention -- no upward `.git` walk, same as `init.ts`/`doctor.ts`); `gitCommitExists` is
+ * the real `git rev-parse --verify` check (`git-status.ts`); the two runtime-recorded id sets are
+ * HONESTLY EMPTY -- no durable test-run/journal-entry ledger exists yet in this codebase (Fase 6 scope,
+ * per `gate-evidence.ts`'s own header), so `--kind test-run`/`--kind journal-entry` refs correctly
+ * refuse fail-closed today rather than pretending to have observed an id nothing actually recorded.
  */
 async function runGateCommand(args: string[], io: CliIO): Promise<number> {
 	const [sub, ...rest] = args;
-	const store = createInMemoryGateStateStore();
+	const gitContext = await resolveGateGitContext(io.cwd);
+	const store = createPersistedGateStateStore({
+		gatesDir: join(io.cwd, ".conductor", "gates"),
+		repoId: gitContext.repoId,
+		branch: gitContext.branch,
+	});
+	const evidenceContext: ResolveEvidenceRefContext = {
+		repoRoot: io.cwd,
+		workspaceRoot: io.cwd,
+		gitCommitExists: gitCommitExistsSync,
+		runtimeRecordedTestRunIds: new Set(),
+		runtimeRecordedJournalEntryIds: new Set(),
+	};
 
 	if (sub === "status") {
 		const { positional, flags, unrecognized } = parseFlags(rest, ["demand"]);
 		if (positional.length > 0 || unrecognized.length > 0) {
-			io.stderr.write(`conductor gate status: unrecognized argument(s): ${[...positional, ...unrecognized].join(" ")}\n`);
+			io.stderr.write(
+				`conductor gate status: unrecognized argument(s): ${[...positional, ...unrecognized].join(" ")}\n`,
+			);
 			return 1;
 		}
 		try {
@@ -350,6 +378,8 @@ async function runGateCommand(args: string[], io: CliIO): Promise<number> {
 			return 1;
 		}
 		try {
+			// `provenance` here is a placeholder -- runGateEvidence never trusts it; resolveEvidenceRef
+			// (via evidenceContext) determines the REAL provenance, fail-closed if the ref does not resolve.
 			const attachment: EvidenceAttachment = { ref, provenance: "author-declared", note: flags.note };
 			const snapshot = runGateEvidence({
 				cwd: io.cwd,
@@ -357,6 +387,7 @@ async function runGateCommand(args: string[], io: CliIO): Promise<number> {
 				store,
 				gate,
 				attachment,
+				evidenceContext,
 			});
 			io.stdout.write(formatGateStatusReport(snapshot));
 			return 0;
@@ -374,7 +405,8 @@ async function runGateCommand(args: string[], io: CliIO): Promise<number> {
 			);
 			return 1;
 		}
-		const gateArg = flags.gate === undefined ? undefined : parseGateNumber(flags.gate, "conductor gate approve: --gate");
+		const gateArg =
+			flags.gate === undefined ? undefined : parseGateNumber(flags.gate, "conductor gate approve: --gate");
 		if (gateArg !== undefined && typeof gateArg !== "number") {
 			io.stderr.write(`${gateArg.error}\n`);
 			return 1;
@@ -411,7 +443,8 @@ async function runGateCommand(args: string[], io: CliIO): Promise<number> {
 			io.stderr.write('conductor gate reject: usage: conductor gate reject --reason "..." [--gate <N>]\n');
 			return 1;
 		}
-		const gateArg = flags.gate === undefined ? undefined : parseGateNumber(flags.gate, "conductor gate reject: --gate");
+		const gateArg =
+			flags.gate === undefined ? undefined : parseGateNumber(flags.gate, "conductor gate reject: --gate");
 		if (gateArg !== undefined && typeof gateArg !== "number") {
 			io.stderr.write(`${gateArg.error}\n`);
 			return 1;
@@ -446,7 +479,9 @@ async function runGateCommand(args: string[], io: CliIO): Promise<number> {
 		}
 		const collapse = flags.collapse.split(",").map((s) => Number(s.trim()));
 		if (collapse.some((n) => !Number.isInteger(n) || n < 1 || n > 14)) {
-			io.stderr.write(`conductor gate calibrate: --collapse must be a comma-separated list of gate numbers 1-14 (got "${flags.collapse}")\n`);
+			io.stderr.write(
+				`conductor gate calibrate: --collapse must be a comma-separated list of gate numbers 1-14 (got "${flags.collapse}")\n`,
+			);
 			return 1;
 		}
 		try {

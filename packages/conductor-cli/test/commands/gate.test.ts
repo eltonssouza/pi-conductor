@@ -12,10 +12,11 @@
  * — not a redundant re-statement of "it doesn't throw".
  */
 
+import type { ResolveEvidenceRefContext } from "@conductor/runtime";
 import { describe, expect, it } from "vitest";
 import {
-	type GateStatusSnapshot,
 	formatGateStatusReport,
+	type GateStatusSnapshot,
 	runGateApprove,
 	runGateCalibrate,
 	runGateEvidence,
@@ -26,6 +27,22 @@ import {
 import { createFakeGateStore } from "../support/fake-gate-store.ts";
 
 const DEMAND = "demand-1";
+
+/** A controllable `resolveEvidenceRef` context for unit-testing `runGateEvidence` in isolation --
+ * `resolveEvidenceRef` itself is already exhaustively unit-tested against real fs/git collaborators in
+ * `gate-evidence.test.ts`; these tests are about `runGateEvidence`'s OWN wiring (does it call
+ * resolution, does it fail-closed, does it forward the RESOLVED provenance) — so a fixture whose
+ * outcome is set directly by the test, never real I/O, is the right level here. */
+function evidenceContext(overrides: Partial<ResolveEvidenceRefContext> = {}): ResolveEvidenceRefContext {
+	return {
+		repoRoot: "/tmp",
+		workspaceRoot: "/tmp",
+		gitCommitExists: () => false,
+		runtimeRecordedTestRunIds: new Set(),
+		runtimeRecordedJournalEntryIds: new Set(),
+		...overrides,
+	};
+}
 
 async function alwaysApprove(): Promise<boolean> {
 	return true;
@@ -46,7 +63,17 @@ describe("runGateStatus (FR-4: full observable state without reopening the sessi
 			branch: "feature/fake-demand",
 			currentGate: 1,
 			mandatoryGates: [3, 5, 7, 8, 9],
-			gates: [{ gate: 1, status: "in-progress", evidenceCount: 0, decisionsCount: 0, risksCount: 0, approvalsCount: 0, startedAt: expect.any(String) }],
+			gates: [
+				{
+					gate: 1,
+					status: "in-progress",
+					evidenceCount: 0,
+					decisionsCount: 0,
+					risksCount: 0,
+					approvalsCount: 0,
+					startedAt: expect.any(String),
+				},
+			],
 		});
 	});
 });
@@ -82,13 +109,34 @@ describe("runGateEvidence (FR-5/FR-6, R25: evidence is a referenced attachment, 
 			demandId: DEMAND,
 			store,
 			gate: 1,
-			attachment: { ref: { kind: "test-run", id: "run-1" }, provenance: "runtime-derived" },
+			attachment: { ref: { kind: "test-run", id: "run-1" }, provenance: "author-declared" },
+			evidenceContext: evidenceContext({ runtimeRecordedTestRunIds: new Set(["run-1"]) }),
 		});
 
 		expect(snapshot.gates.find((g) => g.gate === 1)?.evidenceCount).toBe(1);
 	});
 
-	it("FR-6: refuses evidence for a gate that was never started for this demand", () => {
+	it("R25/T41: refuses (fail-closed) when the ref does not resolve, and never reaches the store at all", () => {
+		const store = createFakeGateStore();
+		store.start(DEMAND, 1);
+
+		expect(() =>
+			runGateEvidence({
+				cwd: "/tmp",
+				demandId: DEMAND,
+				store,
+				gate: 1,
+				attachment: { ref: { kind: "test-run", id: "run-never-recorded" }, provenance: "author-declared" },
+				// Honestly empty -- "run-never-recorded" was never runtime-recorded, so this MUST refuse.
+				evidenceContext: evidenceContext(),
+			}),
+		).toThrow(/cannot attach evidence/);
+		// The refusal happened before the store was ever touched -- evidenceCount stays 0, never
+		// incremented speculatively then rolled back.
+		expect(store.getRaw(DEMAND)?.gates.get(1)?.evidenceCount).toBe(0);
+	});
+
+	it("FR-6: refuses evidence for a gate that was never started for this demand (evidence itself resolves fine -- the store's own FR-6 check is what refuses)", () => {
 		const store = createFakeGateStore();
 
 		expect(() =>
@@ -97,7 +145,8 @@ describe("runGateEvidence (FR-5/FR-6, R25: evidence is a referenced attachment, 
 				demandId: DEMAND,
 				store,
 				gate: 11,
-				attachment: { ref: { kind: "file", path: "/tmp/x" }, provenance: "author-declared" },
+				attachment: { ref: { kind: "test-run", id: "run-x" }, provenance: "author-declared" },
+				evidenceContext: evidenceContext({ runtimeRecordedTestRunIds: new Set(["run-x"]) }),
 			}),
 		).toThrow(/gate 11/);
 	});
@@ -186,7 +235,14 @@ describe("runGateCalibrate (FR-3/R24: calibration can never collapse a mandatory
 		const store = createFakeGateStore();
 
 		await expect(
-			runGateCalibrate({ cwd: "/tmp", demandId: DEMAND, store, collapse: [1, 3], confirm: alwaysApprove, source: "test" }),
+			runGateCalibrate({
+				cwd: "/tmp",
+				demandId: DEMAND,
+				store,
+				collapse: [1, 3],
+				confirm: alwaysApprove,
+				source: "test",
+			}),
 		).rejects.toThrow(/gate 3|mandatory/i);
 	});
 });
