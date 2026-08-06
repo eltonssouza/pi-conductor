@@ -19,14 +19,20 @@
  *      may reach any REGISTERED role) to a real, registered leaf role ("sdet"). The child spawner
  *      (`tools/task.ts`'s `createGovernedChildSessionSpawner`) constructs its OWN, separate
  *      `ModelRuntime` instance -- `registerFakeModel` only mutates the specific instance passed to it
- *      (task-registration.acceptance.test.ts's own header explains why this matters), so a real,
- *      completed child turn needs that fresh instance to also carry a scripted provider. This test
+ *      (task-registration.acceptance.test.ts's own header explains why this matters). This test
  *      intercepts the shared `ModelRuntime.create` static factory (a module-singleton within this test
  *      process, so the spy reaches every caller, including `tools/task.ts`'s own internal call) to
- *      register a second scripted model on the CHILD's own runtime -- the only seam available without
- *      changing production code to accept an injectable model factory. This proves a full round trip:
- *      real `canSpawn` authorization, a real spawned child session, and `DelegationEvidence` derived
- *      from that child's own real, disc-backed transcript (never the child's own prose, per R14/T34).
+ *      register the SAME provider id ("conductor-fake") on the CHILD's own fresh runtime instance too
+ *      -- GAP-5's fix (`createGovernedChildSessionSpawner` now ALWAYS passes the PARENT's own resolved
+ *      `model` -- `fakeModel.model`, provider "conductor-fake" -- explicitly into the child's own
+ *      `createAgentSession` call, never leaving it unset for Pi's `findInitialModel` to auto-discover a
+ *      DIFFERENT provider on its own) means the child's own runtime must recognize that SAME provider
+ *      id for the real turn to complete; registering a differently-named provider here (as an earlier
+ *      revision of this fixture did, relying on the since-removed auto-discovery fallback to find it by
+ *      name) would no longer be reachable at all. This proves a full round trip: real `canSpawn`
+ *      authorization, a real spawned child session using the SAME model the parent resolved, and
+ *      `DelegationEvidence` derived from that child's own real, disc-backed transcript (never the
+ *      child's own prose, per R14/T34).
  *
  *   2. UNAUTHORIZED delegation: a real, constrained caller role ("business-analyst", a real leaf role
  *      with an empty `canSpawn` in `roles.py`/`builtin-roles-data.ts`) attempts to delegate to another
@@ -106,10 +112,17 @@ it("an authorized delegation from the root (no --role) session reaches a real ta
 	// createGovernedChildSessionSpawner) is a SEPARATE instance from `modelRuntime` above --
 	// installed AFTER the top-level runtime is created and scripted, so only the CHILD's own,
 	// later call is intercepted. Restored in afterEach via vi.restoreAllMocks().
+	//
+	// GAP-5: registered under the SAME provider id ("conductor-fake") the PARENT's own model already
+	// resolved to (`fakeModel.model.provider`) -- `createGovernedChildSessionSpawner` now passes that
+	// exact model into the child's own `createAgentSession` call, so the child's own, separate
+	// `ModelRuntime` instance must recognize that same provider for the real turn to dispatch. Its
+	// scripted response is still distinctly its own (below), proving this is a genuinely SEPARATE
+	// runtime instance carrying out the real work, not the parent's own turn being reused.
 	const originalCreate = ModelRuntime.create.bind(ModelRuntime);
 	vi.spyOn(ModelRuntime, "create").mockImplementation(async (opts) => {
 		const runtime = await originalCreate(opts);
-		registerFakeModel(runtime, "conductor-fake-child", [{ text: "child role completed the delegated work" }]);
+		registerFakeModel(runtime, "conductor-fake", [{ text: "child role completed the delegated work" }]);
 		return runtime;
 	});
 

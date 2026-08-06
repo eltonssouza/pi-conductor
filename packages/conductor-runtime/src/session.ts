@@ -249,6 +249,13 @@ export async function createConductorSession(options: CreateConductorSessionOpti
 				auditTrailWriter,
 				additionalProtectedPaths: mergedProtectedPaths,
 				yesFlagActive: options.yesFlagActive ?? false,
+				// GAP-5 (quality-baseline, Fase 3 checkpoint): this SAME session's own already-resolved
+				// `options.model` -- so every delegation child spawned from here inherits it by default,
+				// instead of `createGovernedChildSessionSpawner` leaving the child's own `model` unset for
+				// Pi's `findInitialModel` to auto-discover (and silently call) whatever provider happens to
+				// have an API key present in the process environment. See tools/task.ts's
+				// `SpawnChildSessionInput.model` doc comment for the full grounding.
+				model: options.model,
 			}),
 		);
 	}

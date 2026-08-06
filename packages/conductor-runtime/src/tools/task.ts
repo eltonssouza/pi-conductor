@@ -40,6 +40,7 @@
  */
 
 import { join } from "node:path";
+import type { Model } from "@earendil-works/pi-ai";
 import {
 	createAgentSession,
 	DefaultResourceLoader,
@@ -114,6 +115,29 @@ export interface SpawnChildSessionInput {
 	auditTrailWriter: AuditTrailWriter;
 	additionalProtectedPaths: string[];
 	yesFlagActive: boolean;
+	/**
+	 * GAP-5 (quality-baseline, Fase 3 checkpoint): the PARENT session's own, already-resolved `Model` —
+	 * REQUIRED, never optional, so a caller cannot forget it and silently reopen the hole this field
+	 * closes. Before this field existed, `createGovernedChildSessionSpawner` omitted `model` from the
+	 * child's `createAgentSession` call entirely, which let Pi's own `findInitialModel` fall back to
+	 * "first available model with a valid API key" (`model-resolver.ts` step 4) — auto-discovered from
+	 * ANY provider whose API key env var happens to be set in the process, completely independent of
+	 * `allowModelNetwork: false` (that flag only gates fetching a remote model catalog, not which
+	 * locally-known provider `findInitialModel` picks nor whether a real chat completion is later sent
+	 * to it). Confirmed in practice: an ambient `DEEPSEEK_API_KEY` caused a delegation child to make a
+	 * real network call to a live, paid model during a test run, with no consent and no audit trail —
+	 * exactly the "Network: requer consentimento e registro" principle plano_desenvolvimento.md §4.3
+	 * states and Fase 2's fail-closed/controlled-egress work already built for every OTHER tool. Passing
+	 * the parent's own `model` here means `createAgentSession`'s own `let model = options.model;` branch
+	 * (sdk.ts) is always already satisfied for a child, so its `findInitialModel` fallback (the exact
+	 * auto-discovery code path) is never reached at all — never "usually correct", structurally
+	 * unreachable. This is a deliberate, conservative default (mirrors the child inheriting the SAME
+	 * `effectivePolicy`/`auditTrailWriter` as the parent, this file's own BR-7 precedent) — real
+	 * `modelRole` (`ConductorRoleView.modelRole`) → concrete `Model` resolution per role is still the
+	 * open Gate 6/7 follow-up this file's own header already documents; this field does not invent that
+	 * registry, it only ensures a child NEVER resolves a model on its own by omission.
+	 */
+	model: Model<any>;
 	/**
 	 * A NEW, disc-backed, empty `SessionManager` for the child (ADR §6: `SessionManager.inMemory()`
 	 * would defeat R14 — no durable transcript to hand back as evidence). Constructed by `runTask`
@@ -196,6 +220,16 @@ export interface CreateTaskToolOptions {
 	additionalProtectedPaths?: string[];
 	/** REQUIRED, not defaulted silently (T41 precision #1) — mirrors the caller's own `--yes` state. */
 	yesFlagActive: boolean;
+	/**
+	 * GAP-5 (quality-baseline, Fase 3 checkpoint): the CALLER's (parent session's) own already-resolved
+	 * `Model` — REQUIRED so `runTask` always has a concrete model to forward into
+	 * `SpawnChildSessionInput.model` (see that field's own doc comment in this file for the full
+	 * grounding: without it, `createGovernedChildSessionSpawner`'s child left `model` unset and Pi's own
+	 * `findInitialModel` fallback could auto-discover and silently call ANY provider with an API key
+	 * present in the process environment, independent of `allowModelNetwork`). `runTask` only forwards
+	 * this exact reference — it never re-resolves a model itself.
+	 */
+	model: Model<any>;
 	/**
 	 * Injected collaborator that actually constructs and drives the governed child session. Real
 	 * production wiring (Gate 6) calls the Pi SDK's `createAgentSession` here — and ONLY here (see
@@ -335,6 +369,9 @@ export async function runTask(params: TaskToolParams, options: CreateTaskToolOpt
 		additionalProtectedPaths: options.additionalProtectedPaths ?? [],
 		yesFlagActive: options.yesFlagActive,
 		sessionManager: childSessionManager,
+		// GAP-5: the parent's own already-resolved model, forwarded unchanged -- never re-resolved,
+		// never left undefined for the child's own createAgentSession call to discover on its own.
+		model: options.model,
 	};
 
 	let spawnResult: SpawnChildSessionResult;
@@ -471,12 +508,26 @@ function deriveFilesTouchedFromTranscript(messages: readonly unknown[]): string[
  * stays unit-testable against fakes; `createTaskTool` (below, Gate 6's `defineTool` wiring) is the
  * real caller: `spawnChildSession: createGovernedChildSessionSpawner(deps.sharedBudget)`.
  *
- * Deliberately conservative where the ADR's own follow-up list leaves things open (`modelRole` →
- * concrete model resolution is explicitly still unresolved, per ADR §16 appendix "Gate 6" follow-ups):
- * `model` is omitted from `createAgentSession`'s options so Pi's own `findInitialModel` resolves it
- * from settings, exactly like `createAgentSession`'s own "Minimal - uses defaults" documented mode --
- * this file does not invent a `modelRole` → `Model` registry that no other part of the codebase has
- * built yet. Likewise, no UI is bound to the child session: `hasUI` stays `false`, so the child's own
+ * GAP-5 fix (quality-baseline, Fase 3 checkpoint — supersedes an earlier revision of this comment):
+ * `model` is now ALWAYS passed explicitly (`input.model`, `SpawnChildSessionInput.model`'s own doc
+ * comment has the full grounding) — the child NEVER leaves `createAgentSession`'s `model` option unset.
+ * An earlier revision deliberately omitted it, reasoning that `modelRole` → concrete model resolution
+ * being still unresolved (ADR §16 appendix "Gate 6" follow-ups) meant leaning on Pi's own
+ * `findInitialModel` fallback ("Minimal - uses defaults" mode) was the conservative choice. In practice
+ * that fallback's OWN step 4 ("first available model with a valid API key") auto-discovers and silently
+ * calls ANY provider whose API key env var is present in the process — confirmed directly: an ambient
+ * `DEEPSEEK_API_KEY` made a delegation child place a real network call to a live, paid model, with
+ * `allowModelNetwork: false` set and no consent or audit trail, violating plano_desenvolvimento.md
+ * §4.3's "Network: requer consentimento e registro". The fix restores the conservative reading: the
+ * child inherits the SAME model the parent already resolved (by reference, never re-resolved), which
+ * structurally makes `findInitialModel` unreachable for a delegation child (sdk.ts's own
+ * `let model = options.model;` short-circuits before that branch ever runs) — closing the hole until a
+ * real `modelRole` → `Model` registry exists, exactly as this file's header already flags as an open
+ * Gate 6/7 follow-up. This does not by itself guarantee the child's own, separately-scoped `ModelRuntime`
+ * (built below, still intentionally its own instance/credential scope, not the parent's) has usable auth
+ * for that exact model/provider — if it does not, the child's turn fails closed with a provider/auth
+ * error, which is the strictly safer failure mode compared to silently calling a different, unconsented
+ * provider. Likewise, no UI is bound to the child session: `hasUI` stays `false`, so the child's own
  * destructive tool calls fail closed (deny) unless `--yes`-eligible (R13 unchanged: the child's gate
  * still classifies/audits every call identically to the parent's) -- a real approval-forwarding or
  * pre-authorized-scope mechanism for headless children is a genuine open design question (R17a's "the
@@ -528,6 +579,10 @@ export function createGovernedChildSessionSpawner(
 			cwd: input.workspaceRoot,
 			agentDir,
 			modelRuntime,
+			// GAP-5: ALWAYS explicit -- the parent's own already-resolved model, never omitted. Omitting
+			// this field is exactly what let sdk.ts's own `findInitialModel` fallback silently auto-select
+			// (and call) an unconsented provider (see this function's own header comment above).
+			model: input.model,
 			tools: input.role.tools,
 			resourceLoader,
 			sessionManager: input.sessionManager,
@@ -609,6 +664,13 @@ export interface CreateTaskToolDependencies {
 	auditTrailWriter: AuditTrailWriter;
 	additionalProtectedPaths?: string[];
 	yesFlagActive: boolean;
+	/**
+	 * GAP-5: this session's own already-resolved `Model` (`session.ts`'s `CreateConductorSessionOptions.model`,
+	 * already in scope at the one call site that constructs this — `createConductorSession`). REQUIRED so
+	 * every delegation child spawned from this session inherits the SAME model by default instead of
+	 * `createGovernedChildSessionSpawner` leaving it unset for Pi to auto-discover.
+	 */
+	model: Model<any>;
 }
 
 /**
@@ -637,6 +699,8 @@ export function createTaskTool(deps: CreateTaskToolDependencies): ToolDefinition
 		auditTrailWriter: deps.auditTrailWriter,
 		additionalProtectedPaths: deps.additionalProtectedPaths,
 		yesFlagActive: deps.yesFlagActive,
+		// GAP-5: this session's own already-resolved model, forwarded unchanged.
+		model: deps.model,
 		// The ONE real spawn collaborator (this file's sole-constructor precondition, T41) -- never a
 		// second implementation, never re-derived per call site.
 		spawnChildSession: createGovernedChildSessionSpawner(deps.sharedBudget),

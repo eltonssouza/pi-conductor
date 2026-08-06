@@ -30,6 +30,7 @@
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import type { Model } from "@earendil-works/pi-ai";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createAuditTrailWriter } from "../../src/audit-trail.ts";
 import type { EffectivePolicyInput } from "../../src/permission-engine.ts";
@@ -45,6 +46,16 @@ import {
 	type TaskToolParams,
 } from "../../src/tools/task.ts";
 import { createScratchWorkspace, type ScratchWorkspace } from "../support/workspace.ts";
+
+/**
+ * GAP-5 (quality-baseline, Fase 3 checkpoint): a minimal, literal stand-in for the PARENT session's
+ * own already-resolved `Model` -- these tests never drive a real model turn (every `spawnChildSession`
+ * here is a fake), so only `provider`/`id` need to be realistic enough to assert reference/value
+ * identity against. Deliberately a single shared constant, never rebuilt per test: the whole point of
+ * the assertions below is "the SAME object the caller resolved", not "an object that happens to look
+ * the same".
+ */
+const FAKE_PARENT_MODEL = { provider: "conductor-fake", id: "conductor-fake-model-1", name: "Fake" } as Model<any>;
 
 // ---- Test fakes -------------------------------------------------------------------------------
 
@@ -134,6 +145,8 @@ function baseOptions(overrides: Partial<CreateTaskToolOptions> & { calls?: strin
 		auditTrailWriter,
 		additionalProtectedPaths: [],
 		yesFlagActive: false,
+		// GAP-5: every test's "parent" is resolved to this same fake model unless a test overrides it.
+		model: FAKE_PARENT_MODEL,
 		spawnChildSession,
 		...overrides,
 	};
@@ -272,6 +285,7 @@ describe("runTask: FR-7/BR-5 — the child's initial context is the target role'
 				"auditTrailWriter",
 				"depth",
 				"effectivePolicy",
+				"model",
 				"role",
 				"prompt",
 				"sessionManager",
@@ -465,3 +479,67 @@ describe("runTask: BR-7 — the gate references handed to the child are the SAME
 		expect(capturedInput?.yesFlagActive).toBe(true); // forwarded, not silently reset to a safer-looking default
 	});
 });
+
+// ---- GAP-5 (quality-baseline, Fase 3 checkpoint): the child NEVER resolves its own model ------------
+
+describe(
+	"runTask: GAP-5 — the child always receives the PARENT's own already-resolved model, by reference, " +
+		"never undefined and never re-derived",
+	() => {
+		it("spawnChildSession's input.model is the EXACT SAME object as options.model — not a copy, not a lookalike, not undefined", async () => {
+			const calls: string[] = [];
+			let capturedInput: SpawnChildSessionInput | undefined;
+			const spawnChildSession = fakeSpawnChildSession(calls, async (input) => {
+				capturedInput = input;
+				return {
+					finalText: "done",
+					sessionId: "s1",
+					sessionFilePath: join(workspace.root, "s1.jsonl"),
+					tokenUsage: { input: 1, output: 1, total: 2 },
+					filesTouched: [],
+				};
+			});
+			const options = baseOptions({ calls, callerRole: "tech-lead", spawnChildSession });
+
+			await runTask({ role: "software-engineer", prompt: "do it" }, options);
+
+			// Reference equality, the same discriminator BR-7 already uses for effectivePolicy/
+			// auditTrailWriter above: this is not merely "a model with the same provider/id fields", it is
+			// the literal object the caller resolved. Before the GAP-5 fix, `SpawnChildSessionInput` had no
+			// `model` field at all and `createGovernedChildSessionSpawner` never passed one to the real
+			// `createAgentSession` call, which is exactly what let Pi's own `findInitialModel` fallback
+			// silently auto-discover (and call) an unconsented provider (see tools/task.ts's own
+			// `SpawnChildSessionInput.model` and `createGovernedChildSessionSpawner` doc comments).
+			expect(capturedInput?.model).toBe(options.model);
+			expect(capturedInput?.model).toBe(FAKE_PARENT_MODEL);
+			expect(capturedInput?.model).toBeDefined();
+		});
+
+		it("a DIFFERENT parent model is forwarded just as faithfully -- proving this is the caller's own resolved model, never a hardcoded/default fixture", async () => {
+			const calls: string[] = [];
+			let capturedInput: SpawnChildSessionInput | undefined;
+			const spawnChildSession = fakeSpawnChildSession(calls, async (input) => {
+				capturedInput = input;
+				return {
+					finalText: "done",
+					sessionId: "s1",
+					sessionFilePath: join(workspace.root, "s1.jsonl"),
+					tokenUsage: { input: 1, output: 1, total: 2 },
+					filesTouched: [],
+				};
+			});
+			const anotherParentModel = { provider: "anthropic", id: "claude-real-model", name: "Real" } as Model<any>;
+			const options = baseOptions({
+				calls,
+				callerRole: "tech-lead",
+				spawnChildSession,
+				model: anotherParentModel,
+			});
+
+			await runTask({ role: "software-engineer", prompt: "do it" }, options);
+
+			expect(capturedInput?.model).toBe(anotherParentModel);
+			expect(capturedInput?.model).not.toBe(FAKE_PARENT_MODEL);
+		});
+	},
+);
