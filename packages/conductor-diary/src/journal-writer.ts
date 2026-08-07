@@ -8,71 +8,33 @@
  * (`appendFileSync`, mode `0o600`, `flag: "a"`), throwing on any genuine I/O failure -- never
  * swallowing one, the same reason `grounding-ledger.ts`'s own `appendEvent` has no try/catch of its own.
  *
- * GATE-6 DECISION on D8/§10.1's "reuse `redactSessionEntryForPersistence`/`deepRedact`... the redaction
+ * GATE 8 RESOLUTION on D8/§10.1's "reuse `redactSessionEntryForPersistence`/`deepRedact`... the redaction
  * happens at the ONE point of write (the JournalWriter), never presuming an upstream caller already
- * redacted": that function lives in `@conductor/runtime`, but THIS package's `package.json` declares
- * (deliberately, verified by reading `packages/conductor-runtime/package.json`) zero dependency on it,
- * because `@conductor/runtime` carries the full `pi-agent-core`/`pi-ai`/`pi-coding-agent` chain as REAL
- * transitive dependencies -- weight that a local JSONL-append package has no reason to pull in. Importing
- * `@conductor/runtime` here to reuse one pure function would be the wrong trade, and skipping
- * redaction entirely (leaving it to an upstream CLI caller) would directly contradict D8's own explicit
- * "never presume upstream already redacted" sentence. Resolution: `deepRedact`/`redactLeaf` below are a
- * LOCAL, structural port of `@conductor/runtime/src/redaction.ts`'s own `deepRedact` (~15 LOC, a pure
- * side-effect-free tree walk) -- but the actual security-critical primitive, `redactSecrets` (the
- * pattern matcher `@conductor/runtime`'s own redaction.ts also imports it from), is NOT re-implemented;
- * it is imported from `@conductor/secrets`, the shared zero-dependency leaf package both this file and
- * `@conductor/runtime` depend on directly, so "what counts as secret-shaped" can never diverge between
- * sinks even though the tree-walking glue is duplicated. Empirically verified before relying on it
- * (`node --experimental-strip-types` against `@conductor/secrets`'s real `redactSecrets`): an ISO-8601
- * timestamp, a UUID, and a 64-hex-char sha all pass through unchanged, so applying this to the WHOLE
- * assembled `JournalEntry` (not a hand-picked subset of fields) never corrupts `id`/`ts`/`provenance.sha`
- * -- the same "duplicate the ~15-LOC structural glue, never the shared security primitive" trade-off the
- * ADR itself already makes for D3's RRF fusion (§5.1 item 2), now applied to redaction instead of ranking.
+ * redacted" (FR-20: "a redação usa redactSecrets (@conductor/runtime), nunca uma segunda implementação...
+ * nunca um detector de segredo próprio e paralelo do Diary"): Gate 6 shipped a LOCAL structural port of
+ * `@conductor/runtime/src/redaction.ts`'s `deepRedact`/`redactLeaf` here, reasoning that
+ * `@conductor/runtime` carries the full `pi-agent-core`/`pi-ai`/`pi-coding-agent` chain as real
+ * transitive dependencies -- weight a local JSONL-append package has no reason to pull in. That weight
+ * concern was correct, but the fix it produced was not: duplicating the ~15-LOC tree-walking glue was
+ * itself a second, parallel implementation of the Diary's own redaction primitive, which is exactly what
+ * FR-20 forbids, regardless of whether the underlying matcher stayed shared. The actual fix is not "avoid
+ * `@conductor/runtime`" (that reasoning still holds) -- it is "the shared glue belongs in
+ * `@conductor/secrets`, the zero-dependency leaf both packages already depend on directly, precisely so
+ * neither has to duplicate it." `deepRedact` now lives there (alongside the matcher it wraps and the
+ * `SECRET_SCAN_FAILED_PLACEHOLDER` fallback), and this file imports it directly -- `@conductor/runtime`'s
+ * own `redactSessionEntryForPersistence` imports the SAME function, so there is exactly one deep-redact
+ * implementation in the whole monorepo, not two byte-identical ones. `@conductor/diary`'s `package.json`
+ * still declares zero dependency on `@conductor/runtime` (unchanged from Gate 6); it depends only on
+ * `@conductor/secrets`, which it already did.
  */
 
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { basename, dirname } from "node:path";
-import { redactSecrets } from "@conductor/secrets";
+import { deepRedact } from "@conductor/secrets";
 import type { EditMode, JournalAddInput, JournalEntry, JournalProvenance } from "./journal-entry.ts";
 import { openJournalReader } from "./journal-reader.ts";
-
-/** Verbatim copy of `@conductor/runtime/src/redaction.ts`'s own `SECRET_SCAN_FAILED_PLACEHOLDER` (D8's
- * "8th sink" contract): kept byte-identical so a diary entry's redaction-failure placeholder reads the
- * same as every other `REDACTION_SINKS` sink, even though this file does not import that module (see
- * this file's header for why). */
-const SECRET_SCAN_FAILED_PLACEHOLDER = "[REDACTED: secret-scan failed — content withheld]";
-
-/** Redacts one string leaf, fail-closed (D8/§10.1 edge case 5): if the underlying matcher throws for any
- * reason, the ORIGINAL text is never returned -- the placeholder is, so a matcher bug degrades to
- * over-redaction (a diary entry shows less) rather than under-redaction (a secret reaches disk because
- * the scanner broke). Mirrors `@conductor/runtime/src/redaction.ts`'s own `redactSecrets` wrapper. */
-function redactLeaf(value: string): string {
-	try {
-		return redactSecrets(value);
-	} catch {
-		return SECRET_SCAN_FAILED_PLACEHOLDER;
-	}
-}
-
-/** Deep-walks an arbitrary JSON-shaped value, redacting every string leaf and rebuilding every array/
- * object level FRESH -- never a spread-then-overwrite that redacts only one named field (e.g. `text`)
- * and leaks the rest of a multi-field record (D8/§10.1, the exact T57/R38 lesson this ADR names
- * verbatim). Structural port of `@conductor/runtime/src/redaction.ts`'s own `deepRedact` -- see this
- * file's header for why it is duplicated here rather than imported. */
-function deepRedact(value: unknown): unknown {
-	if (typeof value === "string") return redactLeaf(value);
-	if (Array.isArray(value)) return value.map((item) => deepRedact(item));
-	if (value !== null && typeof value === "object") {
-		const result: Record<string, unknown> = {};
-		for (const [key, fieldValue] of Object.entries(value as Record<string, unknown>)) {
-			result[key] = deepRedact(fieldValue);
-		}
-		return result;
-	}
-	return value;
-}
 
 export interface JournalWriter {
 	/** Manual (`journal add`) or captured (D5's `curateCaptureEvent` output). Mints the `id`, appends

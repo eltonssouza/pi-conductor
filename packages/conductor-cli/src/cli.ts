@@ -18,7 +18,12 @@
  */
 
 import { join } from "node:path";
-import { openJournalReader, readRecordedJournalEntryIds } from "@conductor/diary";
+import {
+	curateCaptureEvent,
+	openJournalReader,
+	openJournalWriter,
+	readRecordedJournalEntryIds,
+} from "@conductor/diary";
 import { type ResolveEvidenceRefContext, TOTAL_FLOW_GATES } from "@conductor/runtime";
 import { runChat } from "./commands/chat.ts";
 import { runConfigGet, runConfigSet, runConfigShow } from "./commands/config.ts";
@@ -36,7 +41,12 @@ import {
 } from "./commands/gate.ts";
 import { createPersistedGateStateStore, resolveGateGitContext } from "./commands/gate-store.ts";
 import { describeInitOutcome, initExitCode, runInit } from "./commands/init.ts";
-import { resolveJournalContext, runJournalCommand } from "./commands/journal.ts";
+import {
+	DEFAULT_CAPTURE_CONFIG,
+	generateSessionId,
+	resolveJournalContext,
+	runJournalCommand,
+} from "./commands/journal.ts";
 import { runLibraryCommand } from "./commands/library.ts";
 import { formatRolesListReport, runRolesList } from "./commands/roles.ts";
 import { formatSkillsListReport, runSkillsList } from "./commands/skills.ts";
@@ -63,6 +73,17 @@ export interface CliIO {
 	 * `process.stdin`/`process.stdout`.
 	 */
 	tty?: TtyStreams;
+	/**
+	 * Gate 6 real-wiring loop-back (Grupo F "captura automática", ADR 0007 §7/D5, FR-14..18): a TEST
+	 * SEAM ONLY, threaded straight through to `resolveJournalContext(io.cwd, io.homeDir)` inside
+	 * `runGateCommand` -- mirrors `commands/journal.ts`'s own `Journal*Options.homeDir` convention and
+	 * `commands/chat.ts`'s own new `ChatOptions.homeDir` (same rationale: the Diary's log is
+	 * per-MACHINE, never per-workspace, so a test that never overrode this writes to this developer's
+	 * REAL home directory). Optional and backward-compatible: every existing caller/test that never sets
+	 * it keeps resolving against the real `os.homedir()`, unchanged (`resolveJournalContext`'s own
+	 * default). Production wiring (`bin/conductor.js`) never sets it either.
+	 */
+	homeDir?: string;
 }
 
 const USAGE = `conductor -- Conductor CLI (Fase 1)
@@ -345,7 +366,9 @@ async function runGateCommand(args: string[], io: CliIO): Promise<number> {
 		repoId: gitContext.repoId,
 		branch: gitContext.branch,
 	});
-	const { entriesPath, projectId } = resolveJournalContext(io.cwd);
+	// `io.homeDir` (test seam, CliIO's own header): defaults to the real per-machine home in production,
+	// exactly like every other `resolveJournalContext` call site.
+	const { entriesPath, projectId } = resolveJournalContext(io.cwd, io.homeDir);
 	const journalReader = openJournalReader(entriesPath, projectId);
 	const evidenceContext: ResolveEvidenceRefContext = {
 		repoRoot: io.cwd,
@@ -354,6 +377,37 @@ async function runGateCommand(args: string[], io: CliIO): Promise<number> {
 		runtimeRecordedTestRunIds: new Set(),
 		runtimeRecordedJournalEntryIds: readRecordedJournalEntryIds(journalReader),
 	};
+
+	/**
+	 * Gate 6 real-wiring loop-back (Grupo F "captura automática", FR-14/FR-16, ADR 0007 §7/D5):
+	 * `curateCaptureEvent`'s `gate-concluded` variant was implemented and unit-tested at Gate 5 but
+	 * never called from any production path -- this is that call site, mirroring `commands/chat.ts`'s
+	 * own `scheduleCaptureEvent` (see that file's header for why a synchronous try/catch, with no
+	 * `Promise`, already satisfies "never blocks the command" here: `curateCaptureEvent` and
+	 * `JournalWriter.append` are both synchronous). `gate approve`/`gate reject` have no chat-session
+	 * concept of their own -- each `conductor gate ...` invocation is a fresh OS process, the same
+	 * reasoning `journal.ts`'s own `generateSessionId()` already documents for `journal add` -- so this
+	 * reuses that exact generator rather than inventing a second one.
+	 */
+	function captureGateConcluded(gate: number, outcome: string): void {
+		try {
+			const curated = curateCaptureEvent(
+				{ kind: "gate-concluded", gate, sessionId: generateSessionId(), outcome },
+				DEFAULT_CAPTURE_CONFIG,
+			);
+			if (curated !== null) {
+				openJournalWriter(entriesPath).append(curated);
+			}
+		} catch (error) {
+			// Disk full, permission error, or any other genuine I/O failure: capture is best-effort
+			// (FR-16) -- a `gate approve`/`reject` that already succeeded must never fail (or report a
+			// misleading non-zero exit) over a diary write problem. The failure itself is still surfaced
+			// (quality-baseline category 6, observability) as a one-line stderr note -- error message
+			// only, never `outcome`/curated text -- so a persistent capture problem (e.g. a full disk)
+			// does not go completely unnoticed just because the gate command itself still exits 0.
+			io.stderr.write(`conductor gate: automatic capture (gate-concluded) failed: ${describeError(error)}\n`);
+		}
+	}
 
 	if (sub === "status") {
 		const { positional, flags, unrecognized } = parseFlags(rest, ["demand"]);
@@ -467,6 +521,16 @@ async function runGateCommand(args: string[], io: CliIO): Promise<number> {
 				source: "cli:gate-approve",
 			});
 			io.stdout.write(formatGateStatusReport(snapshot));
+			// Gate 6 real-wiring loop-back (FR-14, gate-concluded): `approve`/`reject` never touch
+			// `currentGate` (verified in gate-store.ts's own `approve`/`reject`), so the resolved gate is
+			// safely readable from the POST-call snapshot here -- `gateArg` when `--gate` was given,
+			// otherwise whatever `runGateApprove` itself resolved from `currentGate`. `outcome` reflects
+			// the REAL persisted record status ("approved", or "needs-human" when `confirmResult` was
+			// `false`, gate-store.ts's own `mintHumanApproval(...) === null` branch) -- never guessed from
+			// this function's own local `confirmResult`-shaped state (there is none to guess from; the
+			// store is the one source of truth for what actually got persisted).
+			const approvedGate = gateArg ?? snapshot.currentGate;
+			captureGateConcluded(approvedGate, snapshot.gates.find((g) => g.gate === approvedGate)?.status ?? "approved");
 			return 0;
 		} catch (error) {
 			io.stderr.write(`conductor gate approve: ${describeError(error)}\n`);
@@ -501,6 +565,13 @@ async function runGateCommand(args: string[], io: CliIO): Promise<number> {
 				reason: flags.reason,
 			});
 			io.stdout.write(formatGateStatusReport(snapshot));
+			// Gate 6 real-wiring loop-back (FR-14, gate-concluded): same post-call resolution as `approve`
+			// above (`reject` never touches `currentGate` either). The reason is included in `outcome`
+			// (never verbatim message/tool-result content -- it is the human/agent-authored rejection
+			// reason itself, exactly the kind of decision text `curateCaptureEvent`'s own `/reject/`
+			// keyword match expects to land as `kind:"decision"`, capture.ts's own header).
+			const rejectedGate = gateArg ?? snapshot.currentGate;
+			captureGateConcluded(rejectedGate, `rejected: ${flags.reason}`);
 			return 0;
 		} catch (error) {
 			io.stderr.write(`conductor gate reject: ${describeError(error)}\n`);
@@ -572,7 +643,18 @@ export async function runCli(argv: string[], io: CliIO): Promise<number> {
 			case "journal":
 				return await runJournalCommand(rest, io);
 			case "chat":
-				return await runChat({ cwd: io.cwd, args: rest, stdout: io.stdout, stderr: io.stderr });
+				// `io.homeDir` (CliIO's own test-seam doc comment): forwarded to ChatOptions.homeDir so
+				// BOTH real dispatch entry points (`runCli(["chat"...])` and `runChat(...)` called
+				// directly, as chat.test.ts's own capture tests do) resolve the Diary's per-machine path
+				// consistently -- production wiring (bin/conductor.js) never sets io.homeDir, so this is a
+				// no-op (`undefined`) in real use, exactly like every other homeDir seam in this package.
+				return await runChat({
+					cwd: io.cwd,
+					args: rest,
+					stdout: io.stdout,
+					stderr: io.stderr,
+					homeDir: io.homeDir,
+				});
 			case "--help":
 			case "-h":
 				io.stdout.write(USAGE);

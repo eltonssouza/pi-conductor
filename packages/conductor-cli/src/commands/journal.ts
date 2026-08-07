@@ -69,6 +69,7 @@ import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import {
+	type CaptureConfig,
 	type EditMode,
 	JOURNAL_KINDS,
 	type JournalKind,
@@ -114,9 +115,35 @@ function describeError(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
 
-function generateSessionId(): string {
+/**
+ * EXPORTED (Gate 6 real-wiring loop-back, Grupo F "captura automática", ADR 0007 §7/D5, FR-14..18):
+ * `cli.ts`'s `runGateCommand` reuses this exact generator for its own `gate-concluded` capture events
+ * (`gate approve`/`reject` have no chat-session concept of their own, same reasoning that already
+ * applies to a manually-issued `journal add` -- each CLI invocation is a fresh OS process with no
+ * persistent "current session" a one-shot command can read) -- one owner for "how a one-shot CLI
+ * command mints a session identity", not a second, independently-drifting copy.
+ */
+export function generateSessionId(): string {
 	return `cli-${Date.now()}-${randomUUID().slice(0, 8)}`;
 }
+
+/**
+ * The single default `CaptureConfig` shared by every automatic-capture call site in this package
+ * (Gate 6 real-wiring loop-back, ADR 0007 §7/D5, FR-14..18): `commands/chat.ts`'s turn-end/
+ * session-shutdown capture and `cli.ts`'s gate-concluded capture. One definition, not a copy per call
+ * site (DRY -- this file's own established "one owner for a shared rule" discipline, see this file's
+ * header). Not yet configurable by a CLI flag this round -- no such flag exists in ADR §16's CLI
+ * surface, and inventing one was not asked for. `rawBufferLimit` is a placeholder for a RAW capture
+ * buffer this round's wiring never actually constructs: `curateCaptureEvent`'s own "at most one curated
+ * entry per call, never an accumulation" property (capture.ts's own header) already satisfies FR-18 for
+ * the CURATED diary without one -- see chat.ts's own header for the fuller reasoning, recorded there
+ * rather than duplicated here.
+ */
+export const DEFAULT_CAPTURE_CONFIG: CaptureConfig = {
+	enabled: true,
+	captureHighRiskBodies: false,
+	rawBufferLimit: 1000,
+};
 
 // ==== journal add ====
 

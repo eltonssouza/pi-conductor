@@ -5,12 +5,16 @@
  * nunca presumindo que um chamador upstream já redigiu." SLI/SLO §11 item 5 names this an INVARIANT with
  * error-budget zero ("entrada persistida com qualquer leaf não-redigido = 0").
  *
- * `journal-writer.ts`'s own header documents the GATE-6 DECISION behind HOW this is implemented (a local
- * `deepRedact`/`redactLeaf` pair importing `redactSecrets` from `@conductor/secrets` directly, rather
- * than `@conductor/runtime`'s `redactSessionEntryForPersistence` -- see that file for the full reasoning).
- * That wiring was not anticipated by the original `test/journal-writer.test.ts` (a parallel Gate-5 stream
- * wrote it before this decision existed), so it has no regression coverage of its own without this file --
- * a real, would-be-silent gap this test closes, distinct from (and never editing) the Gate-5-owned suite.
+ * `journal-writer.ts`'s own header documents the GATE-6 DECISION behind HOW this was first implemented,
+ * and the GATE-8 RESOLUTION that superseded it once Gate 8 validation caught it duplicating
+ * `@conductor/runtime/src/redaction.ts`'s `deepRedact` instead of sharing it (FR-20): `deepRedact` now
+ * lives in `@conductor/secrets` (imported directly by both this file and `@conductor/runtime`), so there
+ * is exactly one deep-redact implementation in the monorepo -- see that file's header for the full
+ * reasoning. This test's assertions were not anticipated by the original `test/journal-writer.test.ts` (a
+ * parallel Gate-5 stream wrote it before the redaction wiring existed), so it has no regression coverage
+ * of its own without this file -- a real, would-be-silent gap this test closes, distinct from (and never
+ * editing) the Gate-5-owned suite. Unaffected by the Gate 8 move: it asserts on `openJournalWriter`'s
+ * observable behavior, not on which package `deepRedact` is declared in.
  */
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";

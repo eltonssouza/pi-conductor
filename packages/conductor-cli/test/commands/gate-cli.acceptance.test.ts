@@ -14,10 +14,13 @@
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { openJournalReader } from "@conductor/diary";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { runCli } from "../../src/cli.ts";
+import { resolveJournalContext } from "../../src/commands/journal.ts";
 import { createCapturingIo } from "../support/io.ts";
 import { createScratchProject, type ScratchProject } from "../support/scratch.ts";
+import { createScratchHome, type ScratchHome } from "../support/scratch-home.ts";
 import { fakeTtyStreams } from "../support/tty.ts";
 
 let project: ScratchProject;
@@ -565,5 +568,86 @@ describe("conductor gate evidence --kind journal-entry -- closes the D2/G12/FR-2
 		expect(approveCode).not.toBe(0);
 		expect(approveStderr()).toMatch(/insufficient evidence/);
 		expect(approveStdout()).toBe("");
+	});
+});
+
+/**
+ * Gate 6 real-wiring loop-back (Grupo F "captura automática", ADR 0007 §7/D5, FR-14/FR-16,
+ * docs/adr/0007-fase6-diary-and-capture.md). `curateCaptureEvent`'s `gate-concluded` variant was
+ * implemented and unit-tested at Gate 5 (capture.test.ts) but `gate approve`/`reject` never called it
+ * from any production path before this wiring pass -- these tests drive the real `runCli` dispatcher
+ * (never `runGateApprove`/`runGateReject` called directly, which would bypass `runGateCommand`'s own
+ * composition-root wiring) and open a REAL `JournalReader` over an isolated scratch `homeDir`
+ * (`CliIO.homeDir`'s own doc comment) to confirm a genuine, minimized entry landed on disk.
+ */
+describe("conductor gate approve/reject -- gate-concluded diary capture (Gate 6 wiring closure, Grupo F)", () => {
+	let home: ScratchHome;
+
+	beforeEach(() => {
+		home = createScratchHome();
+	});
+
+	afterEach(() => {
+		home.cleanup();
+	});
+
+	it("gate approve (non-mandatory gate 1, real TTY confirms 'y') writes a real, minimized gate-concluded entry to the diary", async () => {
+		const start = createCapturingIo(project.root, undefined, home.dir);
+		const startCode = await runCli(["gate", "start", "1"], start.io);
+		expect(startCode).toBe(0);
+
+		const fake = fakeTtyStreams();
+		const approveIo = createCapturingIo(project.root, fake.streams, home.dir);
+		const approvePromise = runCli(["gate", "approve", "--gate", "1"], approveIo.io);
+		fake.answer("y");
+		const approveCode = await approvePromise;
+		expect(approveCode).toBe(0);
+
+		const { entriesPath } = resolveJournalContext(project.root, home.dir);
+		const entries = openJournalReader(entriesPath, "").readAll();
+		const captured = entries.filter((e) => e.source === "capture");
+		expect(captured.length).toBeGreaterThan(0);
+
+		const gateConcluded = captured.find((e) => e.text.includes("Gate 1 concluded"));
+		expect(gateConcluded).toBeDefined();
+		expect(gateConcluded?.gate).toBe(1);
+		expect(gateConcluded?.text).toMatch(/approved/);
+	});
+
+	it('gate reject writes a real gate-concluded entry carrying the rejection reason, curated as kind:"decision"', async () => {
+		const start = createCapturingIo(project.root, undefined, home.dir);
+		const startCode = await runCli(["gate", "start", "2"], start.io);
+		expect(startCode).toBe(0);
+
+		const rejectIo = createCapturingIo(project.root, undefined, home.dir);
+		const rejectCode = await runCli(
+			["gate", "reject", "--gate", "2", "--reason", "spec still ambiguous on edge case 4"],
+			rejectIo.io,
+		);
+		expect(rejectCode).toBe(0);
+
+		const { entriesPath } = resolveJournalContext(project.root, home.dir);
+		const entries = openJournalReader(entriesPath, "").readAll();
+		const gateConcluded = entries.find((e) => e.source === "capture" && e.text.includes("Gate 2 concluded"));
+
+		expect(gateConcluded).toBeDefined();
+		expect(gateConcluded?.gate).toBe(2);
+		expect(gateConcluded?.kind).toBe("decision"); // curateCaptureEvent's own /reject/ keyword match
+		expect(gateConcluded?.text).toContain("spec still ambiguous on edge case 4");
+	});
+
+	it("never touches this developer's real home directory -- writes land only under the scratch homeDir", async () => {
+		const start = createCapturingIo(project.root, undefined, home.dir);
+		await runCli(["gate", "start", "1"], start.io);
+		const fake = fakeTtyStreams();
+		const approveIo = createCapturingIo(project.root, fake.streams, home.dir);
+		const approvePromise = runCli(["gate", "approve", "--gate", "1"], approveIo.io);
+		fake.answer("y");
+		await approvePromise;
+
+		// The scratch homeDir now has a real diary/projects/<id>/entries.jsonl under it.
+		const { entriesPath } = resolveJournalContext(project.root, home.dir);
+		expect(entriesPath.startsWith(home.dir)).toBe(true);
+		expect(existsSync(entriesPath)).toBe(true);
 	});
 });
