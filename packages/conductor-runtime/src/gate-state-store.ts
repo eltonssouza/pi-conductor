@@ -60,6 +60,25 @@ export interface GateStateEnvelopeV1 {
 }
 
 /**
+ * ADR 0006 §7.3 (Fase 5): the schema bump D3/D4 requires ("mudar a forma de um campo dentro de
+ * `state` é uma mudança de schema"). Identical to V1 except the literal `schemaVersion` — `Omit` keeps
+ * this a single source of truth rather than a second, independently-drifting copy of every V1 field.
+ *
+ * GATE 5 (test-first, Fase 5): declared here as a PURE type addition — `createGateStateStore`'s
+ * `read()`/`mutate()` bodies below are NOT touched by this declaration. A reader MUST eventually
+ * accept both v1 and v2 (migrating a v1 in memory, `groundingCitations` treated as absent — never an
+ * error, since ADR §5.2 item 3 confirms zero v1 file in the world has ever populated that field); a v1
+ * envelope that SOMEHOW carries a populated `groundingCitations` (impossible today, but a defense
+ * worth keeping) resolves to `could-not-verify`, fail-closed, never "interpret as best it can".
+ * test/gate-state-schema-v2.test.ts drives the REAL, unmodified reader against both cases and fails
+ * RED for the single correct reason: `isValidEnvelopeShape` below still hard-refuses anything but the
+ * literal `1` — Gate 6 teaches it to accept both.
+ */
+export interface GateStateEnvelopeV2 extends Omit<GateStateEnvelopeV1, "schemaVersion"> {
+	schemaVersion: 2;
+}
+
+/**
  * Terminal, 3-shape error union (R26/R28) — never a 4th silent bucket. Every failure mode this
  * store can produce collapses into exactly one of these three, and NONE of them is ever silently
  * upgraded to a successful read/write by a caller's default-case fallthrough.

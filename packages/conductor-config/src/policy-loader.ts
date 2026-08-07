@@ -44,8 +44,31 @@ export interface PolicyAllowlistEntry {
 	risk: "low" | "medium";
 }
 
+/**
+ * ADR 0006 §13.2/D10 (Fase 5): extended so the SSRF guard (a future `@conductor/library` border
+ * function, `connectRemote`) has enough information to validate the resolved IP at connection time —
+ * `destination` alone was not enough (docs/adr/0006-fase5-library-and-grounding.md §13.2: "validar a
+ * STRING destination no momento em que o grant é concedido não defende contra nada que importe").
+ *
+ * GATE 5 (test-first, Fase 5): a pure type addition — `isValidNetwork`/`validatePolicyDocument` below
+ * are NOT yet updated to validate these new optional fields (today they check only `destination`);
+ * test/policy-network-entry-fields.test.ts drives the REAL, unmodified loader and fails RED for
+ * exactly that reason (an out-of-enum `scheme`, a malformed `port`, or a non-boolean flag is silently
+ * accepted as `status: "loaded"` today, instead of `"invalid"`).
+ */
 export interface PolicyNetworkEntry {
+	/** Host — allowlist exact match only, never suffix/substring (ADR §13.2 point 1). */
 	destination: string;
+	/** Default "https" (documented default, applied by the future `connectRemote` border function —
+	 * this loader does not inject the default itself). "http" requires `allowPlaintext: true`. */
+	scheme?: "https" | "http";
+	/** Default: the scheme's own default port. */
+	port?: number;
+	/** Default false. */
+	allowPlaintext?: boolean;
+	/** Default false — the ONLY way to reach loopback/private/link-local for this entry (ADR §13.2
+	 * point 2, e.g. a user's own local Chroma). */
+	allowPrivateAddress?: boolean;
 }
 
 export interface PolicyDocument {

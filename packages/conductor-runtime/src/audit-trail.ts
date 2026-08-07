@@ -52,8 +52,15 @@ export interface AuditEntry {
 	yesFlagActive: boolean;
 	/** FR-21/BR-11: must always be distinguishable — never collapse "yes-flag" into "human". */
 	approvalMethod: ApprovalMethod;
-	/** Present only for Network-level decisions (FR-7). */
-	egress?: { destination: string };
+	/** Present only for Network-level decisions (FR-7). ADR 0006 §13.3/D10 (Fase 5) extends this with
+	 * `resolvedIp`/`payloadKind` so the trail records the IP actually connected to (not just the
+	 * declared host) and what kind of payload left the machine — never the code-index's own vectors
+	 * (D10 §13.4: those never leave regardless of this field). GATE 5 (test-first, Fase 5): a pure
+	 * type addition — `appendAuditEntry` below is NOT yet updated to carry these fields through (it
+	 * still reconstructs `egress` as `{ destination }` only, T57's own spread-then-overwrite finding);
+	 * test/audit-trail-egress-fields.test.ts drives the REAL, unmodified writer and fails RED for
+	 * exactly that reason. */
+	egress?: { destination: string; resolvedIp?: string; payloadKind?: "query-embedding" | "corpus-fetch" };
 }
 
 export interface AuditTrailWriter {
