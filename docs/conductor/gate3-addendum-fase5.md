@@ -50,6 +50,15 @@ decisão. O achado central (§0) reorganiza todo o documento.
 >   documentação pré-existente**, reportada ao orquestrador como **nota N-2 (§5)**
 >   para uma reconciliação futura — não re-litigada aqui. Os secure-defaults
 >   continuam `1–37`; a Fase 5 acrescenta `38–44`.
+>
+> - **Loop-back Gate 4→Gate 3 (§8, acrescentado depois do ADR 0006).** O retorno
+>   **obrigatório** que o ADR 0006 §22.1 abriu — a fronteira nova, **por-máquina**,
+>   `~/.conductor/library/` (D7/D9) que o STRIDE original (T48–T54, modelado
+>   assumindo o índice sob `.conductor/`) não cobriu — acrescenta **`T55–T58`** e
+>   **`R36–R39`** (estritamente acima de `T54`/`R35`, o máximo desta fase antes do
+>   loop-back), e os **secure-defaults `45–48`**. O corpo original T48–T54/R29–R35
+>   fica **intacto**; o loop-back só **acrescenta** (§8). **Máximo atribuído agora:
+>   `T58` / `R39` / secure-default `48`.**
 
 ---
 
@@ -751,3 +760,419 @@ qualquer execução real:
 ameaças têm regra vinculante; três (T48 RAG-poisoning, T53 forja de citação, T52 SSRF)
 carregam residuais declarados que **só o Gate 9 confirma como fechados na prática** —
 o design reduz o risco a um nível aceitável e **detectável**, não a zero.
+
+---
+
+## 8. Loop-back Gate 4→Gate 3 — a fronteira nova `~/.conductor/library/` (SF-N1) e o DoS auto-infligido do canal (SF-N2)
+
+**Gatilho (CLAUDE.md, iteração Gate 3↔4).** O §7 deste adendo fixou: *"se o Gate 4
+expuser uma superfície nova… retornar a este gate."* O ADR 0006 (Gate 4, FULL) o
+fez de propósito. **D7** (§10) e **D9** (§12) moveram o **índice de código** *e* o
+**ledger runtime-derived** `events.jsonl` para `~/.conductor/library/` — um caminho
+**por-máquina, fora de qualquer workspace**. O STRIDE original desta fase (T48–T54)
+modelou SF-L2 **assumindo o índice sob `<workspaceRoot>/.conductor/`**; a decisão do
+Gate 4 cria uma **fronteira de confiança nova, por-máquina, que ele não modelou**. O
+ADR classificou isso como **retorno obrigatório, bloqueante antes do Gate 5**
+(§22.1) e deixou **três perguntas concretas de semântica de segurança** explicitamente
+**para este gate decidir** — não para a arquitetura. Este §8 as decide, numera as
+ameaças/regras novas (**T55–T58 / R36–R39**, acima do máximo `T54`/`R35`) e formaliza
+o sinal de DoS que a verificação empírica do Gate 4 anexou (§22.2). **Nada abaixo edita
+T48–T54/R29–R35 — só acrescenta.**
+
+### 8.1 Delta de superfície do loop-back (SF-N1, SF-N2)
+
+| # | Superfície | NOVO / relação | Por que reentra no Gate 3 |
+|---|---|---|---|
+| **SF-N1** | **`~/.conductor/library/` — store por-máquina** (corpus global + `projects/<projectId>/{code.sqlite,events.jsonl}`) fora de todo workspace (D7/D9) | **NOVO por-máquina** — reposiciona SF-L2/SF-L4 | O ledger que D4 usa para provar "uma busca aconteceu" e o índice que R32 escopa agora vivem **fora do workspace**. Três semânticas ficaram em aberto: o **fail-closed** quando o store some/é substituído (T55), o **status** de um artefato desses **dentro** de um clone (T56), e a **redação** do `resolvedIp` novo no trail (T57) |
+| **SF-N2** | **Parsers do canal de grounding** — o parser de expressão FTS5 (D12) e a canonicalização de checksum do `GateState` (D3/ADR 0005) | **NOVO (achado empírico do Gate 4)** | Distinto de SF-L1..L5: as sete ameaças originais são de **confidencialidade/integridade**; esta é de **disponibilidade** — uma pergunta legítima em linguagem natural, ou um `score` não-finito, **derruba/congela** o canal (T58) |
+
+**Fronteira que mais importa (atualiza a observação de §1).** SF-N1 é onde o
+**controle mais forte da fase (D4, citação runtime-derived) guarda a própria prova**.
+Se a *ausência* desse store puder ser lida como *permissão* (cair em FR-17) ou a
+*presença* de um store forjado num clone puder ser lida como *autoridade* (abrir o
+`.sqlite`), o controle inverte-se no vetor mais barato. As três perguntas de §8.2 são
+exatamente as três portas dessa inversão.
+
+### 8.2 Ameaças novas do loop-back (T55 … T58)
+
+Escala idêntica às fases anteriores: Prob {Baixa, Média, Alta} × Impacto {Baixo,
+Médio, Alto, Crítico}; Prioridade P1…P4. Cada mitigação amarra a um primitivo real e
+vira regra vinculante em §8.3.
+
+#### Sumário priorizado
+
+| ID | Ameaça | STRIDE | Prob | Impacto | Prio | Superfície | Pergunta do ADR |
+|---|---|---|---|---|---|---|---|
+| **T55** | **Fail-open do ledger ausente/ilegível/substituído** — se "sem ledger ⇒ recai em FR-17", apagar `~/.conductor/library/` **fabrica** a escapatória de indisponibilidade e desliga o gate de grounding inteiro | **S** (de estado do backend), R, **E** (via bypass) | **Média** | **Alto** | **P1** | SF-N1 | §22.1-1 |
+| **T56** | **Artefato de índice/ledger repo-supplied sob o workspace tratado como nota neutra** — um `.conductor/library/{code.sqlite,events.jsonl}` num clone entrega os chunks/eventos forjados de D7/§10.1 (a materialização de T53 por porta nova) | **S** (de autoridade), **T**, **E** | Baixa | **Alto** | **P2** | SF-N1 | §22.1-2 |
+| **T58** | **DoS do canal de grounding (auto-infligido/induzido)** — expressão FTS5 malformada **lança**; `score` `NaN`/`Infinity` **congela toda mutação** daquele `GateState` com erro enganoso de checksum | **D** (Denial of Service) | **Média** | **Médio** | **P3** | SF-N2 | §22.2 |
+| **T57** | **Campo novo do egress escapa à redação do sink** — `AuditEntry.egress.resolvedIp` (D10/§13.3) escrito sem passar por `redactSecrets`, furando a garantia "cada sink redige por si" (R6/T21) | **I** (Information Disclosure) | Baixa | **Baixo** | **P4** | SF-N1 | §22.1-3 |
+
+---
+
+#### T55 — Fail-open do ledger de grounding ausente/ilegível/substituído (P1 — a inversão de D4 pela porta da disponibilidade)
+**STRIDE:** Spoofing (de um estado do backend, como T54) + Repudiation + Elevation
+(via bypass do gate de grounding) · **Elemento:** SF-N1. **(Responde à pergunta 1 do
+ADR §22.1 — o fail-closed do store por-máquina.)**
+
+D4 monta a citação **resolvendo ponteiros contra o `events.jsonl`** (ADR §6.1). D9
+põe esse ledger em `~/.conductor/library/projects/<projectId>/` — **fora do
+workspace**. Pergunta em aberto do ADR: **qual é o fail-closed quando esse diretório
+é apagado, substituído ou fica ilegível?** As duas direções que o ADR nomeou são
+opostas e ambas defensáveis isoladamente:
+
+- **(a) "sem ledger ⇒ nenhuma `Decision` fundamentada pode ser registrada"** — trava
+  o fluxo. Seguro contra forja, mas — na leitura ingênua de "trava e pronto" — brica o
+  produto numa reinstalação, disco cheio ou permissão errada.
+- **(b) "sem ledger ⇒ recai em FR-17 com override"** — permite avançar, mas é a
+  **inversão exata do controle**: um ledger "ausente" é **trivial de fabricar** (o
+  loop, ou qualquer coisa com acesso ao disco, apaga o diretório) e, se a ausência
+  cai automaticamente na escapatória de indisponibilidade, `rm -rf ~/.conductor/library`
+  vira um **bypass universal e barato de todo o grounding** — T54 pela porta do
+  sistema de arquivos.
+
+**A decisão (fail-closed, sem bricar): o precedente in-repo já a fixou — R11a.** O
+`policy-trust-store.ts` enfrenta **exatamente** esta forma para o TOFU: *"absent |
+invalid | hash-not-found all collapse to `isTrusted() === false`. Never throws. Never
+resolves to `true` by default. **Losing the ledger (deleted, corrupted, unreadable)
+makes the session LESS permissive, never more**"* (R11a, lido no arquivo). Portado ao
+ledger de grounding, "menos permissivo" significa **as duas coisas ao mesmo tempo**:
+não se pode reivindicar a *presença* de grounding que não se prova **nem** a
+*ausência forçada* (FR-17) que não se prova. Concretamente, a regra R36:
+
+- O **adapter** `GroundingLedgerReader` (ADR §11.2/§19) — o que a Library implementa —
+  segue a disciplina de `loadPolicyTrustStore`: **nunca lança**; **toda** falha de
+  leitura (diretório ausente, ilegível/EACCES, linha corrompida, e — defesa em
+  profundidade contra um arquivo trocado à mão — `event.projectId ≠ projectId(cwd)`)
+  **colapsa para `null`** em **`findQueryEvent` E `findRecentUnreachable`**.
+- **A ausência/ilegibilidade NUNCA é sintetizada num `rag-unreachable`.** Um ledger
+  que não se pode ler não é "o backend tentou e falhou" — é "não há prova de nada". Os
+  dois são tipos diferentes no ledger e a distinção é o que D11 (§14.2) protege; T55
+  a estende para o caso do próprio ledger.
+- **Efeito de rede:** um ledger ausente/quebrado/substituído bloqueia **ambos** os
+  caminhos — o fundamentado (`recordGroundedDecision` → `citation-unresolved`, já na
+  união `RecordDecisionError` do ADR §19) **e** o de indisponibilidade
+  (`recordUngroundedDecision` via `findRecentUnreachable` → `no-recent-unreachable`,
+  idem). **O único avanço que sobra é o override de risco-aceito explícito e
+  atribuído** (R35(i)(b) — o análogo `[skip-ground]`, *loud*, com método human/auto,
+  registrado no journal). Isso responde à opção (a) sem bricar: a reinstalação/disco
+  cheio é **recuperável por um override humano visível**, jamais por um silêncio que
+  parece prova.
+
+Assim as duas direções opostas do ADR se **reconciliam**: **não** é auto-FR-17
+(fail-open, abusável), **nem** um bloqueio inescapável (o override mantém o
+disco-cheio/reinstalação recuperável) — é fail-closed no caminho automático + uma
+escapatória **autenticada por um humano atribuído**, nunca pela ausência do arquivo.
+
+Prob **Média** (apagar/substituir um diretório por-máquina é trivial para o loop ou
+qualquer processo com acesso ao disco; e a variante benigna — reinstalação/disco
+cheio — ocorre sozinha); Impacto **Alto** (se fail-open, o non-negotiable #1 do
+`CLAUDE.md` cai por um `rm -rf`; se "trava e pronto", o produto brica — a decisão
+acima evita os dois).
+
+**Residual declarado, honesto (mesmo teto de T47/T53(iii)/ADR §12.2).** Num SO
+single-user sem sandbox e **sem tamper-evidence criptográfica** (GAP-4D, herdada),
+quem tem acesso ao disco **fora do loop do agente** pode escrever um `events.jsonl`
+**consistente** (com o `projectId` certo) e um evento forjado que "resolve". O
+protected-path (D9) tira isso das tools `write`/`edit`/`bash`; a checagem de
+`projectId` pega uma troca **desleixada**, não uma **fabricada com cuidado**. R36
+**não** fecha esse teto e **não** afirma fechá-lo — o teto continua sendo o gate de
+execução da Fase 2 (T17/R1).
+
+**Mitigação (semântica): R36.** *Grounding:* **Secure and Reliable Systems Design
+§1.12** (0.619, nesta sessão: *"the failure direction is forced and the lenses
+disagree — an authorization check must fail closed… the auth path admitting requests
+it could not verify"* — o gate de grounding é o lado que **falha fechado**, não o CDN
+que falha aberto); **Security Engineering Principles §2.2** (top **0.652**: "secure by
+default and failing safely") e **§2.9** (*"Errors/uncertainty deny access (fail
+closed)"*). *Precedente de código:* **`policy-trust-store.ts` R11a** (a mesma forma,
+verbatim — perder o ledger torna a sessão **menos** permissiva); D11 (`rag-unreachable`
+runtime-gravado ≠ ausência de ledger); D13 (o ledger **lança** na falha de *escrita*,
+já fail-closed — R36 cobre o lado da *leitura* e da *substituição*). **Vinculante pro
+Gate 9** (apagar/substituir o ledger e confirmar que o grounded path recusa e o
+FR-17-automático **não** dispara).
+
+#### T56 — Artefato de índice/ledger repo-supplied sob o workspace tratado como nota neutra (P2)
+**STRIDE:** Spoofing (de autoridade — um `.sqlite`/`events.jsonl` que se apresenta como
+o índice/ledger legítimo) + Tampering (conteúdo autorado pelo atacante) + Elevation
+(citações forjadas viram uma `Decision` que passa o gate) · **Elemento:** SF-N1.
+**(Responde à pergunta 2 do ADR §22.1.)**
+
+O ADR §10.3 já decide o núcleo: um `.sqlite` de índice ou um diretório
+`.conductor/library/` **encontrado sob o `workspaceRoot` NUNCA é aberto** — ignorado,
+não migrado, não apagado (apagar arquivo do repo do usuário não é prerrogativa da
+ferramenta), e "reportado alto". A pergunta que o ADR deixou explícita: esse
+"reportado alto" é **só higiene** ou é um **indicador de ataque** que merece (i)
+registro no audit trail como **evento de segurança** e (ii) escalada como **ALTO**,
+não uma nota neutra?
+
+**Decisão: é indicador de ataque, não higiene.** O argumento é econômico (Anderson:
+segurança é incentivo e assimetria de custo). Depois de D7/D9, **nenhuma versão
+lançada da ferramenta escreve `code.sqlite`/`events.jsonl` sob um workspace** — esses
+arquivos existem **só** em `~/.conductor/library/`. Logo um artefato desses **dentro
+de um clone não tem produtor legítimo**: sua presença é anômala **por construção**.
+Diferente de um `policy.json` num clone (que é um mecanismo **esperado** — restrições
+sempre honradas, grants sob TOFU, T18/T28), um `code.sqlite` num clone é a
+**materialização de D7/§10.1**: "os chunks que o atacante escolheu e eventos
+`rag-query` forjados com ids que resolvem… o controle mais forte desta fase viraria o
+vetor mais barato". É a **entrega de T53 por uma porta nova**. A assimetria de custo é
+clara: um falso-positivo custa **um aviso**; um falso-negativo custa a **forja de
+citação silenciosa**. A economia manda escalar.
+
+Portanto, além do §10.3 (nunca abrir, nunca apagar), a regra R37 acrescenta:
+
+- **(i) Auditar como evento de segurança.** A detecção (por **existência de caminho**,
+  nunca abrindo o arquivo) é gravada no **audit trail** como um **deny** — o registro
+  append-only, protegido e **escopado no workspace** (`.conductor/audit.jsonl`) cujo
+  propósito exato é a decisão de segurança durável. É a mesma disciplina com que o
+  Permission Engine já audita seus denies. *(Mecanismo — como o `AuditEntry`, hoje
+  moldado para decisões de tool-call, carrega um evento de detecção — é materialização
+  do Gate 4/6; é **aditivo**, na mesma forma que D10 estendeu `egress`, e **não muda
+  nenhuma decisão D1–D14** — ver §8.4.)*
+- **(ii) Escalar como ALTO em `library status`/`doctor`**, com o caminho nomeado —
+  nunca uma linha neutra ao lado das métricas de tamanho/contagem.
+- **Detecção sem abrir.** O gatilho é o **caminho existir**, não o conteúdo — porque
+  abrir para "validar o manifest" é parsear formato binário atacante-fornecível (a
+  metade SF-N2(a) que o ADR §22.2 fecha por composição: a defesa que não depende de
+  abrir é **não abrir**).
+
+Prob **Baixa** (exige que o atacante plante o artefato num clone que o usuário abra;
+mas rascunhos pré-lançamento **escreviam** sob o workspace — ADR §10.1 — então um
+artefato **stale-porém-benigno** também é possível, e a escalada o trata igual: alto e
+visível, sem abrir); Impacto **Alto** (é o veículo de forja de citação de T53).
+
+**Mitigação (semântica): R37.** *Grounding:* **cobertura declarada fraca** (top
+**0.603** nesta sessão, genérico) — ancorada, **não forçada**, em: **`policy-trust-store.ts`
+T18/T28** (o precedente in-repo real — "a `policy.json` that arrives inside a cloned
+repository is a file an attacker can author"; aqui o artefato **não tem sequer o
+disfarce legítimo** que o policy.json tem); **Security Engineering Principles §3.12**
+(0.582: *"Breached via a path nobody considered → Map all paths to each asset; think
+like the attacker"* — Shostack/Anderson: um artefato sem razão inocente é um caminho a
+mapear, não a ignorar); **Secure Code Review §3.2** (0.618: "trust boundaries and
+where bugs cluster" — o cruzamento repo→ferramenta é o de maior privilégio downstream).
+**Vinculante pro Gate 9** (plantar um `code.sqlite`/`events.jsonl` sob o workspace e
+confirmar: recusa a abrir + evento de segurança no trail + ALTO em `doctor`).
+
+#### T58 — Negação de serviço do canal de grounding (auto-infligida ou induzida) (P3 — formaliza o sinal de §22.2)
+**STRIDE:** Denial of Service · **Elemento:** SF-N2. **(Formaliza o sinal que a
+verificação empírica do Gate 4 anexou — ADR §22.2 — que nenhuma de T48–T54 cobre: elas
+são de confidencialidade/integridade, esta é de disponibilidade.)**
+
+Duas faces, ambas **verificadas empiricamente no Gate 4**, ambas de entrada **normal**,
+não de atacante:
+
+- **(a) Injeção de sintaxe FTS5 → o parser lança.** O ADR §15.1 provou que ligar o
+  parâmetro (`MATCH ?`) protege o parser SQL e **não** o parser FTS5: `NOT bulkhead`,
+  uma aspa não-terminada, `title:secret` — uma **pergunta legítima em português/inglês
+  normal** (`does NOT resolve`, `qual o papel do "sole-mint"?`) — **derruba a busca
+  inteira** com erro de sintaxe. O canal cuja função é fundamentar decisões falha nas
+  perguntas que ele existe para responder.
+- **(b) `score` não-finito → congela o `GateState`.** O ADR §5.3/§17.2 mostrou que a
+  normalização min-max do rerank (D14) tem denominador `max − min` = **zero** quando os
+  candidatos empatam — `NaN` por aritmética normal, "num dia normal"; um `Infinity` sai
+  igual de um `bm25()` degenerado. Como `canonicalizeJsonForChecksum` (ADR 0005) lança
+  em `!Number.isFinite`, e o checksum cobre o **`GateState` inteiro**, um único `score:
+  NaN` faz **toda** mutação daquele gate lançar um `TypeError` — um **DoS do caminho de
+  gravação do gate, com diagnóstico enganoso** (fala de checksum, não de citação).
+
+**Decisão: formalizar, não redesenhar — as duas mitigações já estão no ADR.** A face
+(a) é fechada por **D12** (`buildFtsMatchExpression`, ADR §15.2): tokeniza por
+`[^\p{L}\p{N}_]+`, escapa cada token como **literal de string FTS5** (`"`→`""`,
+envolto em aspas), e **o runtime é quem autora a estrutura** — a pergunta chega como
+**dado inerte**, nunca reinterpretável como operador. É a materialização de **R29**
+("conteúdo/entrada não-confiável é dado, nunca instrução") no motor escolhido. A face
+(b) é fechada por **D3** (guarda de finitude, ADR §5.3): `Number.isFinite(score) &&
+0 <= score <= 1` **antes** de persistir, **recusa** (`citation-invalid`) nunca clamp
+(clampar apagaria o sinal de que o rerank quebrou). R39 só **vincula** essas duas como
+regra e exige os testes RED que o ADR §15.2/§5.3 já prescreve.
+
+Prob **Média** (ambas nascem de entrada ordinária — uma pergunta com `NOT`/aspas, um
+conjunto de candidatos empatados); Impacto **Médio** (disponibilidade do canal de
+enforcement do non-negotiable #1, e do caminho de gravação de um `GateState`
+específico — mas **fail-closed**: nada corrompe, nenhuma citação falsa passa, recupera
+ao corrigir a entrada; por isso abaixo dos P1 de confidencialidade/integridade).
+
+**Mitigação (semântica): R39.** *Grounding:* **Web Application Security §2.4**
+(0.583: *"untrusted data rendered inert"* — o diagrama exato de D12: dado não-confiável
+→ tratado como texto, nunca markup executável); **Security Engineering Principles §2.2**
+(top **0.615**) / **§2.9** (*"fail closed"* — o canal falha **alto e fechado**, nunca
+silencioso/parcial); **Secure Code Review §2.12** (0.612, taint: a expressão FTS5 é o
+*sink* perigoso que a entrada da pergunta alcança). *Precedente:* D12/§15.1
+(verificação empírica in-session), D3/§5.3, R29. **Vinculante pro Gate 9** (rodar
+`library search "does NOT resolve"` e uma pergunta com aspas; forçar candidatos
+empatados e confirmar recusa, não `NaN` persistido).
+
+#### T57 — Campo novo `resolvedIp` do egress escapa à redação do sink (P4)
+**STRIDE:** Information Disclosure · **Elemento:** SF-N1. **(Responde à pergunta 3 do
+ADR §22.1.)**
+
+D10/§13.3 estende `AuditEntry.egress` com `resolvedIp?` (e `payloadKind?`). O trail
+atravessa o pipeline de redação (`REDACTION_SINKS`), e o `audit-trail.ts` já **redige
+por conta própria** `reason` e `egress.destination` dentro de `appendAuditEntry` — a
+disciplina **R6/T21 "cada sink redige independente, não confia no upstream"** (lida no
+arquivo, linhas 97–107). A pergunta: `resolvedIp` **precisa passar** pela redação?
+
+**Decisão: sim — e isso é uma confirmação do default R6, não uma exceção.** Um IP não
+é segredo *per se* (por isso a redação é um **no-op idempotente** sobre um IP
+bem-formado — `redactSecrets` não casa o formato de um IP), mas o valor de R6 é que
+**todo campo string que o sink persiste passa pelo redator, sem presumir nada do
+upstream**. O custo é **zero** (no-op no caso comum) e a invariante "nenhum campo
+escapa deste sink sem ser varrido" fica **total** — defesa em profundidade contra um
+bug futuro que popule `resolvedIp` com algo que **não** é um IP (uma URL com
+credencial, um host com token). `payloadKind` é uma **união fechada**
+(`"query-embedding" | "corpus-fetch"`) → não pode carregar segredo → é carregado
+**como está** (sem redação, mas **carregado**).
+
+**Consequência concreta de código (nota ao Gate 6, não ao ADR).** O
+`audit-trail.ts:103–107` reconstrói o egress por **spread-then-overwrite**:
+`egress: entry.egress ? { destination: redactSecrets(entry.egress.destination) } :
+entry.egress`. Acrescentar `resolvedIp`/`payloadKind` **ao tipo** sem atualizar essa
+reconstrução **descartaria silenciosamente** os dois campos (o literal só nomeia
+`destination`). O writer deve passar a redigir `resolvedIp` e a carregar `payloadKind`
+— **omitindo** chaves `undefined` (a mesma disciplina de omissão de D3/`gate-store.ts:201`).
+É materialização do Gate 6, não uma mudança de contrato do ADR (que dá o **tipo**, não
+o corpo do writer).
+
+Prob **Baixa** (um IP não é secret-shaped; o vazamento exigiria um bug que ponha
+não-IP no campo); Impacto **Baixo** (defesa-em-profundidade/completude, não um buraco
+ativo).
+
+**Mitigação (semântica): R38.** *Grounding:* **Security Engineering Principles §1.2**
+(0.591: *"multiple, independent layers so that one failure doesn't cause a breach"*) e
+**§1.5/§1.9** (*"Layer independent controls; assume each can fail"*) — a redação
+por-sink é uma camada independente que não presume a de cima; **Secure Code Review
+§3.2** (0.618, cruzamentos de fronteira). *Precedente de código:* **`audit-trail.ts`
+R6/T21** (redige `reason`/`destination` no próprio boundary, idempotente). **Vinculante
+pro Gate 9** apenas como verificação de completude (nenhum campo do egress persistido
+sem passar pelo redator).
+
+### 8.3 Regras vinculantes novas do loop-back (R36–R39)
+
+Continuam **R1–R35** (Fases 2–5), inalteradas. Semânticas de segurança, não
+arquitetura de classes — o Gate 4/5/6 escolhe o mecanismo, **não pode violar estas**.
+
+- **R36 (o ledger de grounding falha-fechado; a ausência nunca é prova).** O adapter
+  `GroundingLedgerReader` **nunca lança**; toda falha de leitura (diretório ausente,
+  ilegível, linha corrompida, `event.projectId ≠ projectId(cwd)`) **colapsa para
+  `null`** em `findQueryEvent` **e** `findRecentUnreachable`, e **nunca** é sintetizada
+  num `rag-unreachable`. Um ledger ausente/quebrado/substituído bloqueia **ambos** o
+  caminho fundamentado (`citation-unresolved`) **e** o de indisponibilidade
+  (`no-recent-unreachable`); o único avanço é o **override de risco-aceito explícito e
+  atribuído** (R35(i)(b), *loud*, journaled). Perder o ledger torna a sessão **menos**
+  permissiva, nunca mais (a forma de R11a). Residual: acesso ao disco fora do loop forja
+  um ledger consistente — mesmo teto de T47, **declarado, não resolvido**. (T55)
+- **R37 (um artefato de índice/ledger sob o workspace é indicador de ataque, não
+  higiene).** Além de §10.3 (nunca aberto, nunca apagado): a detecção — **por
+  existência de caminho, sem abrir o arquivo** — é gravada no audit trail como **evento
+  de segurança (deny)** e escalada como **ALTO** em `library status`/`doctor`, nunca
+  uma nota neutra. Um `code.sqlite`/`events.jsonl` sob um workspace não tem produtor
+  legítimo depois de D7/D9. (T56)
+- **R38 (todo campo persistido do egress passa pela redação do sink).** `resolvedIp` é
+  redigido no `audit-trail.ts` como `destination` já é (R6/T21), presumindo **nada** do
+  upstream — no-op idempotente sobre um IP, invariante total contra um mispopulate
+  futuro; `payloadKind` (união fechada) é carregado como está. A reconstrução do egress
+  no writer **carrega todo campo novo**, nunca o descarta por spread-then-overwrite. (T57)
+- **R39 (o canal de grounding falha alto e inerte, nunca derruba nem congela
+  silenciosamente).** A expressão FTS5 MATCH é construída **só** por
+  `buildFtsMatchExpression` (D12) — a pergunta é dado inerte (tokens citados como
+  literais), nunca operador; **todo** `score` é validado finito ∈ [0,1] **antes** de
+  persistir (D3), **recusado** (`citation-invalid`) nunca clampado. Pergunta malformada
+  ou `score` não-finito falha **alto e local**, jamais derruba a busca nem congela um
+  `GateState`. (T58)
+
+### 8.4 Secure defaults acrescentados no loop-back (append aos itens 1–44)
+
+Os itens 1–44 (Fases 0–5) permanecem. O loop-back acrescenta:
+
+45. **Ledger de grounding falha-fechado** — ausente/ilegível/substituído nega o caminho
+    fundamentado **e** o de indisponibilidade; só o override explícito atribuído avança;
+    a ausência nunca é lida como prova (R36/T55).
+46. **Artefato de índice/ledger sob o workspace é indicador de ataque** — auditado como
+    evento de segurança + ALTO em `status`/`doctor`, nunca aberto, nunca nota neutra
+    (R37/T56).
+47. **Todo campo persistido do egress passa pela redação do sink** — `resolvedIp`
+    redigido como `destination`; presunção zero sobre o upstream; campo novo nunca
+    descartado na reconstrução (R38/T57).
+48. **Expressão FTS5 construída pelo runtime + score finito validado** — pergunta inerte
+    como dado, score não-finito recusado; o canal falha alto, nunca derruba/congela
+    (R39/T58).
+
+**Aplicação (Pi/Conductor):** todos realizáveis sobre primitivos existentes — a
+disciplina fail-closed de `loadPolicyTrustStore`/R11a (o ledger de grounding), o audit
+trail append-only protegido de R6/T21 (o evento de detecção de T56 e a redação de T57),
+e as mitigações **já desenhadas** D12 e D3 (o DoS de T58). Nenhum mecanismo novo é
+inventado.
+
+### 8.5 Cobertura, ADR-consistência e critérios de saída do loop-back
+
+**As três perguntas do ADR §22.1, decididas (uma linha cada):**
+
+1. **Fail-closed do store ausente/ilegível/substituído** → **T55/R36:** falha-fechado
+   nos **dois** caminhos automáticos (fundamentado e FR-17); a ausência **nunca** vira
+   `rag-unreachable`; o único avanço é o override humano **explícito e atribuído** — nem
+   auto-FR-17 (fail-open) nem bloqueio que brica. É R11a portado.
+2. **Índice/ledger repo-supplied sob o workspace** → **T56/R37:** **indicador de
+   ataque**, não higiene — auditado como evento de segurança **e** escalado como **ALTO**
+   (detecção por caminho, sem abrir); preserva §10.3 (nunca abrir/apagar).
+3. **`AuditEntry.egress.resolvedIp` precisa de redação?** → **T57/R38:** **sim** —
+   confirmação (não exceção) do default R6 "todo campo passa pelo sink"; no-op sobre um
+   IP, mas a invariante fica total; o writer deve carregar o campo novo, não descartá-lo.
+
+Mais o sinal de **§22.2** formalizado: **T58/R39** — DoS do canal, fechado pelas
+mitigações **que já estão no ADR** (D12 + D3); formaliza/numera, não redesenha.
+
+**O ADR 0006 precisa de mudança? Não — nenhuma decisão D1–D14 muda nem é contradita.**
+Verificado uma a uma:
+- **T55/R36** *refina* **D4** (o "par que não resolve é recusa" estendido a
+  "ledger-ausente = não-resolve"), *reforça* **D11** (ledger-indisponível ≠
+  `rag-unreachable`; dois caminhos por tipo) e é consistente com **D13** (que já
+  fail-closa a *escrita*; R36 cobre a *leitura*/substituição). A união
+  `RecordDecisionError` do ADR §19 **já** tem `citation-unresolved` e
+  `no-recent-unreachable` — R36 é satisfeita **sem** variante nova.
+- **T56/R37** *resolve a ambiguidade* de **D7 §10.3** ("reportado alto" = evento de
+  segurança **ALTO**, não nota neutra), preservando "nunca abrir/apagar". A pergunta era
+  **explicitamente** deferida a este gate (§22.1-2) — respondê-la é o mecanismo de
+  loop-back, não uma revisão.
+- **T57/R38** *confirma* a extensão de `egress` de **D10/§13.3** e aplica **R6**; a
+  correção do writer (`audit-trail.ts:106`) é materialização do Gate 6, o ADR dá o tipo
+  não o corpo.
+- **T58/R39** *formaliza* o sinal de **§22.2** com **D12 + D3** exatamente como o ADR
+  propôs.
+
+**Um item aditivo (não é mudança de decisão), na forma como D10 estendeu `egress`:**
+R37(i) exige que o audit trail **carregue um evento de detecção** que o `AuditEntry`
+atual (moldado para decisões de tool-call) não expressa direto — o Gate 4/6 o absorve
+**aditivamente** (um `kind` opcional no `AuditEntry`, ou um evento-irmão), do mesmo modo
+que D10 acrescentou `egress`. Nenhuma decisão D1–D14 é revista.
+
+**Uma recomendação de observabilidade (opcional, aditiva, explicitamente NÃO uma edição
+do ADR).** Como R36 colapsa "sem ledger ainda" e "ledger lançando em toda leitura" ao
+mesmo `null`, um operador não distingue os dois. Recomenda-se ao Gate 5/6 que o adapter
+`GroundingLedgerReader` exponha um hook `onError` **espelhando `PolicyTrustStoreOptions.onError`**
+(que fira só na falha *inesperada* — EACCES, corrupção — e nunca mude o retorno
+fail-closed). Isso **não** altera as assinaturas `findQueryEvent`/`findRecentUnreachable`
+do port (ADR §19), então **não** é mudança de contrato — é aditivo, o mesmo precedente
+já verde do trust store.
+
+**Critérios de saída do loop-back (Shostack: "fizemos um bom trabalho?"):**
+- **Cobertura:** as **3 perguntas** de §22.1 têm ameaça + regra (T55–T57/R36–R38); o
+  sinal de §22.2 está formalizado (T58/R39); SF-N1 e SF-N2 modeladas.
+- **Priorização por prob × impacto:** 1× P1 (T55 — a inversão de D4), 1× P2 (T56), 1×
+  P3 (T58 — disponibilidade, fail-closed), 1× P4 (T57 — completude). Nenhuma sem regra
+  vinculante.
+- **Secure defaults:** 4 novos (45–48), todos sobre primitivos existentes.
+- **Grounding honesto:** **forte** em fail-safe/fail-closed (Secure and Reliable §1.12
+  "failure direction is forced"; Security Engineering §2.2/§2.9, top **0.652**) e
+  defesa-em-profundidade por-sink (Security Engineering §1.2/§1.5/§1.9); **rendered-inert**
+  para o DoS (Web App Security §2.4). **Declarado fraco** (não forçado): "artefato
+  repo-supplied como indicador de ataque" (top **0.603**, genérico) — ancorado no
+  precedente in-repo T18/T28 + "think like the attacker" (Security Engineering §3.12).
+- **ADR-consistência:** confirmada — **nenhuma** das 14 decisões muda; um item aditivo
+  (R37(i)) e uma recomendação opcional (hook `onError`), ambos na forma de D10, nenhum
+  uma revisão.
+- **Iteração encerrada:** SF-N1/SF-N2 modeladas e amarradas; o Gate 3 e o Gate 4 ficam
+  **consistentes** — o loop-back que o CLAUDE.md exige está fechado. **Nenhum finding
+  crítico/alto não-mitigado em aberto no nível de design**; T55 e T56 carregam residuais
+  declarados (o teto de execução de T47; a ausência de tamper-evidence de GAP-4D) que
+  **só o Gate 9 confirma na prática** — o design reduz o risco a um nível aceitável e
+  **detectável**, não a zero.
