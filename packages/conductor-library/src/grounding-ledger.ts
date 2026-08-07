@@ -33,8 +33,8 @@
  * methods.
  */
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { randomUUID } from "node:crypto";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { dirname } from "node:path";
 
 /** One retrieval hit, as the runtime actually observed it (never as a caller declares it) -- the
@@ -233,7 +233,12 @@ function toQueryView(event: RawLedgerEvent): RagQueryEventView | null {
 }
 
 function toUnreachableView(event: RawLedgerEvent): RagUnreachableEventView | null {
-	if (typeof event.id !== "string" || typeof event.backend !== "string" || typeof event.reason !== "string" || typeof event.at !== "string") {
+	if (
+		typeof event.id !== "string" ||
+		typeof event.backend !== "string" ||
+		typeof event.reason !== "string" ||
+		typeof event.at !== "string"
+	) {
 		return null;
 	}
 	return { id: event.id, backend: event.backend, reason: event.reason, at: event.at };

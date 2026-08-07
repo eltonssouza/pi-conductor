@@ -98,9 +98,7 @@ describe("GroundingLedgerWriter (D13/§16.1: append-only JSONL, synchronous, thr
 			topScore: 0.736,
 			at: appended.at,
 		});
-		expect(record.hits).toEqual([
-			expect.objectContaining({ chunkHash: "sha256:abc123", score: 0.736 }),
-		]);
+		expect(record.hits).toEqual([expect.objectContaining({ chunkHash: "sha256:abc123", score: 0.736 })]);
 	});
 
 	it("appends a rag-unreachable event with the exact fields ADR §16.1 specifies", () => {

@@ -42,8 +42,8 @@ import {
 	fuseAndRerank,
 	openCorpusStore,
 	openGroundingLedgerWriter,
-	resolveLibraryHome,
 	type RetrievedPassage,
+	resolveLibraryHome,
 } from "@conductor/library";
 
 export interface LibraryStatusOptions {
@@ -93,7 +93,9 @@ function safeAppend(write: () => void): void {
 		// failure to the user (see this function's own doc comment). Still logged to stderr with
 		// context rather than swallowed silently (quality-baseline Observability category: a bare
 		// `catch {}` with zero trace would make a disk-full/permission ledger outage invisible).
-		console.error(`[conductor-cli:library] ${new Date().toISOString()} operation=ledger-write degraded-silently: ${describeError(error)}`);
+		console.error(
+			`[conductor-cli:library] ${new Date().toISOString()} operation=ledger-write degraded-silently: ${describeError(error)}`,
+		);
 	}
 }
 
@@ -216,12 +218,12 @@ export async function runLibrarySearch(options: LibrarySearchOptions): Promise<s
 }
 
 /** GATE 5 stub -- Gate 6 wires this to `@conductor/library`'s corpus-store.ts (FR-9). */
-export function runLibraryIngest(options: LibraryIngestOptions): string {
+export function runLibraryIngest(_options: LibraryIngestOptions): string {
 	throw new Error("not implemented");
 }
 
 /** GATE 5 stub -- Gate 6 wires this to `@conductor/library`'s corpus-store.ts (FR-10). */
-export function runLibraryUpdate(options: LibraryUpdateOptions): string {
+export function runLibraryUpdate(_options: LibraryUpdateOptions): string {
 	throw new Error("not implemented");
 }
 

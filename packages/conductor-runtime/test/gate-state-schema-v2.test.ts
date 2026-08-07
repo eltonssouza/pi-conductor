@@ -71,7 +71,9 @@ function canonicalizeForTest(value: unknown, ancestors: WeakSet<object>): unknow
 		if (Array.isArray(value)) return value.map((item) => canonicalizeForTest(item, ancestors));
 		const entries = Object.entries(value as Record<string, unknown>);
 		return Object.fromEntries(
-			entries.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([k, v]) => [k, canonicalizeForTest(v, ancestors)]),
+			entries
+				.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+				.map(([k, v]) => [k, canonicalizeForTest(v, ancestors)]),
 		);
 	} finally {
 		ancestors.delete(value);
@@ -79,7 +81,9 @@ function canonicalizeForTest(value: unknown, ancestors: WeakSet<object>): unknow
 }
 
 function checksumForTest(state: unknown): string {
-	return createHash("sha256").update(JSON.stringify(canonicalizeForTest(state, new WeakSet())), "utf8").digest("hex");
+	return createHash("sha256")
+		.update(JSON.stringify(canonicalizeForTest(state, new WeakSet())), "utf8")
+		.digest("hex");
 }
 
 function sampleCitation(): GroundingCitation {

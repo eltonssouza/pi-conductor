@@ -102,7 +102,9 @@ describe("groundingCitations: sole writer across the whole monorepo is gate-grou
 	});
 
 	it("sanity: the regex does NOT match the optional-field TYPE declarations in gate-state.ts (`groundingCitations?: GroundingCitation[]`)", () => {
-		const source = stripComments(readFileSync(join(PACKAGES_ROOT, "conductor-runtime", "src", "gate-state.ts"), "utf8"));
+		const source = stripComments(
+			readFileSync(join(PACKAGES_ROOT, "conductor-runtime", "src", "gate-state.ts"), "utf8"),
+		);
 		expect(source).toContain("groundingCitations?:");
 		expect(GROUNDING_CITATIONS_WRITE.test(source)).toBe(false);
 	});
@@ -120,7 +122,9 @@ describe('Decision{kind:"decision"}: constructed in exactly one file — gate-gr
 	});
 
 	it('sanity: the regex does NOT match the union TYPE declaration in gate-state.ts (`kind: "reasoning" | "decision" | "plan" | "calibration" | "rejection"`)', () => {
-		const source = stripComments(readFileSync(join(PACKAGES_ROOT, "conductor-runtime", "src", "gate-state.ts"), "utf8"));
+		const source = stripComments(
+			readFileSync(join(PACKAGES_ROOT, "conductor-runtime", "src", "gate-state.ts"), "utf8"),
+		);
 		expect(source).toContain('"reasoning" | "decision"');
 		expect(DECISION_KIND_LITERAL.test(source)).toBe(false);
 	});

@@ -128,11 +128,9 @@ describe("buildFtsMatchExpression (D12/§15) -- real node:sqlite FTS5, not mocke
 		expect(matchTitles(db!, expression).sort()).toEqual(["Circuit Breakers", "Retry Storms"]);
 	});
 
-	it('treats a quoted phrase as OR\'d literal terms instead of the FTS5 adjacency phrase operator (ADR §15.1/§15.2)', () => {
+	it("treats a quoted phrase as OR'd literal terms instead of the FTS5 adjacency phrase operator (ADR §15.1/§15.2)", () => {
 		db = createFtsDb();
-		insertDocs(db, [
-			{ title: "Secret Handling", body: "Store the api credential; never log the key in plaintext." },
-		]);
+		insertDocs(db, [{ title: "Secret Handling", body: "Store the api credential; never log the key in plaintext." }]);
 
 		// Control: raw '"api key"' requires "api" immediately followed by "key" -- not adjacent here.
 		expect(matchTitles(db!, '"api key"')).toEqual([]);

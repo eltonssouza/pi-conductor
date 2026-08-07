@@ -17,8 +17,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { MarkdownChunk } from "../src/chunking.ts";
 import {
 	type CodeIndexRedactor,
-	type GitIgnoreChecker,
 	filterIndexableCodeFiles,
+	type GitIgnoreChecker,
 	isAllowedCodeIndexExtension,
 	openCodeIndex,
 	prepareCodeChunkForEmbedding,

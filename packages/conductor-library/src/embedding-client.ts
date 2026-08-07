@@ -85,7 +85,10 @@ function extractFirstEmbedding(body: unknown): number[] | null {
  * caller-controlled default, never read from an environment variable (the same class of authority
  * `remote-endpoint.ts`'s header already documents as rejected for this ADR, D10 §13.1 point 1).
  */
-export function createOllamaEmbeddingClient(baseUrl: string = DEFAULT_BASE_URL, options: OllamaEmbeddingClientOptions = {}): EmbeddingClient {
+export function createOllamaEmbeddingClient(
+	baseUrl: string = DEFAULT_BASE_URL,
+	options: OllamaEmbeddingClientOptions = {},
+): EmbeddingClient {
 	const model = options.model ?? DEFAULT_MODEL;
 	const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 	const endpoint = `${baseUrl}/api/embed`;
@@ -110,19 +113,25 @@ export function createOllamaEmbeddingClient(baseUrl: string = DEFAULT_BASE_URL, 
 			}
 
 			if (!response.ok) {
-				throw new EmbeddingClientError(`embedding request to "${endpoint}" returned HTTP ${response.status} ${response.statusText}`);
+				throw new EmbeddingClientError(
+					`embedding request to "${endpoint}" returned HTTP ${response.status} ${response.statusText}`,
+				);
 			}
 
 			let parsedBody: unknown;
 			try {
 				parsedBody = await response.json();
 			} catch (error) {
-				throw new EmbeddingClientError(`embedding response from "${endpoint}" was not valid JSON: ${describeError(error)}`);
+				throw new EmbeddingClientError(
+					`embedding response from "${endpoint}" was not valid JSON: ${describeError(error)}`,
+				);
 			}
 
 			const vector = extractFirstEmbedding(parsedBody);
 			if (vector === null) {
-				throw new EmbeddingClientError(`embedding response from "${endpoint}" had an unexpected shape (expected {embeddings: number[][]})`);
+				throw new EmbeddingClientError(
+					`embedding response from "${endpoint}" had an unexpected shape (expected {embeddings: number[][]})`,
+				);
 			}
 			return vector;
 		},

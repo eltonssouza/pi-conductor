@@ -136,7 +136,10 @@ function targetFromEntry(entry: PolicyNetworkEntry): RemoteTarget {
  * redirect target re-enters this same check against the SAME single grant `entry` -- there is no
  * broader allowlist to fall back to, so a redirect can only ever succeed by landing back on exactly
  * what was already granted. */
-function matchesAllowlist(target: RemoteTarget, entry: PolicyNetworkEntry): { ok: true } | { ok: false; reason: string } {
+function matchesAllowlist(
+	target: RemoteTarget,
+	entry: PolicyNetworkEntry,
+): { ok: true } | { ok: false; reason: string } {
 	const allowedScheme = entry.scheme ?? "https";
 	if (target.scheme !== allowedScheme) {
 		return { ok: false, reason: `scheme not allowlisted: expected "${allowedScheme}", got "${target.scheme}"` };
@@ -212,7 +215,8 @@ function isDisallowedAddress(address: ResolvedAddress): boolean {
 }
 
 function buildRequestUrl(target: RemoteTarget): string {
-	const isDefaultPort = (target.scheme === "https" && target.port === 443) || (target.scheme === "http" && target.port === 80);
+	const isDefaultPort =
+		(target.scheme === "https" && target.port === 443) || (target.scheme === "http" && target.port === 80);
 	return `${target.scheme}://${target.host}${isDefaultPort ? "" : `:${target.port}`}`;
 }
 

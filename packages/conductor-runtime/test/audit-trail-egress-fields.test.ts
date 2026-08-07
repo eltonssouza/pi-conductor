@@ -82,7 +82,11 @@ describe("AuditEntry.egress gains resolvedIp/payloadKind (D10 ADR 0006 §13.3/§
 		const writer = createAuditTrailWriter(auditFilePath());
 		writer.appendAuditEntry(
 			sampleEntry({
-				egress: { destination: "ok.example", resolvedIp: `10.0.0.5 leaked=${FAKE_KEY}`, payloadKind: "corpus-fetch" },
+				egress: {
+					destination: "ok.example",
+					resolvedIp: `10.0.0.5 leaked=${FAKE_KEY}`,
+					payloadKind: "corpus-fetch",
+				},
 			}),
 		);
 

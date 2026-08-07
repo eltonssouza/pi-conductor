@@ -177,9 +177,7 @@ export interface GitIgnoreChecker {
 	checkIgnored(paths: readonly string[]): string[] | null;
 }
 
-export type FilterIndexableCodeFilesResult =
-	| { ok: true; paths: string[] }
-	| { ok: false; reason: "git-check-failed" };
+export type FilterIndexableCodeFilesResult = { ok: true; paths: string[] } | { ok: false; reason: "git-check-failed" };
 
 /**
  * Removes git-ignored paths from `paths` (D6 §9.3). When `gitIgnore.checkIgnored` itself cannot

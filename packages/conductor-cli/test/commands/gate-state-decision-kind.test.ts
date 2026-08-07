@@ -19,8 +19,8 @@
  */
 
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createGateStateStore } from "@conductor/runtime";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createPersistedGateStateStore } from "../../src/commands/gate-store.ts";
 import { createScratchProject, type ScratchProject } from "../support/scratch.ts";
 

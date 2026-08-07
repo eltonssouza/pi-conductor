@@ -104,7 +104,9 @@ interface RawChunkRow {
  * category) is why this exists rather than an empty `catch {}`. */
 function logSwallowedStoreError(operation: string, error: unknown): void {
 	const message = error instanceof Error ? error.message : String(error);
-	console.error(`[conductor-library:corpus-store] ${new Date().toISOString()} operation=${operation} degraded-to-empty-result: ${message}`);
+	console.error(
+		`[conductor-library:corpus-store] ${new Date().toISOString()} operation=${operation} degraded-to-empty-result: ${message}`,
+	);
 }
 
 function toPassage(row: RawChunkRow, score: number): RetrievedPassage {

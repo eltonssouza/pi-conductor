@@ -18,7 +18,7 @@
  */
 
 import { join } from "node:path";
-import { TOTAL_FLOW_GATES, type ResolveEvidenceRefContext } from "@conductor/runtime";
+import { type ResolveEvidenceRefContext, TOTAL_FLOW_GATES } from "@conductor/runtime";
 import { runChat } from "./commands/chat.ts";
 import { runConfigGet, runConfigSet, runConfigShow } from "./commands/config.ts";
 import { doctorExitCode, formatDoctorReport, runDoctor } from "./commands/doctor.ts";

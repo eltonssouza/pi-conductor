@@ -44,16 +44,16 @@ export {
 // there rather than redeclaring it, the same discipline this file already documents above.
 export {
 	type GroundingCitation,
+	type GroundingLedgerReader,
 	type RagQueryEventHitView,
 	type RagQueryEventView,
 	type RagUnreachableEventView,
-	type GroundingLedgerReader,
 	type RecordDecisionError,
 	recordGroundedDecision,
 	recordUngroundedDecision,
 	UNREACHABLE_WINDOW_MS,
-	validateGroundingCitation,
 	type ValidateGroundingCitationResult,
+	validateGroundingCitation,
 } from "./gate-grounding.ts";
 export type {
 	CalibrationDecision,

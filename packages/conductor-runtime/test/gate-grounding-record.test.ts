@@ -23,7 +23,6 @@
 
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createGateStateStore } from "../src/gate-state-store.ts";
 import {
 	type GroundingLedgerReader,
 	type RagQueryEventView,
@@ -33,6 +32,7 @@ import {
 	recordUngroundedDecision,
 	UNREACHABLE_WINDOW_MS,
 } from "../src/gate-grounding.ts";
+import { createGateStateStore } from "../src/gate-state-store.ts";
 import { createScratchWorkspace, type ScratchWorkspace } from "./support/workspace.ts";
 
 let workspace: ScratchWorkspace;
@@ -62,7 +62,8 @@ function sampleQueryEvent(overrides: Partial<RagQueryEventView> = {}): RagQueryE
 	return {
 		id: "q-1",
 		question: "how should the SSRF guard validate the resolved IP?",
-		enrichedQuery: "project:backend stack:node gate:4 role:software-architect how should the SSRF guard validate the resolved IP?",
+		enrichedQuery:
+			"project:backend stack:node gate:4 role:software-architect how should the SSRF guard validate the resolved IP?",
 		mode: "hybrid",
 		corpusVersion: "corpus-v7",
 		embeddingModel: "bge-m3",
@@ -97,7 +98,12 @@ describe("recordGroundedDecision — the citation reflects the LEDGER, never wha
 
 		const result = recordGroundedDecision(
 			store,
-			{ gate: 4, text: "chose node:sqlite for D1", method: "auto", citations: [{ queryEventId: "q-1", chunkHash: "hash-1" }] },
+			{
+				gate: 4,
+				text: "chose node:sqlite for D1",
+				method: "auto",
+				citations: [{ queryEventId: "q-1", chunkHash: "hash-1" }],
+			},
 			ledger,
 		);
 
@@ -132,7 +138,12 @@ describe("recordGroundedDecision — the citation reflects the LEDGER, never wha
 
 		recordGroundedDecision(
 			store,
-			{ gate: 4, text: "chose node:sqlite for D1", method: "auto", citations: [{ queryEventId: "q-1", chunkHash: "hash-1" }] },
+			{
+				gate: 4,
+				text: "chose node:sqlite for D1",
+				method: "auto",
+				citations: [{ queryEventId: "q-1", chunkHash: "hash-1" }],
+			},
 			ledger,
 		);
 
@@ -239,7 +250,12 @@ describe("recordUngroundedDecision — FR-17 requires a runtime-recorded rag-unr
 		};
 		const ledger = fakeLedger({ findRecentUnreachable: () => unreachable });
 
-		const result = recordUngroundedDecision(store, { gate: 4, text: "proceeding ungrounded", method: "auto" }, ledger, now);
+		const result = recordUngroundedDecision(
+			store,
+			{ gate: 4, text: "proceeding ungrounded", method: "auto" },
+			ledger,
+			now,
+		);
 
 		expect(result.ok).toBe(true);
 	});
@@ -265,7 +281,12 @@ describe("recordUngroundedDecision — FR-17 requires a runtime-recorded rag-unr
 		const store = makeStore();
 		const ledger = fakeLedger(); // findRecentUnreachable always null
 
-		const result = recordUngroundedDecision(store, { gate: 4, text: "proceeding ungrounded", method: "auto" }, ledger, new Date());
+		const result = recordUngroundedDecision(
+			store,
+			{ gate: 4, text: "proceeding ungrounded", method: "auto" },
+			ledger,
+			new Date(),
+		);
 
 		expect(result.ok).toBe(false);
 		if (result.ok) return;
