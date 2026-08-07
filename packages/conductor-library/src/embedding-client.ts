@@ -56,7 +56,11 @@ export interface OllamaEmbeddingClientOptions {
 	timeoutMs?: number;
 }
 
-const DEFAULT_BASE_URL = "http://127.0.0.1:11434";
+/** Exported so callers that need to NAME this fixed destination in a user-facing message (e.g.
+ * `conductor-cli`'s `library.ts`, FR-12's "nomeando qual backend está inacessível") have a single
+ * source of truth to import rather than duplicating the literal -- this module still owns the only
+ * place that actually USES it to make a request. */
+export const DEFAULT_BASE_URL = "http://127.0.0.1:11434";
 const DEFAULT_MODEL = "bge-m3";
 const DEFAULT_TIMEOUT_MS = 30_000;
 

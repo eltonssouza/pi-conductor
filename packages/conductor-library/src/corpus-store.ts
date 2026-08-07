@@ -40,6 +40,17 @@ export interface CorpusStatus {
 	embeddingModel: string | null;
 }
 
+/** FR-4's three filter facets (`--category`/`--tech`/`--version`), all optional -- an `undefined`
+ * facet is never turned into a filter clause (never `AND category = NULL`), and a facet the caller
+ * DID supply is never silently dropped (BR-8/§7.5's "um filtro nunca é ignorado silenciosamente").
+ * Combining more than one facet narrows the result with AND semantics (every supplied facet must
+ * match), matching FR-4's own example (`--tech python --version 3.13` together). */
+export interface CorpusSearchFilters {
+	category?: string;
+	tech?: string;
+	version?: string;
+}
+
 export interface CorpusStore {
 	/** Aggregate counts for `library status` (FR-8). Always answerable, even against a freshly-created,
 	 * completely empty corpus -- `chunkCount: 0`, never a thrown error. */
@@ -48,13 +59,15 @@ export interface CorpusStore {
 	 * concatenated query string -- see that module's own header for why). Returns at most `k` passages,
 	 * ordered by descending (higher-is-better) score. Empty `question`/an empty corpus/an unexpected
 	 * FTS5 engine error all return an EMPTY array, never throw -- a single malformed query must never
-	 * crash `library search`. */
-	searchLexical(question: string, k: number): RetrievedPassage[];
+	 * crash `library search`. `filters` (FR-4) restricts the result to chunks matching every supplied
+	 * facet; omitted entirely, behavior is unchanged from before FR-4 was wired. */
+	searchLexical(question: string, k: number, filters?: CorpusSearchFilters): RetrievedPassage[];
 	/** Cosine-similarity search over every chunk with a stored `vec` (dimension-mismatched rows are
 	 * skipped, never thrown on). Returns at most `k` passages, ordered by descending score. An empty
 	 * `queryVector`, an empty corpus, or an unexpected engine error all return an EMPTY array, never
-	 * throw. */
-	searchDense(queryVector: readonly number[], k: number): RetrievedPassage[];
+	 * throw. `filters` (FR-4) restricts the candidate set to chunks matching every supplied facet
+	 * BEFORE ranking, the same semantics as `searchLexical`. */
+	searchDense(queryVector: readonly number[], k: number, filters?: CorpusSearchFilters): RetrievedPassage[];
 	close(): void;
 }
 
@@ -161,6 +174,35 @@ function normalizeLimit(k: number): number {
 	return Math.max(0, Math.trunc(k));
 }
 
+/** Builds an `AND col = ?` fragment (FR-4) for every facet the caller actually supplied --
+ * `undefined` facets never participate (never `AND category = NULL`, never a filter the caller did
+ * not ask for). `columnPrefix` lets the two callers below qualify the column for their own query
+ * shape (`"c."` for `searchLexical`'s `chunk_fts` join, `""` for `searchDense`'s plain `chunk` scan)
+ * without duplicating this logic. Params are returned in the SAME order the SQL fragments appear in,
+ * since `node:sqlite`'s positional `?` binding is order-sensitive -- the caller must splice them in
+ * at the matching position in its own `.all(...)` argument list. */
+function buildFilterClause(
+	filters: CorpusSearchFilters | undefined,
+	columnPrefix: string,
+): { sql: string; params: string[] } {
+	if (!filters) return { sql: "", params: [] };
+	const conditions: string[] = [];
+	const params: string[] = [];
+	if (filters.category !== undefined) {
+		conditions.push(`${columnPrefix}category = ?`);
+		params.push(filters.category);
+	}
+	if (filters.tech !== undefined) {
+		conditions.push(`${columnPrefix}tech = ?`);
+		params.push(filters.tech);
+	}
+	if (filters.version !== undefined) {
+		conditions.push(`${columnPrefix}version = ?`);
+		params.push(filters.version);
+	}
+	return { sql: conditions.length > 0 ? ` AND ${conditions.join(" AND ")}` : "", params };
+}
+
 /**
  * Opens (creating the file and schema on demand, `IF NOT EXISTS`) the corpus store at `path`. Never
  * fails because the file or its parent directory does not exist yet -- a genuine I/O failure (e.g. an
@@ -187,12 +229,14 @@ export function openCorpusStore(path: string): CorpusStore {
 			};
 		},
 
-		searchLexical(question: string, k: number): RetrievedPassage[] {
+		searchLexical(question: string, k: number, filters?: CorpusSearchFilters): RetrievedPassage[] {
 			const limit = normalizeLimit(k);
 			if (limit === 0) return [];
 
 			const matchExpression = buildFtsMatchExpression(question, "OR");
 			if (matchExpression.length === 0) return [];
+
+			const filterClause = buildFilterClause(filters, "c.");
 
 			try {
 				const rows = db
@@ -201,11 +245,11 @@ export function openCorpusStore(path: string): CorpusStore {
 							bm25(chunk_fts) as rank
 						 FROM chunk_fts
 						 JOIN chunk c ON c.rowid = chunk_fts.rowid
-						 WHERE chunk_fts MATCH ?
+						 WHERE chunk_fts MATCH ?${filterClause.sql}
 						 ORDER BY rank
 						 LIMIT ?`,
 					)
-					.all(matchExpression, limit) as unknown as (RawChunkRow & { rank: number })[];
+					.all(matchExpression, ...filterClause.params, limit) as unknown as (RawChunkRow & { rank: number })[];
 				// bm25(): SQLite's own convention is LOWER-is-better -- negated here so this store's public
 				// score convention (higher-is-better) is uniform across searchLexical/searchDense.
 				return rows.map((row) => toPassage(row, -row.rank));
@@ -220,17 +264,19 @@ export function openCorpusStore(path: string): CorpusStore {
 			}
 		},
 
-		searchDense(queryVector: readonly number[], k: number): RetrievedPassage[] {
+		searchDense(queryVector: readonly number[], k: number, filters?: CorpusSearchFilters): RetrievedPassage[] {
 			const limit = normalizeLimit(k);
 			if (limit === 0 || queryVector.length === 0) return [];
+
+			const filterClause = buildFilterClause(filters, "");
 
 			try {
 				const rows = db
 					.prepare(
 						`SELECT chunk_id, content_hash, source, section, path, category, tech, version, body, vec
-						 FROM chunk WHERE vec IS NOT NULL`,
+						 FROM chunk WHERE vec IS NOT NULL${filterClause.sql}`,
 					)
-					.all() as unknown as (RawChunkRow & { vec: Uint8Array | null })[];
+					.all(...filterClause.params) as unknown as (RawChunkRow & { vec: Uint8Array | null })[];
 
 				const scored: RetrievedPassage[] = [];
 				for (const row of rows) {

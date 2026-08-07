@@ -13,17 +13,42 @@
  * packages ever imports the other directly). `ingest`/`update` remain Gate-5 stubs -- no test in this
  * round exercises FR-9/FR-10, and this is a deliberate, named deferral (YAGNI), not an oversight.
  *
- * FR-17's availability contract, enforced end-to-end in `runLibrarySearch` below: an unreachable/
- * erroring embedding backend degrades the search to LEXICAL-ONLY and records a `rag-unreachable`
- * ledger event -- it never throws out of this file and never blocks `library search` from answering.
+ * FR-12's availability contract (Gate 8 loop-back, corrected from an earlier Gate 6 defect this same
+ * function had): an unreachable/erroring embedding backend, on a NON-`--lexical-only` search, makes
+ * `runLibrarySearch` reject EXPLICITLY -- naming the backend and a corrective action -- after first
+ * recording the honest `rag-unreachable` ledger event (FR-12's own "_log_unreachable" precedent: a
+ * logged attempt-and-fail is fine, total silence is not). The PRIOR Gate 6 implementation instead
+ * caught that failure, wrote only the (invisible-to-the-user) ledger event, and returned exit 0 with
+ * a lexical-only result dressed up as a complete answer -- Gate 8 validation caught this as a real
+ * spec divergence: that is precisely the "resultado degradado silenciosamente" FR-12 forbids, and it
+ * had been mislabeled in this file as satisfying "FR-17" (FR-17 is a DIFFERENT requirement, about
+ * `Decision`/`GateState` recording in `@conductor/runtime`, not about this function's own return
+ * value -- gate2-spec-fase5.md line 287). `--lexical-only` search is unaffected: no embed is
+ * attempted at all in that mode, so there is nothing to fail loudly about.
+ *
+ * `--code-aware` (FR-7): refused as a named, loud stub (`not yet implemented in this fase`) rather
+ * than silently ignored -- code-index.ts has no search primitive over the index yet (only ingestion-
+ * preparation helpers), so wiring a real code-aware answer is out of this round's scope; the Gate 6
+ * defect this corrects was that the flag was parsed but never read at all, producing a plain-library
+ * answer the caller never asked for with no indication anything was skipped.
+ *
  * Grounded in the corpus-store.ts/embedding-client.ts headers' own citations for the individual
  * mechanisms (finite-score requirement ADR §5.3, bm25 sign convention, FTS5 query-language injection
- * ADR §15.1/§15.2); the specific "catch a secondary ledger-write failure so it degrades observability
- * rather than the primary search response" decision below is this file's own judgment call, not
- * separately library-grounded -- `cdt library "HTTP client timeout ... Release It" --gate 6` and a
- * companion query on remote-service timeout patterns both returned only generic, off-topic
- * engineering-practice passages at ~0.53-0.57 relevance (library does not cover this specific pattern
- * for this stack).
+ * ADR §15.1/§15.2). The `deps.embeddingClient` testability seam below follows the same "object seam"
+ * pattern `code-index.ts`'s `OpenCodeIndexOptions.home` and `remote-endpoint.ts`'s
+ * `ConnectRemoteDeps` already use in this monorepo -- grounded via `cdt library "test seam dependency
+ * injection optional parameter default production implementation testability" --gate 8` (top match
+ * 0.622, *Working Effectively with Legacy Code* §2.3/2.10: "depend on an interface ... so a test can
+ * supply" a double; "put I/O behind seams routinely"). The specific "catch a secondary ledger-write
+ * failure so it degrades observability rather than the primary search response" decision below is
+ * this file's own judgment call, not separately library-grounded -- `cdt library "HTTP client
+ * timeout ... Release It" --gate 6` and a companion query on remote-service timeout patterns both
+ * returned only generic, off-topic engineering-practice passages at ~0.53-0.57 relevance (library
+ * does not cover this specific pattern for this stack); a repeat query this round
+ * (`cdt library "explicit failure vs silent degraded response when a dependent backend service is
+ * unreachable" --gate 6`, top match 0.543, off-topic) confirms the library still does not cover
+ * FR-12's specific "fail loud, never silent-partial" shape for this stack -- the decision to throw
+ * rather than degrade is taken directly from the spec's own explicit FR-12 text, not from a book.
  *
  * `conductor library import` deliberately has NO case in `runLibraryCommand`'s switch below, so it
  * falls to the same "unknown subcommand" refusal as any other typo -- this is ADR 0006 D5, a
@@ -37,7 +62,10 @@
 import { realpathSync } from "node:fs";
 import {
 	computeProjectId,
+	type CorpusSearchFilters,
 	createOllamaEmbeddingClient,
+	DEFAULT_BASE_URL as OLLAMA_DEFAULT_BASE_URL,
+	type EmbeddingClient,
 	enrichQuery,
 	fuseAndRerank,
 	openCorpusStore,
@@ -80,11 +108,15 @@ export interface LibraryUpdateOptions {
  * I/O failure, on purpose, so a caller that depends on the write having happened never gets a false
  * positive. Neither call site below depends on that -- `library status`/`search` are human-facing
  * commands whose PRIMARY job is to answer the question; a ledger outage (disk full, permission error)
- * is a secondary, observability-only failure that must degrade quietly rather than take the whole
- * command down with it (FR-17's own "never block the primary operation" intent, applied one level
- * further than the embedding backend itself). Scoped narrowly to this one composition root -- it does
- * NOT relax the writer's contract for `@conductor/runtime`'s `recordGroundedDecision`, which has a
- * real forgery-prevention reason (ADR §6.2) to require the write to actually have happened. */
+ * is a secondary, OBSERVABILITY-only failure that must degrade quietly rather than take the whole
+ * command down with it. This is deliberately narrower than `runLibrarySearch`'s own FR-12 behavior
+ * below (an unreachable EMBEDDING backend now rejects loudly, Gate 8 loop-back) -- the two are not
+ * the same kind of failure: a missing ledger write loses only a secondary audit trail the primary
+ * answer never depended on, while a missing embedding backend silently produces a materially
+ * incomplete answer, which is exactly what FR-12 forbids. Scoped narrowly to this one composition
+ * root -- it does NOT relax the writer's contract for `@conductor/runtime`'s
+ * `recordGroundedDecision`, which has a real forgery-prevention reason (ADR §6.2) to require the
+ * write to actually have happened. */
 function safeAppend(write: () => void): void {
 	try {
 		write();
@@ -140,13 +172,33 @@ function formatSearchResults(passages: readonly RetrievedPassage[]): string {
 	return `${entries.join("\n\n")}\n`;
 }
 
+/** Testability seam for `runLibrarySearch` (Working Effectively with Legacy Code §2.3/2.10's "object
+ * seam": depend on an interface so a test can supply a double, instead of a `new`/factory call baked
+ * into the function body). Defaults to the real Ollama-backed client in production; a test injects a
+ * fake that fails on demand to exercise FR-12 without a real network outage. */
+export interface RunLibrarySearchDeps {
+	embeddingClient?: EmbeddingClient;
+}
+
 /** Wired to `@conductor/library`'s hybrid-search.ts/corpus-store.ts/embedding-client.ts/query-
- * enrichment.ts/grounding-ledger.ts (FR-1/FR-2/FR-4/FR-5/FR-6/FR-7/FR-17). Lexical search always
- * runs; dense search is attempted and, on ANY embedding-backend failure (network/timeout/HTTP
- * error), degrades to lexical-only and records a `rag-unreachable` ledger event -- this function
- * NEVER rejects because the embedding backend is unreachable, matching FR-17's whole reason for
- * existing. */
-export async function runLibrarySearch(options: LibrarySearchOptions): Promise<string> {
+ * enrichment.ts/grounding-ledger.ts (FR-1/FR-2/FR-4/FR-5/FR-6/FR-7/FR-12). `--code-aware` (FR-7) is
+ * refused up front as a named, not-yet-implemented stub, before any corpus/ledger I/O happens (fail
+ * fast). Otherwise: lexical search always runs, filtered by FR-4's `--category`/`--tech`/`--version`
+ * facets; when `--lexical-only` was NOT requested, dense search is attempted, and on ANY
+ * embedding-backend failure (network/timeout/HTTP error) this function records the honest
+ * `rag-unreachable` ledger event and then REJECTS -- explicitly, naming the backend and a corrective
+ * action (FR-12) -- rather than degrading silently to a lexical-only result. */
+export async function runLibrarySearch(options: LibrarySearchOptions, deps: RunLibrarySearchDeps = {}): Promise<string> {
+	if (options.codeAware) {
+		// FR-7: code-aware search is not implemented this round (code-index.ts has only ingestion-
+		// preparation helpers, no search primitive over the index yet -- see that file's own header).
+		// Refused loudly, before ANY corpus/ledger I/O below, the same "loud stub" pattern
+		// runLibraryIngest/runLibraryUpdate already use for FR-9/FR-10 -- never silently ignored.
+		throw new Error(
+			"library search --code-aware: not yet implemented in this fase (FR-7 tracked separately, code-index.ts has no search primitive yet)",
+		);
+	}
+
 	const home = resolveLibraryHome();
 	const projectId = computeProjectId(realpathSync(options.cwd));
 	const ledgerWriter = openGroundingLedgerWriter(home.eventsLog(projectId));
@@ -158,26 +210,39 @@ export async function runLibrarySearch(options: LibrarySearchOptions): Promise<s
 			gate: options.gate,
 			role: options.role,
 		});
+		// FR-4: a filter the caller supplied is never silently dropped -- an `undefined` facet simply
+		// does not restrict the search (corpus-store.ts's own `buildFilterClause` contract).
+		const filters: CorpusSearchFilters = {
+			category: options.category,
+			tech: options.tech,
+			version: options.version,
+		};
 
-		const lexical = corpusStore.searchLexical(enrichedQuery, k);
+		const lexical = corpusStore.searchLexical(enrichedQuery, k, filters);
 
 		let dense: RetrievedPassage[] = [];
 		let mode: "hybrid" | "lexical-only" = "lexical-only";
 		if (!options.lexicalOnly) {
 			try {
-				const embeddingClient = createOllamaEmbeddingClient();
+				const embeddingClient = deps.embeddingClient ?? createOllamaEmbeddingClient();
 				const queryVector = await embeddingClient.embed(enrichedQuery);
-				dense = corpusStore.searchDense(queryVector, k);
+				dense = corpusStore.searchDense(queryVector, k, filters);
 				mode = "hybrid";
 			} catch (error) {
-				// FR-17: the embedding backend being unreachable degrades to lexical-only -- never
-				// propagated as an exception out of this function.
+				// FR-12: an unreachable embedding backend must fail LOUDLY and VISIBLY -- record the
+				// honest "tried and failed" ledger event first (still degrades quietly if the ledger
+				// write itself fails, per safeAppend's own contract above), then propagate a message
+				// naming the backend and a corrective action. runLibraryCommand's existing try/catch
+				// around this call (unchanged) turns this into an explicit non-zero exit.
 				safeAppend(() =>
 					ledgerWriter.appendUnreachable({
 						projectId,
 						backend: "ollama:bge-m3",
 						reason: describeError(error),
 					}),
+				);
+				throw new Error(
+					`embedding backend "ollama:bge-m3" at ${OLLAMA_DEFAULT_BASE_URL} is unreachable (${describeError(error)}) -- start Ollama, or re-run with --lexical-only to search without it`,
 				);
 			}
 		}
