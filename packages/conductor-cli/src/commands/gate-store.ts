@@ -287,7 +287,11 @@ export function createPersistedGateStateStore(options: PersistedGateStateStoreOp
 				const record: GateRecord = current.gates[gate] ?? { gate, ...EMPTY_GATE_RECORD };
 				const decision: Decision = {
 					gate,
-					kind: "decision",
+					// D4 §6.3 (ADR 0006): a rejection is a state transition the rejecter judges, never a
+					// groundable technical decision -- "kind: decision" is reserved for gate-grounding.ts's
+					// recordGroundedDecision alone (the sole-mint invariant test/gate-grounding-sole-mint.test.ts
+					// enforces by static scan across the whole monorepo).
+					kind: "rejection",
 					text: reason,
 					// This code path never calls mintHumanApproval (no confirm channel is threaded through
 					// GateStateStoreView.reject at all) -- "auto" is the only honest tag it may ever write;

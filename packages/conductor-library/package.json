@@ -1,0 +1,21 @@
+{
+	"name": "@conductor/library",
+	"version": "0.0.0",
+	"private": true,
+	"description": "Local, server-less retrieval engine over node:sqlite + FTS5 (docs/adr/0006-fase5-library-and-grounding.md D1/D8): hybrid lexical+dense search, code-aware indexing, and the runtime-derived grounding ledger that @conductor/runtime's recordGroundedDecision resolves citations against. Zero @conductor/* dependencies -- I/O lives at the edges (node:sqlite, node:fs, node:dns/net, node:crypto), pure policy (fts-query/query-enrichment/hybrid-search/chunking) in the middle (ADR §11.1).",
+	"type": "module",
+	"main": "./src/index.ts",
+	"types": "./src/index.ts",
+	"scripts": {
+		"test": "vitest --run"
+	},
+	"devDependencies": {
+		"@types/node": "24.12.4",
+		"@vitest/coverage-v8": "4.1.9",
+		"typescript": "5.9.3",
+		"vitest": "4.1.9"
+	},
+	"engines": {
+		"node": ">=22.19.0"
+	}
+}

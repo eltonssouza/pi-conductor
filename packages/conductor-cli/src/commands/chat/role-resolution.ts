@@ -59,11 +59,7 @@
 import { type ConductorRole, type RoleRegistry, resolveRole } from "@conductor/config";
 import type { RoleRegistryView } from "@conductor/runtime";
 import { loadBuiltinRoleCatalog } from "../role-catalog.ts";
-import {
-	type BuiltinSkillCatalog,
-	defaultProjectSkillsDir,
-	loadBuiltinSkillCatalog,
-} from "../skill-catalog.ts";
+import { type BuiltinSkillCatalog, defaultProjectSkillsDir, loadBuiltinSkillCatalog } from "../skill-catalog.ts";
 
 /** Mirrors `@conductor/config`'s real `ConductorRole` -- kept as a distinct alias (not a bare
  * re-export) so this module's own callers (`chat.ts`) only ever need to know this file's name for

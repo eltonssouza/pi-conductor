@@ -9,14 +9,14 @@
  * Gate 6 fills the body in.
  */
 
-import { mkdirSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
 	type EvidenceProvenanceInfo,
 	hasSufficientEvidenceForMandatoryGate,
-	resolveEvidenceRef,
 	type ResolveEvidenceRefContext,
+	resolveEvidenceRef,
 } from "../src/gate-evidence.ts";
 import { createScratchWorkspace, type ScratchWorkspace } from "./support/workspace.ts";
 
@@ -168,9 +168,9 @@ describe("hasSufficientEvidenceForMandatoryGate (R25 golden rule: runtime-derive
 	});
 
 	it('true for a single "runtime-derived" item alone', () => {
-		expect(hasSufficientEvidenceForMandatoryGate([{ provenance: "runtime-derived", ref: { kind: "test-run" } }])).toBe(
-			true,
-		);
+		expect(
+			hasSufficientEvidenceForMandatoryGate([{ provenance: "runtime-derived", ref: { kind: "test-run" } }]),
+		).toBe(true);
 	});
 
 	// GATE 8 LOOP-BACK: the new branch. A git-commit ref that resolved via `resolveEvidenceRef`'s own

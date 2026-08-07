@@ -314,10 +314,7 @@ describe("conductor gate (end-to-end dispatch) -- substantive behavior, against 
 		const { io, stderr } = createCapturingIo(project.root);
 		const maliciousRef = "$(touch injected.txt)`touch injected2.txt`; touch injected3.txt";
 
-		const code = await runCli(
-			["gate", "evidence", "--gate", "1", "--kind", "git-commit", "--ref", maliciousRef],
-			io,
-		);
+		const code = await runCli(["gate", "evidence", "--gate", "1", "--kind", "git-commit", "--ref", maliciousRef], io);
 
 		expect(code).not.toBe(0);
 		expect(stderr()).toMatch(/does not resolve/);
@@ -342,7 +339,7 @@ describe("conductor gate (end-to-end dispatch) -- substantive behavior, against 
 // "todo teste verde que alcança status approved chama o store diretamente, nenhum chama runCli."
 // ---------------------------------------------------------------------------------------------------
 describe("conductor gate approve -- REAL TTY confirmation channel (Gate 6 loop-back, decision 1)", () => {
-	it("a simulated TTY answering \"y\" drives a NON-mandatory gate (Gate 1) all the way to a genuine status:\"approved\" -- the positive path that did not exist before this loop-back", async () => {
+	it('a simulated TTY answering "y" drives a NON-mandatory gate (Gate 1) all the way to a genuine status:"approved" -- the positive path that did not exist before this loop-back', async () => {
 		const fake = fakeTtyStreams();
 		const { io, stdout } = createCapturingIo(project.root, fake.streams);
 
@@ -405,7 +402,7 @@ describe("conductor gate approve -- REAL TTY confirmation channel (Gate 6 loop-b
 	// ("gate evidence --kind git-commit com SHA real ... gate approve --gate 3 AINDA recusa"), now
 	// closing for real.
 	// ---------------------------------------------------------------------------------------------
-	it("a MANDATORY gate (3) closes for real: `gate start 3` -> a REAL git-commit evidence ref -> `gate approve` via simulated TTY \"y\" -> status:\"approved\" (Gate 6 loop-back decisions 1+2 together)", async () => {
+	it('a MANDATORY gate (3) closes for real: `gate start 3` -> a REAL git-commit evidence ref -> `gate approve` via simulated TTY "y" -> status:"approved" (Gate 6 loop-back decisions 1+2 together)', async () => {
 		project.write("README.md", "hello\n");
 		const sha = initRepoWithOneCommit(project.root, "feature/fase4-loopback-demo");
 
@@ -415,7 +412,10 @@ describe("conductor gate approve -- REAL TTY confirmation channel (Gate 6 loop-b
 		expect(start.stdout()).toMatch(/in-progress/);
 
 		const evidence = createCapturingIo(project.root);
-		const evidenceCode = await runCli(["gate", "evidence", "--gate", "3", "--kind", "git-commit", "--ref", sha], evidence.io);
+		const evidenceCode = await runCli(
+			["gate", "evidence", "--gate", "3", "--kind", "git-commit", "--ref", sha],
+			evidence.io,
+		);
 		expect(evidenceCode).toBe(0);
 
 		const fake = fakeTtyStreams();
@@ -444,11 +444,18 @@ describe("conductor gate approve -- REAL TTY confirmation channel (Gate 6 loop-b
 		project.write("evidence.txt", "proof");
 		const evidencePath = join(project.root, "evidence.txt");
 		const evidence = createCapturingIo(project.root);
-		const evidenceCode = await runCli(["gate", "evidence", "--gate", "3", "--kind", "file", "--ref", evidencePath], evidence.io);
+		const evidenceCode = await runCli(
+			["gate", "evidence", "--gate", "3", "--kind", "file", "--ref", evidencePath],
+			evidence.io,
+		);
 		expect(evidenceCode).toBe(0);
 
 		const fake = fakeTtyStreams();
-		const { io: approveIo, stdout: approveStdout, stderr: approveStderr } = createCapturingIo(project.root, fake.streams);
+		const {
+			io: approveIo,
+			stdout: approveStdout,
+			stderr: approveStderr,
+		} = createCapturingIo(project.root, fake.streams);
 		const approvePromise = runCli(["gate", "approve", "--gate", "3"], approveIo);
 		fake.answer("y");
 		const approveCode = await approvePromise;

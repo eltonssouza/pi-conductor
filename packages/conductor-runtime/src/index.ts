@@ -2,7 +2,9 @@ export {
 	type ApprovalMethod,
 	type AuditEntry,
 	type AuditTrailWriter,
+	appendSecurityEvent,
 	createAuditTrailWriter,
+	type SecurityDetectionEntry,
 } from "./audit-trail.ts";
 export {
 	type ClassificationContext,
@@ -39,6 +41,22 @@ export {
 	type ResolveEvidenceRefResult,
 	resolveEvidenceRef,
 } from "./gate-evidence.ts";
+// GroundingCitation/GroundingLedgerReader (the port) and the two mint functions are canonically owned
+// by gate-grounding.ts (Fase 5, ADR 0006 §11.2/§19) — gate-state.ts imports GroundingCitation FROM
+// there rather than redeclaring it, the same discipline this file already documents above.
+export {
+	type GroundingCitation,
+	type GroundingLedgerReader,
+	type RagQueryEventHitView,
+	type RagQueryEventView,
+	type RagUnreachableEventView,
+	type RecordDecisionError,
+	recordGroundedDecision,
+	recordUngroundedDecision,
+	UNREACHABLE_WINDOW_MS,
+	type ValidateGroundingCitationResult,
+	validateGroundingCitation,
+} from "./gate-grounding.ts";
 export type {
 	CalibrationDecision,
 	Decision,
@@ -58,6 +76,7 @@ export {
 export {
 	createGateStateStore,
 	type GateStateEnvelopeV1,
+	type GateStateEnvelopeV2,
 	type GateStateMutationError,
 	type GateStateStore,
 	type GateStateStoreOptions,

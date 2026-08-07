@@ -87,33 +87,29 @@ afterEach(() => {
 	vi.clearAllMocks();
 });
 
-it(
-	"createGovernedChildSessionSpawner passes the parent's own model to the real createAgentSession call, exactly, never leaving it undefined for Pi's own findInitialModel to auto-discover",
-	async () => {
-		const auditTrailWriter = createAuditTrailWriter(join(workspace.root, ".conductor", "audit.jsonl"));
-		const sessionManager = SessionManager.create(workspace.root, join(workspace.agentDir, "sessions", "tasks"));
+it("createGovernedChildSessionSpawner passes the parent's own model to the real createAgentSession call, exactly, never leaving it undefined for Pi's own findInitialModel to auto-discover", async () => {
+	const auditTrailWriter = createAuditTrailWriter(join(workspace.root, ".conductor", "audit.jsonl"));
+	const sessionManager = SessionManager.create(workspace.root, join(workspace.agentDir, "sessions", "tasks"));
 
-		const spawn = createGovernedChildSessionSpawner(createSharedBudget(100_000));
-		await spawn({
-			role: { name: "software-engineer", tools: ["read"], canSpawn: [], modelRole: "standard" },
-			prompt: "do something self-contained",
-			depth: 1,
-			workspaceRoot: workspace.root,
-			effectivePolicy: {},
-			auditTrailWriter,
-			additionalProtectedPaths: [],
-			yesFlagActive: false,
-			sessionManager,
-			model: PARENT_MODEL,
-		});
+	const spawn = createGovernedChildSessionSpawner(createSharedBudget(100_000));
+	await spawn({
+		role: { name: "software-engineer", tools: ["read"], canSpawn: [], modelRole: "standard" },
+		prompt: "do something self-contained",
+		depth: 1,
+		workspaceRoot: workspace.root,
+		effectivePolicy: {},
+		auditTrailWriter,
+		additionalProtectedPaths: [],
+		yesFlagActive: false,
+		sessionManager,
+		model: PARENT_MODEL,
+	});
 
-		expect(state.captured).toBeDefined();
-		// The exact discriminator: not merely "some model object", not "a model with the same id" --
-		// the SAME reference the caller passed in, and never `undefined` (undefined is precisely what
-		// would re-arm Pi's own findInitialModel auto-discovery fallback, sdk.ts's `let model =
-		// options.model` / `if (!model) { ... findInitialModel ... }`).
-		expect(state.captured?.model).toBe(PARENT_MODEL);
-		expect(state.captured?.model).not.toBeUndefined();
-	},
-	20_000,
-);
+	expect(state.captured).toBeDefined();
+	// The exact discriminator: not merely "some model object", not "a model with the same id" --
+	// the SAME reference the caller passed in, and never `undefined` (undefined is precisely what
+	// would re-arm Pi's own findInitialModel auto-discovery fallback, sdk.ts's `let model =
+	// options.model` / `if (!model) { ... findInitialModel ... }`).
+	expect(state.captured?.model).toBe(PARENT_MODEL);
+	expect(state.captured?.model).not.toBeUndefined();
+}, 20_000);

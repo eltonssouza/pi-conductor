@@ -52,13 +52,75 @@ export interface AuditEntry {
 	yesFlagActive: boolean;
 	/** FR-21/BR-11: must always be distinguishable — never collapse "yes-flag" into "human". */
 	approvalMethod: ApprovalMethod;
-	/** Present only for Network-level decisions (FR-7). */
-	egress?: { destination: string };
+	/** Present only for Network-level decisions (FR-7). ADR 0006 §13.3/D10 (Fase 5) extends this with
+	 * `resolvedIp`/`payloadKind` so the trail records the IP actually connected to (not just the
+	 * declared host) and what kind of payload left the machine — never the code-index's own vectors
+	 * (D10 §13.4: those never leave regardless of this field). GATE 5 (test-first, Fase 5): a pure
+	 * type addition — `appendAuditEntry` below is NOT yet updated to carry these fields through (it
+	 * still reconstructs `egress` as `{ destination }` only, T57's own spread-then-overwrite finding);
+	 * test/audit-trail-egress-fields.test.ts drives the REAL, unmodified writer and fails RED for
+	 * exactly that reason. */
+	egress?: { destination: string; resolvedIp?: string; payloadKind?: "query-embedding" | "corpus-fetch" };
 }
 
 export interface AuditTrailWriter {
 	/** Synchronous; MUST throw on any I/O failure rather than swallow it (FR-18/R9). */
 	appendAuditEntry(entry: AuditEntry): void;
+}
+
+/**
+ * A security-detection event (Fase 5 loop-back, R37/T56 — gate3-addendum-fase5.md §8.3/§8.4). Distinct
+ * from a `PermissionGateDecision`-derived `AuditEntry`: this records a durable, escalated DENY for an
+ * artifact whose mere presence is an attack indicator — a `.conductor/library` index/ledger found UNDER
+ * a workspace, which no legitimate build of this tool writes there after D7/D9 (its detection is by
+ * PATH ALONE, never opening the file). Modeled as the ADR §8.4-sanctioned "evento-irmão": a separate
+ * JSONL shape discriminated by `kind: "security-detection"` on the SAME `.conductor/audit.jsonl`,
+ * carried by `appendSecurityEvent` below — ZERO change to `AuditEntry`/`appendAuditEntry`, so every
+ * existing tool-decision entry (which has no `kind`) and its tests are untouched.
+ */
+export interface SecurityDetectionEntry {
+	/** ISO-8601 UTC timestamp of the detection. */
+	timestamp: string;
+	/** Closed union — the kind of artifact detected (extend consciously, never a free string). */
+	event: "repo-supplied-library-artifact";
+	/** The detected artifact path — redacted at THIS sink independently of the caller (R6/R38). */
+	path: string;
+	/** Closed union — this class of finding is always HIGH (R37). */
+	severity: "high";
+	/** R37: recorded as a security DENY, the same disposition the Permission Engine audits its denies with. */
+	decision: "deny";
+}
+
+/**
+ * Appends one `SecurityDetectionEntry` to the append-only audit trail at `filePath`, discriminated by
+ * `kind: "security-detection"`. Same fail-closed discipline as `createAuditTrailWriter`'s
+ * `appendAuditEntry` (R9/FR-18): validates the timestamp, then `mkdir`+`appendFileSync` (mode `0o600`,
+ * `flag: "a"` — never truncates, never rewrites a prior line) so the record is durable on return, and
+ * ANY I/O failure (a `filePath` that is a directory, a blocked parent, a full disk) propagates straight
+ * out rather than being swallowed. `path` passes through this sink's OWN `redactSecrets` (R6/R38: every
+ * persisted string field is scrubbed here without presuming the upstream did it — a no-op on a
+ * well-formed path, defense in depth against a future mispopulate); `event`/`severity`/`decision` are
+ * closed unions that cannot carry a secret and are written as-is.
+ */
+export function appendSecurityEvent(filePath: string, entry: SecurityDetectionEntry): void {
+	if (!isValidIsoTimestamp(entry.timestamp)) {
+		throw new Error(
+			"audit-trail: refusing to persist a security event with a missing/invalid ISO-8601 timestamp — fail closed",
+		);
+	}
+	const record = {
+		kind: "security-detection" as const,
+		timestamp: entry.timestamp,
+		event: entry.event,
+		path: redactSecrets(entry.path),
+		severity: entry.severity,
+		decision: entry.decision,
+	};
+	const line = `${JSON.stringify(record)}\n`;
+	// mkdirSync is part of the fail-closed contract (same as appendAuditEntry): a non-directory parent
+	// throws synchronously here and the append is never reached.
+	mkdirSync(dirname(filePath), { recursive: true });
+	appendFileSync(filePath, line, { encoding: "utf8", mode: 0o600, flag: "a" });
 }
 
 function isValidIsoTimestamp(value: string): boolean {
@@ -103,7 +165,20 @@ export function createAuditTrailWriter(filePath: string): AuditTrailWriter {
 			const redactedEntry: AuditEntry = {
 				...entry,
 				reason: entry.reason !== undefined ? redactSecrets(entry.reason) : entry.reason,
-				egress: entry.egress ? { destination: redactSecrets(entry.egress.destination) } : entry.egress,
+				// D10/T57 fix: preserve resolvedIp/payloadKind instead of the old spread-then-overwrite
+				// reconstruction that silently discarded both. resolvedIp gets the same independent-sink
+				// redaction as destination (R6: "cada sink redige independente"); payloadKind is a closed
+				// enum, never free text, so it needs no redaction. Each field is OMITTED (never written as
+				// `undefined`) when absent on the input, matching every other optional field in this writer.
+				egress: entry.egress
+					? {
+							destination: redactSecrets(entry.egress.destination),
+							...(entry.egress.resolvedIp !== undefined
+								? { resolvedIp: redactSecrets(entry.egress.resolvedIp) }
+								: {}),
+							...(entry.egress.payloadKind !== undefined ? { payloadKind: entry.egress.payloadKind } : {}),
+						}
+					: entry.egress,
 			};
 
 			const line = `${JSON.stringify(redactedEntry)}\n`;

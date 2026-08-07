@@ -74,7 +74,7 @@ describe('gate-approval.ts: sole constructor of an Approval claiming method:"hum
 		expect(constructors).toEqual(["gate-approval.ts"]);
 	});
 
-	it("sanity: the regex does NOT match the unrelated tool-call field approvalMethod:\"human\" (permission-gate.ts)", () => {
+	it('sanity: the regex does NOT match the unrelated tool-call field approvalMethod:"human" (permission-gate.ts)', () => {
 		const permissionGateSource = stripComments(readFileSync(join(SRC_ROOT, "permission-gate.ts"), "utf8"));
 
 		// Confirms the file DOES legitimately contain the unrelated field first -- otherwise the

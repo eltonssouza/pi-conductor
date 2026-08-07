@@ -30,9 +30,9 @@
 
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { createConductorSession } from "../src/session.ts";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { createConductorSession } from "../src/session.ts";
 import { registerFakeModel } from "./support/fake-model.ts";
 import { createTestUiContext } from "./support/test-ui.ts";
 import { createScratchWorkspace, type ScratchWorkspace } from "./support/workspace.ts";
@@ -83,86 +83,78 @@ afterEach(() => {
 	workspace.cleanup();
 });
 
-it(
-	"FR-5: a real session's system prompt carries only the skill's name+description+location, never its body",
-	async () => {
-		const modelRuntime = await ModelRuntime.create({
-			authPath: join(workspace.agentDir, "auth.json"),
-			modelsPath: join(workspace.agentDir, "models.json"),
-			allowModelNetwork: false,
-		});
-		const fakeModel = registerFakeModel(modelRuntime, "conductor-fake", [{ text: "no tool needed yet" }]);
+it("FR-5: a real session's system prompt carries only the skill's name+description+location, never its body", async () => {
+	const modelRuntime = await ModelRuntime.create({
+		authPath: join(workspace.agentDir, "auth.json"),
+		modelsPath: join(workspace.agentDir, "models.json"),
+		allowModelNetwork: false,
+	});
+	const fakeModel = registerFakeModel(modelRuntime, "conductor-fake", [{ text: "no tool needed yet" }]);
 
-		const conductorSession = await createConductorSession({
-			workspaceRoot: workspace.root,
-			model: fakeModel.model,
-			modelRuntime,
-			agentDir: workspace.agentDir,
-			additionalSkillPaths: [skillsRootDir],
-		});
-		await conductorSession.session.bindExtensions({ uiContext: createTestUiContext(), mode: "print" });
-		await conductorSession.session.prompt("hi");
+	const conductorSession = await createConductorSession({
+		workspaceRoot: workspace.root,
+		model: fakeModel.model,
+		modelRuntime,
+		agentDir: workspace.agentDir,
+		additionalSkillPaths: [skillsRootDir],
+	});
+	await conductorSession.session.bindExtensions({ uiContext: createTestUiContext(), mode: "print" });
+	await conductorSession.session.prompt("hi");
 
-		const prompt = fakeModel.lastSystemPrompt();
-		expect(prompt).toBeTruthy();
-		expect(prompt).toContain("design-service");
-		expect(prompt).toContain(SKILL_DESCRIPTION);
-		expect(prompt).toContain(skillFilePath);
-		// The body is present ONLY in the SKILL.md file on disk, never inlined into the prompt itself.
-		expect(prompt).not.toContain(SKILL_BODY_MARKER);
+	const prompt = fakeModel.lastSystemPrompt();
+	expect(prompt).toBeTruthy();
+	expect(prompt).toContain("design-service");
+	expect(prompt).toContain(SKILL_DESCRIPTION);
+	expect(prompt).toContain(skillFilePath);
+	// The body is present ONLY in the SKILL.md file on disk, never inlined into the prompt itself.
+	expect(prompt).not.toContain(SKILL_BODY_MARKER);
 
-		conductorSession.dispose();
-	},
-	20_000,
-);
+	conductorSession.dispose();
+}, 20_000);
 
-it(
-	"FR-6: the skill body reaches the conversation only via a real `read` tool result, and is still " +
-		"absent from a later turn's system prompt (never reinjected)",
-	async () => {
-		const modelRuntime = await ModelRuntime.create({
-			authPath: join(workspace.agentDir, "auth.json"),
-			modelsPath: join(workspace.agentDir, "models.json"),
-			allowModelNetwork: false,
-		});
-		const fakeModel = registerFakeModel(modelRuntime, "conductor-fake", [
-			{ toolCalls: [{ name: "read", args: { path: skillFilePath } }] },
-			{ text: "done" },
-		]);
+it("FR-6: the skill body reaches the conversation only via a real `read` tool result, and is still " +
+	"absent from a later turn's system prompt (never reinjected)", async () => {
+	const modelRuntime = await ModelRuntime.create({
+		authPath: join(workspace.agentDir, "auth.json"),
+		modelsPath: join(workspace.agentDir, "models.json"),
+		allowModelNetwork: false,
+	});
+	const fakeModel = registerFakeModel(modelRuntime, "conductor-fake", [
+		{ toolCalls: [{ name: "read", args: { path: skillFilePath } }] },
+		{ text: "done" },
+	]);
 
-		const conductorSession = await createConductorSession({
-			workspaceRoot: workspace.root,
-			model: fakeModel.model,
-			modelRuntime,
-			agentDir: workspace.agentDir,
-			additionalSkillPaths: [skillsRootDir],
-		});
+	const conductorSession = await createConductorSession({
+		workspaceRoot: workspace.root,
+		model: fakeModel.model,
+		modelRuntime,
+		agentDir: workspace.agentDir,
+		additionalSkillPaths: [skillsRootDir],
+	});
 
-		const events: CapturedToolEvent[] = [];
-		conductorSession.session.subscribe((event) => {
-			if (event.type === "tool_execution_end") events.push({ toolName: event.toolName, result: event.result });
-		});
+	const events: CapturedToolEvent[] = [];
+	conductorSession.session.subscribe((event) => {
+		if (event.type === "tool_execution_end") events.push({ toolName: event.toolName, result: event.result });
+	});
 
-		await conductorSession.session.bindExtensions({ uiContext: createTestUiContext(), mode: "print" });
-		await conductorSession.session.prompt("Follow the design-service skill.");
-		await waitUntil(() => events.some((e) => e.toolName === "read"));
+	await conductorSession.session.bindExtensions({ uiContext: createTestUiContext(), mode: "print" });
+	await conductorSession.session.prompt("Follow the design-service skill.");
+	await waitUntil(() => events.some((e) => e.toolName === "read"));
 
-		const readEvent = events.find((e) => e.toolName === "read");
-		expect(readEvent).toBeDefined();
-		// The body arrives as the READ TOOL'S OWN result -- a tool-result channel, not the system prompt.
-		expect(JSON.stringify(readEvent!.result)).toContain(SKILL_BODY_MARKER);
+	const readEvent = events.find((e) => e.toolName === "read");
+	expect(readEvent).toBeDefined();
+	// The body arrives as the READ TOOL'S OWN result -- a tool-result channel, not the system prompt.
+	expect(JSON.stringify(readEvent!.result)).toContain(SKILL_BODY_MARKER);
 
-		// The turn AFTER the read tool call still gets a system prompt with no reinjected body -- the
-		// guarantee holds across the whole conversation, not just before the first tool call.
-		const promptAfterRead = fakeModel.lastSystemPrompt();
-		expect(promptAfterRead).not.toContain(SKILL_BODY_MARKER);
-		expect(promptAfterRead).toContain("design-service");
+	// The turn AFTER the read tool call still gets a system prompt with no reinjected body -- the
+	// guarantee holds across the whole conversation, not just before the first tool call.
+	const promptAfterRead = fakeModel.lastSystemPrompt();
+	expect(promptAfterRead).not.toContain(SKILL_BODY_MARKER);
+	expect(promptAfterRead).toContain("design-service");
 
-		expect(fakeModel.callCount()).toBe(2);
-		conductorSession.dispose();
-	},
-	20_000,
-);
+	expect(fakeModel.callCount()).toBe(2);
+	conductorSession.dispose();
+}, 20_000);
 
 // FR-6 / Gate 8 loop-back (Gate 4 decision, journal 2026-08-06): the two tests above place their
 // fixture skill INSIDE workspace.root (join(workspace.root, "fixture-skills")) -- a shape that never
@@ -185,9 +177,16 @@ describe("FR-6 (real production shape): the skill lives OUTSIDE workspaceRoot, e
 		externalSkillFilePath = join(skillDir, "SKILL.md");
 		writeFileSync(
 			externalSkillFilePath,
-			["---", "name: design-service", `description: ${SKILL_DESCRIPTION}`, "---", "", "# Design Service", "", SKILL_BODY_MARKER].join(
-				"\n",
-			),
+			[
+				"---",
+				"name: design-service",
+				`description: ${SKILL_DESCRIPTION}`,
+				"---",
+				"",
+				"# Design Service",
+				"",
+				SKILL_BODY_MARKER,
+			].join("\n"),
 			"utf-8",
 		);
 	});
@@ -196,93 +195,85 @@ describe("FR-6 (real production shape): the skill lives OUTSIDE workspaceRoot, e
 		externalSkillsRoot.cleanup();
 	});
 
-	it(
-		"a real `read` tool call against a skill located outside workspaceRoot succeeds and returns the body (RED before the Gate 6 fix: was denied with 'resolves outside the workspace root')",
-		async () => {
-			const modelRuntime = await ModelRuntime.create({
-				authPath: join(workspace.agentDir, "auth.json"),
-				modelsPath: join(workspace.agentDir, "models.json"),
-				allowModelNetwork: false,
-			});
-			const fakeModel = registerFakeModel(modelRuntime, "conductor-fake", [
-				{ toolCalls: [{ name: "read", args: { path: externalSkillFilePath } }] },
-				{ text: "done" },
-			]);
+	it("a real `read` tool call against a skill located outside workspaceRoot succeeds and returns the body (RED before the Gate 6 fix: was denied with 'resolves outside the workspace root')", async () => {
+		const modelRuntime = await ModelRuntime.create({
+			authPath: join(workspace.agentDir, "auth.json"),
+			modelsPath: join(workspace.agentDir, "models.json"),
+			allowModelNetwork: false,
+		});
+		const fakeModel = registerFakeModel(modelRuntime, "conductor-fake", [
+			{ toolCalls: [{ name: "read", args: { path: externalSkillFilePath } }] },
+			{ text: "done" },
+		]);
 
-			// additionalSkillPaths carries the SAME shape chat.ts's real composition root uses --
-			// skillCatalog.skills.map(skill => skill.realPath), i.e. individual, already R20-vetted
-			// SKILL.md file paths, never a directory the caller invents ad hoc.
-			const conductorSession = await createConductorSession({
-				workspaceRoot: workspace.root,
-				model: fakeModel.model,
-				modelRuntime,
-				agentDir: workspace.agentDir,
-				additionalSkillPaths: [externalSkillFilePath],
-			});
+		// additionalSkillPaths carries the SAME shape chat.ts's real composition root uses --
+		// skillCatalog.skills.map(skill => skill.realPath), i.e. individual, already R20-vetted
+		// SKILL.md file paths, never a directory the caller invents ad hoc.
+		const conductorSession = await createConductorSession({
+			workspaceRoot: workspace.root,
+			model: fakeModel.model,
+			modelRuntime,
+			agentDir: workspace.agentDir,
+			additionalSkillPaths: [externalSkillFilePath],
+		});
 
-			const events: CapturedToolEvent[] = [];
-			conductorSession.session.subscribe((event) => {
-				if (event.type === "tool_execution_end") events.push({ toolName: event.toolName, result: event.result });
-			});
+		const events: CapturedToolEvent[] = [];
+		conductorSession.session.subscribe((event) => {
+			if (event.type === "tool_execution_end") events.push({ toolName: event.toolName, result: event.result });
+		});
 
-			await conductorSession.session.bindExtensions({ uiContext: createTestUiContext(), mode: "print" });
-			await conductorSession.session.prompt("Follow the design-service skill.");
-			await waitUntil(() => events.some((e) => e.toolName === "read"));
+		await conductorSession.session.bindExtensions({ uiContext: createTestUiContext(), mode: "print" });
+		await conductorSession.session.prompt("Follow the design-service skill.");
+		await waitUntil(() => events.some((e) => e.toolName === "read"));
 
-			const readEvent = events.find((e) => e.toolName === "read");
-			expect(readEvent).toBeDefined();
-			// GREEN (post-fix): the read tool's own result carries the real body. Pre-fix, this same
-			// assertion failed because the result was a permission-gate denial
-			// ("... resolves outside the workspace root") that never contains the body at all.
-			expect(JSON.stringify(readEvent!.result)).toContain(SKILL_BODY_MARKER);
+		const readEvent = events.find((e) => e.toolName === "read");
+		expect(readEvent).toBeDefined();
+		// GREEN (post-fix): the read tool's own result carries the real body. Pre-fix, this same
+		// assertion failed because the result was a permission-gate denial
+		// ("... resolves outside the workspace root") that never contains the body at all.
+		expect(JSON.stringify(readEvent!.result)).toContain(SKILL_BODY_MARKER);
 
-			conductorSession.dispose();
-		},
-		20_000,
-	);
+		conductorSession.dispose();
+	}, 20_000);
 
-	it(
-		"a `read` for a path outside BOTH workspaceRoot and the disclosed skill roots is still denied (the fix is not a general read bypass)",
-		async () => {
-			const modelRuntime = await ModelRuntime.create({
-				authPath: join(workspace.agentDir, "auth.json"),
-				modelsPath: join(workspace.agentDir, "models.json"),
-				allowModelNetwork: false,
-			});
-			const unrelatedRoot = createScratchWorkspace("conductor-runtime-unrelated-");
-			const unrelatedFile = join(unrelatedRoot.root, "secret.txt");
-			writeFileSync(unrelatedFile, "top secret", "utf-8");
+	it("a `read` for a path outside BOTH workspaceRoot and the disclosed skill roots is still denied (the fix is not a general read bypass)", async () => {
+		const modelRuntime = await ModelRuntime.create({
+			authPath: join(workspace.agentDir, "auth.json"),
+			modelsPath: join(workspace.agentDir, "models.json"),
+			allowModelNetwork: false,
+		});
+		const unrelatedRoot = createScratchWorkspace("conductor-runtime-unrelated-");
+		const unrelatedFile = join(unrelatedRoot.root, "secret.txt");
+		writeFileSync(unrelatedFile, "top secret", "utf-8");
 
-			const fakeModel = registerFakeModel(modelRuntime, "conductor-fake", [
-				{ toolCalls: [{ name: "read", args: { path: unrelatedFile } }] },
-				{ text: "done" },
-			]);
+		const fakeModel = registerFakeModel(modelRuntime, "conductor-fake", [
+			{ toolCalls: [{ name: "read", args: { path: unrelatedFile } }] },
+			{ text: "done" },
+		]);
 
-			// Same proven observation channel acceptance.test.ts uses for a blocked call (the
-			// permission-gate's own `onDecision` hook), rather than inferring the shape a blocked
-			// tool_execution_end's `result` takes at the underlying SDK level.
-			const decisions: Array<{ toolName: string; allowed: boolean; reason?: string }> = [];
+		// Same proven observation channel acceptance.test.ts uses for a blocked call (the
+		// permission-gate's own `onDecision` hook), rather than inferring the shape a blocked
+		// tool_execution_end's `result` takes at the underlying SDK level.
+		const decisions: Array<{ toolName: string; allowed: boolean; reason?: string }> = [];
 
-			const conductorSession = await createConductorSession({
-				workspaceRoot: workspace.root,
-				model: fakeModel.model,
-				modelRuntime,
-				agentDir: workspace.agentDir,
-				additionalSkillPaths: [externalSkillFilePath],
-				onDecision: (decision) => decisions.push(decision),
-			});
+		const conductorSession = await createConductorSession({
+			workspaceRoot: workspace.root,
+			model: fakeModel.model,
+			modelRuntime,
+			agentDir: workspace.agentDir,
+			additionalSkillPaths: [externalSkillFilePath],
+			onDecision: (decision) => decisions.push(decision),
+		});
 
-			await conductorSession.session.bindExtensions({ uiContext: createTestUiContext(), mode: "print" });
-			await conductorSession.session.prompt("Read the unrelated secret file.");
-			await waitUntil(() => decisions.some((d) => d.toolName === "read"));
+		await conductorSession.session.bindExtensions({ uiContext: createTestUiContext(), mode: "print" });
+		await conductorSession.session.prompt("Read the unrelated secret file.");
+		await waitUntil(() => decisions.some((d) => d.toolName === "read"));
 
-			const readDecision = decisions.find((d) => d.toolName === "read");
-			expect(readDecision?.allowed).toBe(false);
-			expect(readDecision?.reason).toMatch(/outside the workspace root/);
+		const readDecision = decisions.find((d) => d.toolName === "read");
+		expect(readDecision?.allowed).toBe(false);
+		expect(readDecision?.reason).toMatch(/outside the workspace root/);
 
-			unrelatedRoot.cleanup();
-			conductorSession.dispose();
-		},
-		20_000,
-	);
+		unrelatedRoot.cleanup();
+		conductorSession.dispose();
+	}, 20_000);
 });

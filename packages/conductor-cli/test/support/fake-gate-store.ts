@@ -157,7 +157,9 @@ export function createFakeGateStore(options: { branch?: string } = {}): FakeGate
 			// R24: a calibration can never name a mandatory gate.
 			const offending = collapsedGates.filter((g) => MANDATORY_GATES.has(g)).sort((a, b) => a - b);
 			if (offending.length > 0) {
-				throw new GateCommandError(`calibration refused: cannot collapse mandatory gate(s) ${offending.join(", ")}`);
+				throw new GateCommandError(
+					`calibration refused: cannot collapse mandatory gate(s) ${offending.join(", ")}`,
+				);
 			}
 			const demand = ensureDemand(demandId);
 			demand.calibration = { collapsedGates, method };
