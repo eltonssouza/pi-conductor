@@ -141,6 +141,11 @@ export function defaultProtectedPaths(workspaceRoot?: string): string[] {
 		// confused-deputy reasoning as every other entry in this list, applied to the whole
 		// ~/.conductor/library subtree (corpus.sqlite, projects/<projectId>/{code.sqlite,events.jsonl}).
 		join(home, ".conductor", "library"),
+		// D4 (ADR 0007 §6/§12.4, Fase 6): the diary's authoritative entries.jsonl (the log that feeds
+		// runtimeRecordedJournalEntryIds, D2/G12) and its derived index.sqlite must be as unwritable by
+		// write/edit/bash as the audit trail and GateState store already are -- same confused-deputy
+		// reasoning as every other entry in this list, applied to the whole ~/.conductor/diary subtree.
+		join(home, ".conductor", "diary"),
 	];
 	if (workspaceRoot) {
 		paths.push(

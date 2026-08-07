@@ -14,10 +14,13 @@
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { openJournalReader } from "@conductor/diary";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { runCli } from "../../src/cli.ts";
+import { resolveJournalContext } from "../../src/commands/journal.ts";
 import { createCapturingIo } from "../support/io.ts";
 import { createScratchProject, type ScratchProject } from "../support/scratch.ts";
+import { createScratchHome, type ScratchHome } from "../support/scratch-home.ts";
 import { fakeTtyStreams } from "../support/tty.ts";
 
 let project: ScratchProject;
@@ -463,5 +466,188 @@ describe("conductor gate approve -- REAL TTY confirmation channel (Gate 6 loop-b
 		expect(approveCode).not.toBe(0);
 		expect(approveStderr()).toMatch(/insufficient evidence/);
 		expect(approveStdout()).toBe("");
+	});
+});
+
+// ---------------------------------------------------------------------------------------------------
+// GATE 6 WIRING CLOSURE (Fase 6, D2/G12/FR-25, ADR 0007 §4.3): `runGateCommand`'s `evidenceContext`
+// used to pass `runtimeRecordedJournalEntryIds: new Set()` -- an honest, permanently-empty placeholder
+// (no durable journal ledger existed yet, per `gate-evidence.ts`'s own header). Now that
+// `@conductor/diary` is real (Fase 6), `runGateCommand` populates that set from the SAME per-machine
+// diary `conductor journal add` writes to (`commands/journal.ts`'s own `resolveJournalContext`, reused
+// by both) -- the seam `gate-evidence.ts` documented as "a REAL source once wired" now genuinely has a
+// producer. R40/D2 (already closed by a prior pass, `conductor-runtime/test/
+// gate-evidence-journal-entry-not-sole.test.ts`) is NOT reopened here: a resolved journal-entry proves
+// only that the runtime observed a WRITE (existence) -- `hasSufficientEvidenceForMandatoryGate` still
+// requires `ref.kind === "test-run"` on its runtime-derived branch, unchanged. This section proves BOTH
+// halves together, end-to-end, through the real `runCli` dispatch (never the store/resolveEvidenceRef
+// called directly, which the pure-function-level test above already covers).
+//
+// TEST HYGIENE NOTE (same trade-off `journal.test.ts`'s own header documents): `journal add` here goes
+// through the real `runCli` dispatcher, which has no `homeDir` override at the CLI-IO level -- it
+// writes to this machine's REAL `~/.conductor/diary/projects/<projectId>/entries.jsonl`. This is safe
+// and leaves no meaningful trace: `project.root` is always a FRESH `createScratchProject()` temp
+// directory (a `beforeEach` per this file's own top), so the resulting `projectId` (a hash of that
+// unique path) has never been written to before and will never collide with a real project's own
+// diary. Proving `runGateCommand`'s OWN composition-root wiring (as opposed to `@conductor/diary`'s
+// already-tested primitives, or `journal.ts`'s own already-tested `run*` functions) requires driving it
+// through the real, unmocked `runCli` -- the same reasoning `gate-cli.acceptance.test.ts`'s other
+// "REAL persisted store"/"REAL git repository" sections above already apply to their own collaborators.
+// ---------------------------------------------------------------------------------------------------
+describe("conductor gate evidence --kind journal-entry -- closes the D2/G12/FR-25 seam (Fase 6 wiring closure)", () => {
+	it("a real id minted by `journal add` now RESOLVES as evidence (previously refused: cli.ts's evidenceContext hardcoded an empty runtimeRecordedJournalEntryIds Set)", async () => {
+		// FR-6 (a store-level rule, unrelated to this test's own concern): evidence can only attach to a
+		// gate already started for this demand -- `gate start 3` first, the same precondition
+		// `gate-cli.acceptance.test.ts`'s own "R40/D2 non-regression" test below already satisfies.
+		const start = createCapturingIo(project.root);
+		const startCode = await runCli(["gate", "start", "3"], start.io);
+		expect(startCode).toBe(0);
+
+		const add = createCapturingIo(project.root);
+		const addCode = await runCli(
+			["journal", "add", "--kind", "decision", "--gate", "3", "usa JSONL append-only como fonte de verdade"],
+			add.io,
+		);
+		expect(addCode).toBe(0);
+		const id = add.stdout().match(/Recorded journal entry (\S+)/)?.[1];
+		expect(id).toBeTruthy();
+		if (!id) throw new Error("expected an id in journal add's confirmation message");
+
+		const evidence = createCapturingIo(project.root);
+		const evidenceCode = await runCli(
+			["gate", "evidence", "--gate", "3", "--kind", "journal-entry", "--ref", id],
+			evidence.io,
+		);
+
+		expect(evidenceCode).toBe(0);
+		expect(evidence.stdout()).toMatch(/evidence/i);
+	});
+
+	it("an id the runtime never recorded still refuses fail-closed (R25/T41 preserved -- populating the set for REAL ids never widens what an unrecorded id can do)", async () => {
+		const evidence = createCapturingIo(project.root);
+		const evidenceCode = await runCli(
+			["gate", "evidence", "--gate", "3", "--kind", "journal-entry", "--ref", "never-recorded-id"],
+			evidence.io,
+		);
+
+		expect(evidenceCode).not.toBe(0);
+		expect(evidence.stderr()).toMatch(/was never recorded/);
+	});
+
+	it("R40/D2 non-regression: even with a REAL, resolving journal-entry ref, a MANDATORY gate still refuses to approve -- existence (a write) is not work (a test-run)", async () => {
+		const start = createCapturingIo(project.root);
+		const startCode = await runCli(["gate", "start", "3"], start.io);
+		expect(startCode).toBe(0);
+
+		const add = createCapturingIo(project.root);
+		await runCli(["journal", "add", "--kind", "decision", "--gate", "3", "decisao registrada nesta demanda"], add.io);
+		const id = add.stdout().match(/Recorded journal entry (\S+)/)?.[1];
+		if (!id) throw new Error("expected an id in journal add's confirmation message");
+
+		const evidence = createCapturingIo(project.root);
+		const evidenceCode = await runCli(
+			["gate", "evidence", "--gate", "3", "--kind", "journal-entry", "--ref", id],
+			evidence.io,
+		);
+		expect(evidenceCode).toBe(0); // resolves now (existence) -- this is the closed seam
+
+		const fake = fakeTtyStreams();
+		const {
+			io: approveIo,
+			stdout: approveStdout,
+			stderr: approveStderr,
+		} = createCapturingIo(project.root, fake.streams);
+		const approvePromise = runCli(["gate", "approve", "--gate", "3"], approveIo);
+		fake.answer("y");
+		const approveCode = await approvePromise;
+
+		// Still refused -- a lone journal-entry (existence) never satisfies a MANDATORY gate the way a
+		// test-run (work) does (hasSufficientEvidenceForMandatoryGate's own ref.kind==="test-run" check,
+		// unchanged by this wiring closure -- see conductor-runtime/test/
+		// gate-evidence-journal-entry-not-sole.test.ts for the pure-function-level proof of this same rule).
+		expect(approveCode).not.toBe(0);
+		expect(approveStderr()).toMatch(/insufficient evidence/);
+		expect(approveStdout()).toBe("");
+	});
+});
+
+/**
+ * Gate 6 real-wiring loop-back (Grupo F "captura automática", ADR 0007 §7/D5, FR-14/FR-16,
+ * docs/adr/0007-fase6-diary-and-capture.md). `curateCaptureEvent`'s `gate-concluded` variant was
+ * implemented and unit-tested at Gate 5 (capture.test.ts) but `gate approve`/`reject` never called it
+ * from any production path before this wiring pass -- these tests drive the real `runCli` dispatcher
+ * (never `runGateApprove`/`runGateReject` called directly, which would bypass `runGateCommand`'s own
+ * composition-root wiring) and open a REAL `JournalReader` over an isolated scratch `homeDir`
+ * (`CliIO.homeDir`'s own doc comment) to confirm a genuine, minimized entry landed on disk.
+ */
+describe("conductor gate approve/reject -- gate-concluded diary capture (Gate 6 wiring closure, Grupo F)", () => {
+	let home: ScratchHome;
+
+	beforeEach(() => {
+		home = createScratchHome();
+	});
+
+	afterEach(() => {
+		home.cleanup();
+	});
+
+	it("gate approve (non-mandatory gate 1, real TTY confirms 'y') writes a real, minimized gate-concluded entry to the diary", async () => {
+		const start = createCapturingIo(project.root, undefined, home.dir);
+		const startCode = await runCli(["gate", "start", "1"], start.io);
+		expect(startCode).toBe(0);
+
+		const fake = fakeTtyStreams();
+		const approveIo = createCapturingIo(project.root, fake.streams, home.dir);
+		const approvePromise = runCli(["gate", "approve", "--gate", "1"], approveIo.io);
+		fake.answer("y");
+		const approveCode = await approvePromise;
+		expect(approveCode).toBe(0);
+
+		const { entriesPath } = resolveJournalContext(project.root, home.dir);
+		const entries = openJournalReader(entriesPath, "").readAll();
+		const captured = entries.filter((e) => e.source === "capture");
+		expect(captured.length).toBeGreaterThan(0);
+
+		const gateConcluded = captured.find((e) => e.text.includes("Gate 1 concluded"));
+		expect(gateConcluded).toBeDefined();
+		expect(gateConcluded?.gate).toBe(1);
+		expect(gateConcluded?.text).toMatch(/approved/);
+	});
+
+	it('gate reject writes a real gate-concluded entry carrying the rejection reason, curated as kind:"decision"', async () => {
+		const start = createCapturingIo(project.root, undefined, home.dir);
+		const startCode = await runCli(["gate", "start", "2"], start.io);
+		expect(startCode).toBe(0);
+
+		const rejectIo = createCapturingIo(project.root, undefined, home.dir);
+		const rejectCode = await runCli(
+			["gate", "reject", "--gate", "2", "--reason", "spec still ambiguous on edge case 4"],
+			rejectIo.io,
+		);
+		expect(rejectCode).toBe(0);
+
+		const { entriesPath } = resolveJournalContext(project.root, home.dir);
+		const entries = openJournalReader(entriesPath, "").readAll();
+		const gateConcluded = entries.find((e) => e.source === "capture" && e.text.includes("Gate 2 concluded"));
+
+		expect(gateConcluded).toBeDefined();
+		expect(gateConcluded?.gate).toBe(2);
+		expect(gateConcluded?.kind).toBe("decision"); // curateCaptureEvent's own /reject/ keyword match
+		expect(gateConcluded?.text).toContain("spec still ambiguous on edge case 4");
+	});
+
+	it("never touches this developer's real home directory -- writes land only under the scratch homeDir", async () => {
+		const start = createCapturingIo(project.root, undefined, home.dir);
+		await runCli(["gate", "start", "1"], start.io);
+		const fake = fakeTtyStreams();
+		const approveIo = createCapturingIo(project.root, fake.streams, home.dir);
+		const approvePromise = runCli(["gate", "approve", "--gate", "1"], approveIo.io);
+		fake.answer("y");
+		await approvePromise;
+
+		// The scratch homeDir now has a real diary/projects/<id>/entries.jsonl under it.
+		const { entriesPath } = resolveJournalContext(project.root, home.dir);
+		expect(entriesPath.startsWith(home.dir)).toBe(true);
+		expect(existsSync(entriesPath)).toBe(true);
 	});
 });

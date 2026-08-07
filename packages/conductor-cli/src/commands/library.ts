@@ -62,14 +62,14 @@
 import { realpathSync } from "node:fs";
 import { join } from "node:path";
 import {
-	computeProjectId,
 	type CorpusSearchFilters,
+	computeProjectId,
 	createOllamaEmbeddingClient,
-	DEFAULT_BASE_URL as OLLAMA_DEFAULT_BASE_URL,
 	detectRepoSuppliedLibraryArtifact,
 	type EmbeddingClient,
 	enrichQuery,
 	fuseAndRerank,
+	DEFAULT_BASE_URL as OLLAMA_DEFAULT_BASE_URL,
 	openCorpusStore,
 	openGroundingLedgerWriter,
 	type RetrievedPassage,
@@ -249,7 +249,10 @@ export interface RunLibrarySearchDeps {
  * embedding-backend failure (network/timeout/HTTP error) this function records the honest
  * `rag-unreachable` ledger event and then REJECTS -- explicitly, naming the backend and a corrective
  * action (FR-12) -- rather than degrading silently to a lexical-only result. */
-export async function runLibrarySearch(options: LibrarySearchOptions, deps: RunLibrarySearchDeps = {}): Promise<string> {
+export async function runLibrarySearch(
+	options: LibrarySearchOptions,
+	deps: RunLibrarySearchDeps = {},
+): Promise<string> {
 	if (options.codeAware) {
 		// FR-7: code-aware search is not implemented this round (code-index.ts has only ingestion-
 		// preparation helpers, no search primitive over the index yet -- see that file's own header).
