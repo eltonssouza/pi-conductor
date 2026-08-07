@@ -39,9 +39,7 @@ import { type EvidenceProvenanceInfo, hasSufficientEvidenceForMandatoryGate } fr
 
 describe("hasSufficientEvidenceForMandatoryGate -- a journal-entry is EXISTENCE, never TRABALHO, alone (D2/R40/T59)", () => {
 	it('returns false for evidence containing ONLY a "runtime-derived" journal-entry item, with no test-run anywhere in the list -- FAILS today: the current predicate accepts ANY runtime-derived item, including journal-entry', () => {
-		const evidence: EvidenceProvenanceInfo[] = [
-			{ provenance: "runtime-derived", ref: { kind: "journal-entry" } },
-		];
+		const evidence: EvidenceProvenanceInfo[] = [{ provenance: "runtime-derived", ref: { kind: "journal-entry" } }];
 
 		expect(hasSufficientEvidenceForMandatoryGate(evidence)).toBe(false);
 	});

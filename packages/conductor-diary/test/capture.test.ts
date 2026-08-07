@@ -21,7 +21,7 @@ function config(overrides: Partial<CaptureConfig> = {}): CaptureConfig {
 	return { enabled: true, captureHighRiskBodies: false, rawBufferLimit: 500, ...overrides };
 }
 
-describe("curateCaptureEvent -- every CaptureEvent variant maps to a curated JournalAddInput with source:\"capture\"", () => {
+describe('curateCaptureEvent -- every CaptureEvent variant maps to a curated JournalAddInput with source:"capture"', () => {
 	it('"turn-end" curates to a JournalAddInput with source:"capture" and a valid kind', () => {
 		const event: CaptureEvent = {
 			kind: "turn-end",

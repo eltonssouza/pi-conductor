@@ -16,7 +16,7 @@
 
 import { describe, expect, it } from "vitest";
 import type { JournalEntry } from "../src/journal-entry.ts";
-import { recall, type RecallContext, type RecalledEntry } from "../src/recall.ts";
+import { type RecallContext, type RecalledEntry, recall } from "../src/recall.ts";
 
 // Minimal fake JournalReader (journal-reader.ts is a parallel Gate 5 stream's file, not owned here) --
 // shape-compatible with the port recall.ts declares (readAll/readActive), the same "fake the

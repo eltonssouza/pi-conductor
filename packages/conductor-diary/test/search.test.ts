@@ -77,7 +77,10 @@ describe("search -- facet filters: gate / sessionId / since / until (structured,
 			entry({ id: "j-2", ts: "2026-08-01T00:00:00.000Z" }),
 			entry({ id: "j-3", ts: "2026-12-31T00:00:00.000Z" }),
 		];
-		const result = search({ since: "2026-07-01T00:00:00.000Z", until: "2026-09-01T00:00:00.000Z" }, fakeReader(entries));
+		const result = search(
+			{ since: "2026-07-01T00:00:00.000Z", until: "2026-09-01T00:00:00.000Z" },
+			fakeReader(entries),
+		);
 
 		expect(result.ok).toBe(true);
 		if (result.ok) expect(result.entries.map((e) => e.id)).toEqual(["j-2"]);
