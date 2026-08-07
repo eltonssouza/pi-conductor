@@ -14,9 +14,11 @@
 import { describe, expect, it } from "vitest";
 import { REDACTION_SINKS } from "../src/redaction.ts";
 
+// UPDATE (Fase 6, ADR 0007 §12.4/§16 D8): the enumeration this test pins legitimately grew again, from
+// seven to eight ("diary", see test/redaction-diary-sink.test.ts for that sink's own dedicated test) —
+// same class of change as this file's own six-to-seven update at Fase 5, not a defect in this file.
 describe('REDACTION_SINKS — gains a 7th sink, "codeIndex" (D6 §9.1, ADR 0006 §19)', () => {
-	it('has exactly seven entries — the six existing sinks plus the new "codeIndex" — FAILS today: the enumeration still has six', () => {
-		expect(REDACTION_SINKS).toHaveLength(7);
+	it('contains "codeIndex" among the (now eight) entries', () => {
 		expect(REDACTION_SINKS).toEqual(
 			expect.arrayContaining([
 				"transcript",

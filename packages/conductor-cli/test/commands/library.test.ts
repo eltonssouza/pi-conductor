@@ -23,7 +23,7 @@
  */
 import type { EmbeddingClient } from "@conductor/library";
 import { describe, expect, it } from "vitest";
-import { runLibrarySearch, type LibrarySearchOptions } from "../../src/commands/library.ts";
+import { type LibrarySearchOptions, runLibrarySearch } from "../../src/commands/library.ts";
 import { createScratchProject, type ScratchProject } from "../support/scratch.ts";
 
 function searchOptions(project: ScratchProject, overrides: Partial<LibrarySearchOptions> = {}): LibrarySearchOptions {

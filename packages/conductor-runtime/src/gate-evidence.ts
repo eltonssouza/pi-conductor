@@ -206,6 +206,6 @@ export interface EvidenceProvenanceInfo {
  * one bar.
  */
 export function hasSufficientEvidenceForMandatoryGate(evidence: readonly EvidenceProvenanceInfo[]): boolean {
-	if (evidence.some((item) => item.provenance === "runtime-derived")) return true;
+	if (evidence.some((item) => item.provenance === "runtime-derived" && item.ref.kind === "test-run")) return true;
 	return evidence.some((item) => item.provenance === "author-declared" && item.ref.kind === "git-commit");
 }

@@ -34,6 +34,7 @@ import {
 	type RoleRegistry,
 	readConfig,
 } from "@conductor/config";
+import { type CaptureEvent, curateCaptureEvent, openJournalWriter } from "@conductor/diary";
 import {
 	createConductorSession,
 	createSharedBudget,
@@ -72,6 +73,7 @@ import { buildStatusLine } from "./chat/status-line.ts";
 import { plainEditorTheme } from "./chat/theme.ts";
 import { replayTranscript, summarizeEntryForTranscript } from "./chat/transcript.ts";
 import { createConductorChatUiContext } from "./chat/tui-ui-context.ts";
+import { DEFAULT_CAPTURE_CONFIG, resolveJournalContext } from "./journal.ts";
 
 const DEFAULT_CHAT_GIT_TIMEOUT_MS = 5000;
 const EXIT_COMMANDS = new Set(["/exit", "/quit"]);
@@ -102,6 +104,16 @@ export interface ChatOptions {
 	terminal?: Terminal;
 	/** Injectable for tests; defaults to the real global ModelRuntime (ADR §5.2: no `.conductor/`-scoped auth). */
 	createModelRuntime?: () => Promise<ModelRuntime>;
+	/**
+	 * Gate 6 real-wiring loop-back (Grupo F "captura automática", ADR 0007 §7/D5, FR-14..18): a TEST
+	 * SEAM ONLY, threaded straight through to `resolveJournalContext(options.cwd, options.homeDir)` --
+	 * mirrors `journal.ts`'s own `Journal*Options.homeDir` convention exactly (that file's own header
+	 * has the full rationale: the Diary's log is per-MACHINE, `~/.conductor/diary/...`, never
+	 * per-workspace, so a test that never overrode this would write to this developer's REAL home
+	 * directory every time the suite runs). Production callers (`cli.ts`'s one `runChat(...)` call site)
+	 * never set it, so production behavior is exactly D4's per-machine home.
+	 */
+	homeDir?: string;
 }
 
 function describeError(error: unknown): string {
@@ -353,6 +365,48 @@ export async function runChat(options: ChatOptions): Promise<number> {
 		...buildRoleSessionOverrides(role),
 	});
 
+	// Gate 6 real-wiring loop-back (Grupo F "captura automática", ADR 0007 §7/D5, FR-14..18):
+	// `curateCaptureEvent` (packages/conductor-diary/src/capture.ts) was implemented and unit-tested at
+	// Gate 5 but never called from any production path -- this is that call site. Constructed ONCE per
+	// `conductor chat` invocation (never per-event): `openJournalWriter` itself does no I/O until
+	// `.append(...)` is actually called (journal-writer.ts's own header), so building it here is free
+	// when capture never fires (e.g. every fail-fast `prepareChat` error path above returns before this
+	// line is ever reached). Uses the SAME per-machine path `journal add`/`gate approve` write to
+	// (`resolveJournalContext`, D4/§6.1) -- one diary, one writer factory, never a second one reinvented
+	// here.
+	const { entriesPath } = resolveJournalContext(options.cwd, options.homeDir);
+	const journalWriter = openJournalWriter(entriesPath);
+
+	/**
+	 * Best-effort automatic capture (FR-16/BR-6: "nunca bloqueia o turno"). `curateCaptureEvent` is a
+	 * PURE, synchronous function and `JournalWriter.append` is itself synchronous, local-fs I/O
+	 * (D5/§7.3: "a escrita local ... é síncrona e rápida" -- only a hypothetical REMOTE sync, a declared
+	 * non-goal this round, would need async treatment) -- so, unlike `scheduleStatusRefresh` below
+	 * (which genuinely defers an async `git` subprocess call and must track/await the in-flight
+	 * promise), there is no async operation here to hide behind a `Promise`. A plain synchronous
+	 * try/catch already satisfies "never blocks, never lets a write failure crash a live session" in
+	 * full: nothing async is started, so nothing can be left dangling at shutdown either. Named
+	 * `schedule*` to mirror `scheduleStatusRefresh`'s call-site shape (fire-and-forget from an event
+	 * handler), not because it is itself deferred.
+	 */
+	function scheduleCaptureEvent(event: CaptureEvent): void {
+		try {
+			const curated = curateCaptureEvent(event, DEFAULT_CAPTURE_CONFIG);
+			if (curated !== null) {
+				journalWriter.append(curated);
+			}
+		} catch (error) {
+			// Disk full, permission error, or any other genuine I/O failure: capture is best-effort
+			// (FR-16) -- the SESSION degrades silently (never crashes/blocks over this, exactly like
+			// scheduleStatusRefresh's own `.catch(() => {})` below), but the FAILURE itself is not left
+			// completely invisible (quality-baseline category 6, observability): a one-line note to
+			// stderr, never the transcript (so it does not clutter the interactive session), carrying only
+			// the event kind and the error message -- never any captured `summary`/`text` content, so a
+			// diagnostic line can never itself become the T61 leak it is warning about.
+			options.stderr.write(`[conductor chat] automatic capture (${event.kind}) failed: ${describeError(error)}\n`);
+		}
+	}
+
 	const terminal = options.terminal ?? new ProcessTerminal();
 	const tui = new TuiMainScreen(terminal);
 	const editor = new Editor(tui, plainEditorTheme);
@@ -419,6 +473,11 @@ export async function runChat(options: ChatOptions): Promise<number> {
 		resolveExit();
 	}
 
+	// Gate 6 real-wiring loop-back (Grupo F, FR-14): a minimal, purely-structural counter feeding the
+	// turn-end capture summary below -- see that branch's own comment for why the summary never quotes
+	// any actual message/tool-result content.
+	let toolCallsThisTurn = 0;
+
 	const unsubscribe = conductorSession.session.subscribe((event) => {
 		if (event.type === "message_end" && event.message.role === "assistant") {
 			const syntheticEntry: SessionEntry = {
@@ -435,8 +494,41 @@ export async function runChat(options: ChatOptions): Promise<number> {
 		} else if (event.type === "tool_execution_start") {
 			transcript.addChild(new Text(`[running tool: ${event.toolName}]`));
 			tui.requestRender();
+			toolCallsThisTurn += 1;
 		} else if (event.type === "agent_end" || event.type === "agent_settled") {
 			scheduleStatusRefresh();
+			// FR-14/FR-16 (turn-end capture): captured on `agent_settled` ONLY, not `agent_end` -- both
+			// fire for every real run (agent-session.ts's own `_emitAgentSettled` runs after `agent_end`
+			// and its listeners settle), so capturing on both would write two near-duplicate diary
+			// entries per turn. `agent_end` alone also does not mean the turn is truly over: its own
+			// `willRetry` flag (agent-session.ts) can be `true` when a retry is about to happen, whereas
+			// `agent_settled` fires only once the agent is genuinely idle -- the better match for the
+			// ADR's own wording, "um turno termina DE VEZ" (D5/§7.1).
+			if (event.type === "agent_settled") {
+				// FR-17 (a subagent-labeled `agent-settled`, curated as `kind:"agent-settled"` instead of
+				// `kind:"turn-end"`) is NOT reachable from THIS call site, and this is a deliberate,
+				// investigated finding rather than an oversight: `conductorSession.session` here is
+				// ALWAYS the top-level orchestrator session for a real `conductor chat` invocation.
+				// Verified by reading `@conductor/runtime`'s `tools/task.ts`: a `task`-tool delegation
+				// child is constructed by `createGovernedChildSessionSpawner` calling the Pi SDK's
+				// `createAgentSession` DIRECTLY (that file's own header: "the ONE other call site...
+				// permitted to call the Pi SDK's createAgentSession for a delegation child"), which
+				// bypasses `createConductorSession`/`runChat` entirely -- and `CreateConductorSessionOptions`
+				// (session.ts) has no `parentSessionId`/"is a subagent" field for this session to read even
+				// if it wanted to. So every `agent_settled` this callback ever observes describes THIS
+				// session's own turn, never a subagent's, and is curated as `kind:"turn-end"`
+				// unconditionally. A real FR-17 fix (labeling a SUBAGENT's own settle event with its
+				// parent) belongs at the CHILD's actual composition root -- `createGovernedChildSessionSpawner`
+				// in tools/task.ts, which does not subscribe to the child session's own events or touch the
+				// diary at all today -- a separate, larger follow-up outside this task's 2-point wiring
+				// scope, flagged here rather than silently assumed solved.
+				scheduleCaptureEvent({
+					kind: "turn-end",
+					sessionId: sessionManager.getSessionId(),
+					summary: `turn concluded (${toolCallsThisTurn} tool call${toolCallsThisTurn === 1 ? "" : "s"})`,
+				});
+				toolCallsThisTurn = 0;
+			}
 		}
 	});
 
@@ -483,6 +575,18 @@ export async function runChat(options: ChatOptions): Promise<number> {
 
 	unsubscribe();
 	await pendingStatusRefresh; // let any in-flight `git` subprocess finish before we dispose/return
+
+	// FR-14/D5 (session-shutdown capture): the session is genuinely ending here (requestExit() already
+	// stopped the TUI and resolved `exited`) -- a checkpoint, deterministic like `curateCaptureEvent`'s
+	// own `session-shutdown` case (no keyword inference needed, capture.ts's own header). The summary is
+	// a token-count METRIC, never any message content -- the same structural-only minimization
+	// discipline the turn-end capture above applies (T61).
+	scheduleCaptureEvent({
+		kind: "session-shutdown",
+		sessionId: sessionManager.getSessionId(),
+		summary: `session ended (${conductorSession.session.getSessionStats().tokens.total} total tokens used)`,
+	});
+
 	await terminal.drainInput();
 	conductorSession.dispose();
 

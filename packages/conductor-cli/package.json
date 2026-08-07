@@ -14,6 +14,7 @@
 	},
 	"dependencies": {
 		"@conductor/config": "0.0.0",
+		"@conductor/diary": "0.0.0",
 		"@conductor/library": "0.0.0",
 		"@conductor/project": "0.0.0",
 		"@conductor/runtime": "0.0.0",

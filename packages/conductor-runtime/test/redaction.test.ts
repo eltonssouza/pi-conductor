@@ -41,9 +41,11 @@ import { sanitizeForTerminal } from "../src/terminal-sanitize.ts";
 const FAKE_KEY = "sk-ant-api03-FAKEFAKEFAKEFAKEFAKEFAKEFAKE";
 const GIT_SHA = "4f3a9c1e7b2d6805f9e1c3a7b5d9f1032468acef"; // 40-char hex -- FR-15's exact false-positive shape
 
-describe("REDACTION_SINKS — the closed sink enumeration (GAP-C, reopened by Fase 5 ADR 0006 D6)", () => {
-	it("names exactly the seven sinks ADR §6.2/ADR 0006 D6 enumerates, no more, no fewer", () => {
-		expect(REDACTION_SINKS).toHaveLength(7);
+// UPDATE (Fase 6, ADR 0007 §12.4/§16 D8): reopened again, from seven to eight sinks, adding "diary" —
+// same class of change as this file's own note above already documents for the six-to-seven step.
+describe("REDACTION_SINKS — the closed sink enumeration (GAP-C, reopened by Fase 5 ADR 0006 D6, Fase 6 ADR 0007 D8)", () => {
+	it("names exactly the eight sinks ADR §6.2/ADR 0006 D6/ADR 0007 D8 enumerate, no more, no fewer", () => {
+		expect(REDACTION_SINKS).toHaveLength(8);
 		expect(REDACTION_SINKS).toEqual(
 			expect.arrayContaining([
 				"transcript",
@@ -53,6 +55,7 @@ describe("REDACTION_SINKS — the closed sink enumeration (GAP-C, reopened by Fa
 				"rethrownError",
 				"sessionExport",
 				"codeIndex",
+				"diary",
 			]),
 		);
 	});

@@ -10,3 +10,9 @@ export {
 	type SecretMatchOptions,
 	type SecretSpan,
 } from "./matchers.ts";
+export {
+	deepRedact,
+	type RedactionErrorOptions,
+	redactSecretsOrPlaceholder,
+	SECRET_SCAN_FAILED_PLACEHOLDER,
+} from "./deep-redact.ts";

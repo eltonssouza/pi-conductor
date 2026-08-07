@@ -14,10 +14,11 @@
  * (`INSERT INTO chunk_fts(chunk_fts) VALUES('rebuild')`) after seeding, the standard SQLite FTS5
  * mechanism for syncing an external-content index from its content table.
  */
-import { DatabaseSync } from "node:sqlite";
+
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { openCorpusStore } from "../src/corpus-store.ts";
 

@@ -12,15 +12,18 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { writeConfig } from "@conductor/config";
+import { openJournalReader } from "@conductor/diary";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { ChatRole } from "../../src/commands/chat/role-resolution.ts";
 import { resolveConductorAgentDir, resolveConductorSessionsDir } from "../../src/commands/chat/session-resolution.ts";
 import { buildRoleSessionOverrides, runChat } from "../../src/commands/chat.ts";
+import { resolveJournalContext } from "../../src/commands/journal.ts";
 import { registerFakeModel } from "../support/fake-model.ts";
 import { FakeTerminal } from "../support/fake-terminal.ts";
 import { createCapturingIo } from "../support/io.ts";
 import { createScratchProject, type ScratchProject } from "../support/scratch.ts";
+import { createScratchHome, type ScratchHome } from "../support/scratch-home.ts";
 
 // Generous default: these tests spin up a REAL ModelRuntime + AgentSession + git subprocess calls,
 // which slow down noticeably when the whole package's suite runs its many other real-session tests
@@ -578,4 +581,122 @@ describe("runChat -- task delegation reachable at the real command entry point (
 		terminal.sendInput("\r");
 		expect(await runPromise).toBe(0);
 	}, 60_000);
+});
+
+/**
+ * Gate 6 real-wiring loop-back (Grupo F "captura automática", the FASE'S OWN NAME -- ADR 0007 §7/D5,
+ * FR-14..18, docs/adr/0007-fase6-diary-and-capture.md). `curateCaptureEvent`
+ * (packages/conductor-diary/src/capture.ts) was implemented and unit-tested at Gate 5 but never called
+ * from any production path before this wiring pass -- these tests drive the literal, unmodified
+ * `runChat` entry point (the exact function `conductor chat` invokes) and then open a REAL
+ * `JournalReader` over the SAME scratch `homeDir` to confirm a genuine entry landed on disk, never a
+ * mock of `curateCaptureEvent`/`openJournalWriter` themselves (those are already covered in isolation by
+ * `packages/conductor-diary/test/capture.test.ts`; what was missing, and what this proves, is that
+ * `chat.ts` actually CALLS them).
+ *
+ * `homeDir` is always the scratch dir from `createScratchHome()` (see `ChatOptions.homeDir`'s own doc
+ * comment) -- this suite never touches this developer's real `~/.conductor/diary`.
+ */
+describe("runChat -- automatic capture wiring closure (Grupo F, ADR 0007 D5/FR-14..18)", () => {
+	let home: ScratchHome;
+
+	beforeEach(() => {
+		home = createScratchHome();
+	});
+
+	afterEach(() => {
+		home.cleanup();
+	});
+
+	it("captures a turn-end diary entry after a real turn settles, and a session-shutdown entry on " +
+		"exit -- both minimized (T61: never the assistant's own verbatim reply text)", async () => {
+		writeValidConfig(project.root);
+		const terminal = new FakeTerminal();
+		const { io } = createCapturingIo(project.root);
+
+		// A long, distinctive assistant reply -- if minimization were broken (the captured summary
+		// echoing message content instead of a structural "turn concluded" metric), it would show up
+		// verbatim in the diary; this proves it never does.
+		const longAssistantReply =
+			"This sentence is deliberately long and distinctive so a minimization regression would be " +
+			"obvious: CAPTURE-MINIMIZATION-CANARY-f3a9. ".repeat(4);
+
+		const runPromise = runChat({
+			cwd: project.root,
+			args: [],
+			stdout: io.stdout,
+			stderr: io.stderr,
+			terminal,
+			homeDir: home.dir,
+			createModelRuntime: async () => {
+				const runtime = await ModelRuntime.create({
+					authPath: join(project.root, ".conductor", "auth.json"),
+					modelsPath: join(project.root, ".conductor", "models.json"),
+					allowModelNetwork: false,
+				});
+				registerFakeModel(runtime, "conductor-fake", [{ text: longAssistantReply }]);
+				return runtime;
+			},
+		});
+
+		await waitUntil(() => terminal.allWrites().includes("conductor-fake/conductor-cli-fake-1"));
+		terminal.sendInput("hi there");
+		terminal.sendInput("\r");
+		await waitUntil(() => terminal.allWrites().includes("CAPTURE-MINIMIZATION-CANARY-f3a9"));
+
+		// Turn-end capture is synchronous and fires as part of the SAME event chain that renders the
+		// assistant's reply (agent_settled, after message_end) -- by the time the terminal shows the
+		// reply, the diary write has already happened, before the session is even asked to exit. This
+		// proves turn-end capture specifically, independent of session-shutdown capture below.
+		const { entriesPath } = resolveJournalContext(project.root, home.dir);
+		const afterTurn = openJournalReader(entriesPath, "").readAll();
+		expect(afterTurn.length).toBeGreaterThan(0);
+		const turnEndEntry = afterTurn.find((e) => e.source === "capture" && e.text.includes("turn concluded"));
+		expect(turnEndEntry).toBeDefined();
+		expect(turnEndEntry?.gate).toBeUndefined(); // no --gate context in a chat session (documented choice)
+
+		// T61 (minimization): NO captured entry ever contains the assistant's own verbatim reply text.
+		for (const entry of afterTurn) {
+			expect(entry.text).not.toContain("CAPTURE-MINIMIZATION-CANARY-f3a9");
+			expect(entry.text.length).toBeLessThan(longAssistantReply.length);
+		}
+
+		terminal.sendInput("/exit");
+		terminal.sendInput("\r");
+		const exitCode = await runPromise;
+		expect(exitCode).toBe(0);
+
+		// Session-shutdown capture: a NEW entry appears after exit, beyond what turn-end already wrote.
+		const afterShutdown = openJournalReader(entriesPath, "").readAll();
+		expect(afterShutdown.length).toBeGreaterThan(afterTurn.length);
+		const shutdownEntry = afterShutdown.find((e) => e.source === "capture" && e.text.includes("session ended"));
+		expect(shutdownEntry).toBeDefined();
+		expect(shutdownEntry?.kind).toBe("checkpoint");
+
+		// Every captured entry this test produced is real, on-disk, source:"capture" -- never
+		// source:"manual"/"document" (D3/D5's own required distinction).
+		for (const entry of afterShutdown) {
+			if (entry.text.includes("turn concluded") || entry.text.includes("session ended")) {
+				expect(entry.source).toBe("capture");
+			}
+		}
+	}, 45_000);
+
+	it("captures nothing when the session never reaches a settled turn (fail-fast paths stay silent)", async () => {
+		// No .conductor/config.json written -- runChat fails fast, before any session/journalWriter is
+		// even constructed. Nothing should appear on disk at all (the entries.jsonl file is never even
+		// created -- openJournalReader's own fail-closed "missing file -> []" contract covers this).
+		const { io } = createCapturingIo(project.root);
+		const code = await runChat({
+			cwd: project.root,
+			args: [],
+			stdout: io.stdout,
+			stderr: io.stderr,
+			homeDir: home.dir,
+		});
+		expect(code).toBe(1);
+
+		const { entriesPath } = resolveJournalContext(project.root, home.dir);
+		expect(openJournalReader(entriesPath, "").readAll()).toEqual([]);
+	});
 });

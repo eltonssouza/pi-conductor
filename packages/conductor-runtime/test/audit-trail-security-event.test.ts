@@ -74,7 +74,8 @@ describe("appendSecurityEvent (R37: durable, append-only security deny event)", 
 		const dir = scratchDir();
 		const auditPath = join(dir, ".conductor", "audit.jsonl");
 		// A path that embeds a secret-shaped token — defense in depth against a future mispopulate.
-		const secrety = "/repo/.conductor/library/AKIAIOSFODNN7EXAMPLE/aws_secret_access_key=wJalrXUtnFEMI0000000000000000000000000000";
+		const secrety =
+			"/repo/.conductor/library/AKIAIOSFODNN7EXAMPLE/aws_secret_access_key=wJalrXUtnFEMI0000000000000000000000000000";
 		appendSecurityEvent(auditPath, {
 			timestamp: "2026-08-07T10:00:00.000Z",
 			event: "repo-supplied-library-artifact",
