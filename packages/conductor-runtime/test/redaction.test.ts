@@ -21,6 +21,12 @@
  * SECRET_SCAN_FAILED_PLACEHOLDER is not forced via a mocked failure here; it is asserted only as a
  * literal-constant check plus a black-box "never throws" robustness sweep, which does not require
  * injecting a fault into a real, always-well-behaved collaborator.
+ *
+ * UPDATE (Fase 5, ADR 0006 §19 D6): the closed enumeration below was six sinks at Fase 2 (GAP-C) --
+ * Fase 5 legitimately reopens it to SEVEN, adding "codeIndex" (redaction runs before chunk/embed/
+ * upsert, D6 §9.1; see test/redaction-code-index-sink.test.ts for that sink's own dedicated test).
+ * This is the same class of change as `Decision.kind` gaining `"rejection"` (D4 §6.3): a prior fase's
+ * closed contract, extended by a later fase's own ADR, not a defect in this file.
  */
 
 import { describe, expect, it } from "vitest";
@@ -35,9 +41,9 @@ import { sanitizeForTerminal } from "../src/terminal-sanitize.ts";
 const FAKE_KEY = "sk-ant-api03-FAKEFAKEFAKEFAKEFAKEFAKEFAKE";
 const GIT_SHA = "4f3a9c1e7b2d6805f9e1c3a7b5d9f1032468acef"; // 40-char hex -- FR-15's exact false-positive shape
 
-describe("REDACTION_SINKS — the closed sink enumeration (GAP-C)", () => {
-	it("names exactly the six sinks ADR §6.2 enumerates, no more, no fewer", () => {
-		expect(REDACTION_SINKS).toHaveLength(6);
+describe("REDACTION_SINKS — the closed sink enumeration (GAP-C, reopened by Fase 5 ADR 0006 D6)", () => {
+	it("names exactly the seven sinks ADR §6.2/ADR 0006 D6 enumerates, no more, no fewer", () => {
+		expect(REDACTION_SINKS).toHaveLength(7);
 		expect(REDACTION_SINKS).toEqual(
 			expect.arrayContaining([
 				"transcript",
@@ -46,6 +52,7 @@ describe("REDACTION_SINKS — the closed sink enumeration (GAP-C)", () => {
 				"auditTrail",
 				"rethrownError",
 				"sessionExport",
+				"codeIndex",
 			]),
 		);
 	});

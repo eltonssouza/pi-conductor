@@ -18,7 +18,7 @@
  */
 
 import { join } from "node:path";
-import { TOTAL_FLOW_GATES, type ResolveEvidenceRefContext } from "@conductor/runtime";
+import { type ResolveEvidenceRefContext, TOTAL_FLOW_GATES } from "@conductor/runtime";
 import { runChat } from "./commands/chat.ts";
 import { runConfigGet, runConfigSet, runConfigShow } from "./commands/config.ts";
 import { doctorExitCode, formatDoctorReport, runDoctor } from "./commands/doctor.ts";
@@ -35,6 +35,7 @@ import {
 } from "./commands/gate.ts";
 import { createPersistedGateStateStore, resolveGateGitContext } from "./commands/gate-store.ts";
 import { describeInitOutcome, initExitCode, runInit } from "./commands/init.ts";
+import { runLibraryCommand } from "./commands/library.ts";
 import { formatRolesListReport, runRolesList } from "./commands/roles.ts";
 import { formatSkillsListReport, runSkillsList } from "./commands/skills.ts";
 import { gitCommitExistsSync } from "./git-status.ts";
@@ -80,6 +81,13 @@ Usage:
   conductor gate approve [--gate <N>] [--demand <id>]
   conductor gate reject  --reason "..." [--gate <N>] [--demand <id>]
   conductor gate calibrate --collapse <N,M,...> [--demand <id>]
+  conductor library status [--json]
+  conductor library search "<question>" [--gate <N>] [--role <role>]
+                          [--category <c>] [--tech <t>] [--version <v>]
+                          [-k <N>] [--lexical-only] [--code-aware]
+                          [--rerank cross-encoder] [--json]
+  conductor library ingest
+  conductor library update
   conductor --help
 
 See docs/adr/0002-fase1-cli-foundation.md for the full command contract,
@@ -530,6 +538,8 @@ export async function runCli(argv: string[], io: CliIO): Promise<number> {
 				return await runSkillsCommand(rest, io);
 			case "gate":
 				return await runGateCommand(rest, io);
+			case "library":
+				return await runLibraryCommand(rest, io);
 			case "chat":
 				return await runChat({ cwd: io.cwd, args: rest, stdout: io.stdout, stderr: io.stderr });
 			case "--help":

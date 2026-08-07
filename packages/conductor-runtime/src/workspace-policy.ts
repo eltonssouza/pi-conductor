@@ -136,6 +136,11 @@ export function defaultProtectedPaths(workspaceRoot?: string): string[] {
 		join(home, ".docker"),
 		join(home, ".config"),
 		join(home, ".conductor", "credentials"),
+		// D9 (ADR 0006 §12, Fase 5): the corpus, per-project code index, and grounding ledger must be as
+		// unwritable by write/edit/bash as the audit trail and GateState store already are -- the same
+		// confused-deputy reasoning as every other entry in this list, applied to the whole
+		// ~/.conductor/library subtree (corpus.sqlite, projects/<projectId>/{code.sqlite,events.jsonl}).
+		join(home, ".conductor", "library"),
 	];
 	if (workspaceRoot) {
 		paths.push(

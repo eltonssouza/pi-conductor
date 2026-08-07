@@ -25,7 +25,12 @@ import {
 } from "../src/gate-approval.ts";
 import { createTestUiContext } from "./support/test-ui.ts";
 
-const META: ApprovalMeta = { gate: 5, demandId: "demand-1", branch: "feature/fase4-gates-e-evidencias", source: "session-abc" };
+const META: ApprovalMeta = {
+	gate: 5,
+	demandId: "demand-1",
+	branch: "feature/fase4-gates-e-evidencias",
+	source: "session-abc",
+};
 
 describe('mintHumanApproval (R22: the sole producer of method:"human")', () => {
 	it("mints a human Approval carrying the caller's gate/demandId/branch/source when confirmResult is true", () => {
