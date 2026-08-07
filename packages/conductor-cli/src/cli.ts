@@ -18,6 +18,7 @@
  */
 
 import { join } from "node:path";
+import { openJournalReader, readRecordedJournalEntryIds } from "@conductor/diary";
 import { type ResolveEvidenceRefContext, TOTAL_FLOW_GATES } from "@conductor/runtime";
 import { runChat } from "./commands/chat.ts";
 import { runConfigGet, runConfigSet, runConfigShow } from "./commands/config.ts";
@@ -35,6 +36,7 @@ import {
 } from "./commands/gate.ts";
 import { createPersistedGateStateStore, resolveGateGitContext } from "./commands/gate-store.ts";
 import { describeInitOutcome, initExitCode, runInit } from "./commands/init.ts";
+import { resolveJournalContext, runJournalCommand } from "./commands/journal.ts";
 import { runLibraryCommand } from "./commands/library.ts";
 import { formatRolesListReport, runRolesList } from "./commands/roles.ts";
 import { formatSkillsListReport, runSkillsList } from "./commands/skills.ts";
@@ -88,6 +90,12 @@ Usage:
                           [--rerank cross-encoder] [--json]
   conductor library ingest
   conductor library update
+  conductor journal add     --kind <k> [--gate <N>] [--session <id>] "<text>"
+  conductor journal recall  "<question>" [--gate <N>] [--role <role>]
+  conductor journal search  [--kind k1,k2] [--gate <N>] [--session <id>]
+                          [--since <date>] [--until <date>] [--text "<s>"]
+  conductor journal digest  [--session <id>] [--out <path.md>]
+  conductor journal supersede --id <id> --mode <update|forget|invalidate> "<text>"
   conductor --help
 
 See docs/adr/0002-fase1-cli-foundation.md for the full command contract,
@@ -305,10 +313,29 @@ const DEFAULT_DEMAND_ID = "default";
  * `evidenceContext` is `gate evidence`'s own `resolveEvidenceRef` collaborator bundle (R25/T41,
  * `commands/gate.ts`'s `runGateEvidence`): `repoRoot`/`workspaceRoot` are `io.cwd` (this CLI's own
  * established convention -- no upward `.git` walk, same as `init.ts`/`doctor.ts`); `gitCommitExists` is
- * the real `git rev-parse --verify` check (`git-status.ts`); the two runtime-recorded id sets are
- * HONESTLY EMPTY -- no durable test-run/journal-entry ledger exists yet in this codebase (Fase 6 scope,
- * per `gate-evidence.ts`'s own header), so `--kind test-run`/`--kind journal-entry` refs correctly
- * refuse fail-closed today rather than pretending to have observed an id nothing actually recorded.
+ * the real `git rev-parse --verify` check (`git-status.ts`).
+ *
+ * `runtimeRecordedJournalEntryIds` (Gate 6 wiring closure, Fase 6 "Diary e captura automática" -- ADR
+ * 0007 §4.3/D2/G12/FR-25): now genuinely POPULATED, reusing `commands/journal.ts`'s own
+ * `resolveJournalContext(io.cwd)` (the exact same path `journal add`/`journal supersede` write to) to
+ * open a real `JournalReader` and read every id it has ever recorded via `@conductor/diary`'s
+ * `readRecordedJournalEntryIds`. No extra try/catch is needed here: `openJournalReader`/
+ * `readRecordedJournalEntryIds` are fail-closed BY CONTRACT (R44/T63 -- a missing/unreadable/corrupted
+ * diary collapses to an empty `Set`, never throws), so a project with no diary yet degrades to exactly
+ * the prior "honestly empty" behavior, and a corrupted diary can only make a `journal-entry` ref
+ * resolve LESS often, never more (deleting the diary revokes evidence, it never fabricates it). This
+ * closes the seam `gate-evidence.ts`'s own header named "a REAL source once wired" -- a `--kind
+ * journal-entry` ref now resolves for a genuinely-recorded id instead of always refusing. It does NOT
+ * relax R40/D2 (`hasSufficientEvidenceForMandatoryGate` still requires `ref.kind === "test-run"` on its
+ * runtime-derived branch, unchanged): a resolved journal-entry proves only that the runtime observed a
+ * WRITE (existence), never that it observed WORK, so it still cannot close a mandatory gate alone --
+ * see `test/commands/gate-cli.acceptance.test.ts`'s own "closes the D2/G12/FR-25 seam" section for the
+ * end-to-end proof of both halves together.
+ *
+ * `runtimeRecordedTestRunIds` remains HONESTLY EMPTY -- a durable test-run ledger is a DIFFERENT,
+ * still-unbuilt scope (not this fase's; confirmed by re-reading this file's own prior comment and
+ * `gate-evidence.ts`'s header before touching this line), so `--kind test-run` refs correctly keep
+ * refusing fail-closed rather than pretending to have observed an id nothing actually recorded.
  */
 async function runGateCommand(args: string[], io: CliIO): Promise<number> {
 	const [sub, ...rest] = args;
@@ -318,12 +345,14 @@ async function runGateCommand(args: string[], io: CliIO): Promise<number> {
 		repoId: gitContext.repoId,
 		branch: gitContext.branch,
 	});
+	const { entriesPath, projectId } = resolveJournalContext(io.cwd);
+	const journalReader = openJournalReader(entriesPath, projectId);
 	const evidenceContext: ResolveEvidenceRefContext = {
 		repoRoot: io.cwd,
 		workspaceRoot: io.cwd,
 		gitCommitExists: gitCommitExistsSync,
 		runtimeRecordedTestRunIds: new Set(),
-		runtimeRecordedJournalEntryIds: new Set(),
+		runtimeRecordedJournalEntryIds: readRecordedJournalEntryIds(journalReader),
 	};
 
 	if (sub === "status") {
@@ -540,6 +569,8 @@ export async function runCli(argv: string[], io: CliIO): Promise<number> {
 				return await runGateCommand(rest, io);
 			case "library":
 				return await runLibraryCommand(rest, io);
+			case "journal":
+				return await runJournalCommand(rest, io);
 			case "chat":
 				return await runChat({ cwd: io.cwd, args: rest, stdout: io.stdout, stderr: io.stderr });
 			case "--help":

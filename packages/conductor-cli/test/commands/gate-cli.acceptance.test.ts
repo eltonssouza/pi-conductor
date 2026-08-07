@@ -465,3 +465,105 @@ describe("conductor gate approve -- REAL TTY confirmation channel (Gate 6 loop-b
 		expect(approveStdout()).toBe("");
 	});
 });
+
+// ---------------------------------------------------------------------------------------------------
+// GATE 6 WIRING CLOSURE (Fase 6, D2/G12/FR-25, ADR 0007 §4.3): `runGateCommand`'s `evidenceContext`
+// used to pass `runtimeRecordedJournalEntryIds: new Set()` -- an honest, permanently-empty placeholder
+// (no durable journal ledger existed yet, per `gate-evidence.ts`'s own header). Now that
+// `@conductor/diary` is real (Fase 6), `runGateCommand` populates that set from the SAME per-machine
+// diary `conductor journal add` writes to (`commands/journal.ts`'s own `resolveJournalContext`, reused
+// by both) -- the seam `gate-evidence.ts` documented as "a REAL source once wired" now genuinely has a
+// producer. R40/D2 (already closed by a prior pass, `conductor-runtime/test/
+// gate-evidence-journal-entry-not-sole.test.ts`) is NOT reopened here: a resolved journal-entry proves
+// only that the runtime observed a WRITE (existence) -- `hasSufficientEvidenceForMandatoryGate` still
+// requires `ref.kind === "test-run"` on its runtime-derived branch, unchanged. This section proves BOTH
+// halves together, end-to-end, through the real `runCli` dispatch (never the store/resolveEvidenceRef
+// called directly, which the pure-function-level test above already covers).
+//
+// TEST HYGIENE NOTE (same trade-off `journal.test.ts`'s own header documents): `journal add` here goes
+// through the real `runCli` dispatcher, which has no `homeDir` override at the CLI-IO level -- it
+// writes to this machine's REAL `~/.conductor/diary/projects/<projectId>/entries.jsonl`. This is safe
+// and leaves no meaningful trace: `project.root` is always a FRESH `createScratchProject()` temp
+// directory (a `beforeEach` per this file's own top), so the resulting `projectId` (a hash of that
+// unique path) has never been written to before and will never collide with a real project's own
+// diary. Proving `runGateCommand`'s OWN composition-root wiring (as opposed to `@conductor/diary`'s
+// already-tested primitives, or `journal.ts`'s own already-tested `run*` functions) requires driving it
+// through the real, unmocked `runCli` -- the same reasoning `gate-cli.acceptance.test.ts`'s other
+// "REAL persisted store"/"REAL git repository" sections above already apply to their own collaborators.
+// ---------------------------------------------------------------------------------------------------
+describe("conductor gate evidence --kind journal-entry -- closes the D2/G12/FR-25 seam (Fase 6 wiring closure)", () => {
+	it("a real id minted by `journal add` now RESOLVES as evidence (previously refused: cli.ts's evidenceContext hardcoded an empty runtimeRecordedJournalEntryIds Set)", async () => {
+		// FR-6 (a store-level rule, unrelated to this test's own concern): evidence can only attach to a
+		// gate already started for this demand -- `gate start 3` first, the same precondition
+		// `gate-cli.acceptance.test.ts`'s own "R40/D2 non-regression" test below already satisfies.
+		const start = createCapturingIo(project.root);
+		const startCode = await runCli(["gate", "start", "3"], start.io);
+		expect(startCode).toBe(0);
+
+		const add = createCapturingIo(project.root);
+		const addCode = await runCli(
+			["journal", "add", "--kind", "decision", "--gate", "3", "usa JSONL append-only como fonte de verdade"],
+			add.io,
+		);
+		expect(addCode).toBe(0);
+		const id = add.stdout().match(/Recorded journal entry (\S+)/)?.[1];
+		expect(id).toBeTruthy();
+		if (!id) throw new Error("expected an id in journal add's confirmation message");
+
+		const evidence = createCapturingIo(project.root);
+		const evidenceCode = await runCli(
+			["gate", "evidence", "--gate", "3", "--kind", "journal-entry", "--ref", id],
+			evidence.io,
+		);
+
+		expect(evidenceCode).toBe(0);
+		expect(evidence.stdout()).toMatch(/evidence/i);
+	});
+
+	it("an id the runtime never recorded still refuses fail-closed (R25/T41 preserved -- populating the set for REAL ids never widens what an unrecorded id can do)", async () => {
+		const evidence = createCapturingIo(project.root);
+		const evidenceCode = await runCli(
+			["gate", "evidence", "--gate", "3", "--kind", "journal-entry", "--ref", "never-recorded-id"],
+			evidence.io,
+		);
+
+		expect(evidenceCode).not.toBe(0);
+		expect(evidence.stderr()).toMatch(/was never recorded/);
+	});
+
+	it("R40/D2 non-regression: even with a REAL, resolving journal-entry ref, a MANDATORY gate still refuses to approve -- existence (a write) is not work (a test-run)", async () => {
+		const start = createCapturingIo(project.root);
+		const startCode = await runCli(["gate", "start", "3"], start.io);
+		expect(startCode).toBe(0);
+
+		const add = createCapturingIo(project.root);
+		await runCli(["journal", "add", "--kind", "decision", "--gate", "3", "decisao registrada nesta demanda"], add.io);
+		const id = add.stdout().match(/Recorded journal entry (\S+)/)?.[1];
+		if (!id) throw new Error("expected an id in journal add's confirmation message");
+
+		const evidence = createCapturingIo(project.root);
+		const evidenceCode = await runCli(
+			["gate", "evidence", "--gate", "3", "--kind", "journal-entry", "--ref", id],
+			evidence.io,
+		);
+		expect(evidenceCode).toBe(0); // resolves now (existence) -- this is the closed seam
+
+		const fake = fakeTtyStreams();
+		const {
+			io: approveIo,
+			stdout: approveStdout,
+			stderr: approveStderr,
+		} = createCapturingIo(project.root, fake.streams);
+		const approvePromise = runCli(["gate", "approve", "--gate", "3"], approveIo);
+		fake.answer("y");
+		const approveCode = await approvePromise;
+
+		// Still refused -- a lone journal-entry (existence) never satisfies a MANDATORY gate the way a
+		// test-run (work) does (hasSufficientEvidenceForMandatoryGate's own ref.kind==="test-run" check,
+		// unchanged by this wiring closure -- see conductor-runtime/test/
+		// gate-evidence-journal-entry-not-sole.test.ts for the pure-function-level proof of this same rule).
+		expect(approveCode).not.toBe(0);
+		expect(approveStderr()).toMatch(/insufficient evidence/);
+		expect(approveStdout()).toBe("");
+	});
+});
