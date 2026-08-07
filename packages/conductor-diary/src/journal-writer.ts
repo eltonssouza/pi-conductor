@@ -3,50 +3,81 @@
  * mold `@conductor/library`'s `grounding-ledger.ts` writer already established for a sibling append-only
  * log, docs/adr/0007-fase6-diary-and-capture.md D1/§3.1, D7/§8, D8/§10).
  *
- * GATE 5 (test-first): `openJournalWriter` is a STUB that throws "not implemented" -- Gate 6 implements
- * the body. This file ships the signature test/journal-writer.test.ts already compiles and tests
- * against. Types (`JournalEntry`/`JournalAddInput`/`EditMode`) are imported from `./journal-entry.ts`,
- * NOT redeclared here -- see that file's own header for the type-ownership decision (a PARALLEL Gate 5
- * stream, `recall.ts`/`search.ts`/`digest.ts`/`capture.ts`, shares this same package and claimed
- * `journal-entry.ts` first).
+ * GATE 6 (this implementation): `openJournalWriter` mints `id`/`schemaVersion`/`ts`, resolves
+ * best-effort `provenance`, deep-redacts every leaf string, and appends synchronously
+ * (`appendFileSync`, mode `0o600`, `flag: "a"`), throwing on any genuine I/O failure -- never
+ * swallowing one, the same reason `grounding-ledger.ts`'s own `appendEvent` has no try/catch of its own.
  *
- * What Gate 6's body owes this contract (ADR §16, verbatim):
- *
- *   - `append` mints the `id` (randomUUID -- NEVER accepted from the caller, FR-4/BR-8), stamps
- *     `schemaVersion: 1`, an ISO-8601 `ts` (NEVER a `Date` -- the Fase-4 canonicalizer trap), and
- *     best-effort `provenance` (`branch?`/`sha?`/`repo?`, each field INDEPENDENTLY omitted -- never
- *     invented -- when git does not resolve; BR-3/FR-3). It deep-redacts every leaf string BEFORE the
- *     entry touches disk (D8/§10: the diary is the 8th closed `REDACTION_SINKS` value, reusing
- *     `redactSessionEntryForPersistence`/`deepRedact` from `@conductor/runtime` -- that wiring, and the
- *     resulting `@conductor/runtime` dependency, is Gate 6's job, not this stub's). It is synchronous
- *     end-to-end (`appendFileSync`, mode `0o600`, `flag: "a"`) and THROWS on any genuine I/O failure --
- *     never swallows one (the same reason `grounding-ledger.ts`'s own `appendEvent` has no try/catch of
- *     its own: a caller that believes an entry was recorded when the write actually failed silently is a
- *     worse lie than a thrown error).
- *   - `supersede` is the ONLY correction mechanism (D7/§8.1): a new append-only record, NEVER a mutation
- *     of the original line. It inherits `sessionId`/`gate`/`kind`/`author` from the original (a
- *     correction belongs to the same conversation/gate/topic-shape) and stamps FRESH provenance (a
- *     correction made from another branch/commit must say so, never silently inherit the original's). An
- *     `originalId` this writer's own log has never recorded is REFUSED -- `{ ok: false, kind:
- *     "unknown-entry", id }`, the analogue of `journal.py:edit_entry`'s `KeyError` -- NEVER producing a
- *     dangling `supersedes`, and NEVER throwing for that ordinary case (only a genuine I/O failure
- *     throws; an unresolved reference is an expected OUTCOME, the same "a value, not an exception"
- *     discipline `resolveEvidenceRef` already established in `@conductor/runtime`, ADR 0005).
- *
- * Concurrency (D1/§3.4, edge case 4): this writer assumes NO cross-process lock and NO CAS -- the "no
- * entry lost" property is delivered by the CALLER's choice of a per-session `entriesPath` (a partition),
- * never by a lock this module takes out. `appendFileSync` with `flag: "a"` is atomic for one line on the
- * same volume, the same guarantee `grounding-ledger.ts` already relies on for the same reason. Nothing in
- * this contract's shape (no lock handle, no CAS token, a synchronous return -- not a `Promise`) leaves
- * room for one to be smuggled in later without a signature change.
+ * GATE-6 DECISION on D8/§10.1's "reuse `redactSessionEntryForPersistence`/`deepRedact`... the redaction
+ * happens at the ONE point of write (the JournalWriter), never presuming an upstream caller already
+ * redacted": that function lives in `@conductor/runtime`, but THIS package's `package.json` declares
+ * (deliberately, verified by reading `packages/conductor-runtime/package.json`) zero dependency on it,
+ * because `@conductor/runtime` carries the full `pi-agent-core`/`pi-ai`/`pi-coding-agent` chain as REAL
+ * transitive dependencies -- weight that a local JSONL-append package has no reason to pull in. Importing
+ * `@conductor/runtime` here to reuse one pure function would be the wrong trade, and skipping
+ * redaction entirely (leaving it to an upstream CLI caller) would directly contradict D8's own explicit
+ * "never presume upstream already redacted" sentence. Resolution: `deepRedact`/`redactLeaf` below are a
+ * LOCAL, structural port of `@conductor/runtime/src/redaction.ts`'s own `deepRedact` (~15 LOC, a pure
+ * side-effect-free tree walk) -- but the actual security-critical primitive, `redactSecrets` (the
+ * pattern matcher `@conductor/runtime`'s own redaction.ts also imports it from), is NOT re-implemented;
+ * it is imported from `@conductor/secrets`, the shared zero-dependency leaf package both this file and
+ * `@conductor/runtime` depend on directly, so "what counts as secret-shaped" can never diverge between
+ * sinks even though the tree-walking glue is duplicated. Empirically verified before relying on it
+ * (`node --experimental-strip-types` against `@conductor/secrets`'s real `redactSecrets`): an ISO-8601
+ * timestamp, a UUID, and a 64-hex-char sha all pass through unchanged, so applying this to the WHOLE
+ * assembled `JournalEntry` (not a hand-picked subset of fields) never corrupts `id`/`ts`/`provenance.sha`
+ * -- the same "duplicate the ~15-LOC structural glue, never the shared security primitive" trade-off the
+ * ADR itself already makes for D3's RRF fusion (§5.1 item 2), now applied to redaction instead of ranking.
  */
 
-import type { EditMode, JournalAddInput, JournalEntry } from "./journal-entry.ts";
+import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { appendFileSync, mkdirSync } from "node:fs";
+import { basename, dirname } from "node:path";
+import { redactSecrets } from "@conductor/secrets";
+import type { EditMode, JournalAddInput, JournalEntry, JournalProvenance } from "./journal-entry.ts";
+import { openJournalReader } from "./journal-reader.ts";
+
+/** Verbatim copy of `@conductor/runtime/src/redaction.ts`'s own `SECRET_SCAN_FAILED_PLACEHOLDER` (D8's
+ * "8th sink" contract): kept byte-identical so a diary entry's redaction-failure placeholder reads the
+ * same as every other `REDACTION_SINKS` sink, even though this file does not import that module (see
+ * this file's header for why). */
+const SECRET_SCAN_FAILED_PLACEHOLDER = "[REDACTED: secret-scan failed — content withheld]";
+
+/** Redacts one string leaf, fail-closed (D8/§10.1 edge case 5): if the underlying matcher throws for any
+ * reason, the ORIGINAL text is never returned -- the placeholder is, so a matcher bug degrades to
+ * over-redaction (a diary entry shows less) rather than under-redaction (a secret reaches disk because
+ * the scanner broke). Mirrors `@conductor/runtime/src/redaction.ts`'s own `redactSecrets` wrapper. */
+function redactLeaf(value: string): string {
+	try {
+		return redactSecrets(value);
+	} catch {
+		return SECRET_SCAN_FAILED_PLACEHOLDER;
+	}
+}
+
+/** Deep-walks an arbitrary JSON-shaped value, redacting every string leaf and rebuilding every array/
+ * object level FRESH -- never a spread-then-overwrite that redacts only one named field (e.g. `text`)
+ * and leaks the rest of a multi-field record (D8/§10.1, the exact T57/R38 lesson this ADR names
+ * verbatim). Structural port of `@conductor/runtime/src/redaction.ts`'s own `deepRedact` -- see this
+ * file's header for why it is duplicated here rather than imported. */
+function deepRedact(value: unknown): unknown {
+	if (typeof value === "string") return redactLeaf(value);
+	if (Array.isArray(value)) return value.map((item) => deepRedact(item));
+	if (value !== null && typeof value === "object") {
+		const result: Record<string, unknown> = {};
+		for (const [key, fieldValue] of Object.entries(value as Record<string, unknown>)) {
+			result[key] = deepRedact(fieldValue);
+		}
+		return result;
+	}
+	return value;
+}
 
 export interface JournalWriter {
-	/** Manual (`journal add`) or captured (D5's `curateCaptureEvent` output). Deep-redacts every leaf
-	 * BEFORE persisting (D8/R43), mints the `id`, appends synchronously. THROWS on I/O failure -- never
-	 * swallows one (the writer half of the `grounding-ledger.ts` mold). */
+	/** Manual (`journal add`) or captured (D5's `curateCaptureEvent` output). Mints the `id`, appends
+	 * synchronously. THROWS on I/O failure -- never swallows one (the writer half of the
+	 * `grounding-ledger.ts` mold). See this file's header for the redaction-ownership decision. */
 	append(input: JournalAddInput): JournalEntry;
 	/** Append-only correction (D7): a new record with `supersedes`, inheriting session/gate/kind/author
 	 * from the original, fresh provenance. Refuses (WITHOUT throwing) an `originalId` this log has never
@@ -58,8 +89,144 @@ export interface JournalWriter {
 	): { ok: true; entry: JournalEntry } | { ok: false; kind: "unknown-entry"; id: string };
 }
 
+/** Env override for the best-effort git provenance calls below (quality-baseline category 4: no
+ * hardcoded timeouts). Kept local to this file rather than importing `conductor-cli`'s own
+ * `resolveTimeoutMs`/`DEFAULT_GIT_STATUS_TIMEOUT_MS` (git-status.ts): `@conductor/cli` is the
+ * composition root that depends on `@conductor/diary`, never the reverse -- importing it here would
+ * invert the dependency direction ADR 0007 §5.1/D3 fixes for this package. A ~10-line duplicate of the
+ * same "parse env, fall back to a positive default" shape is the acceptable structural duplication D3
+ * already accepts for the RRF fusion loop, not a second source of truth for anything security-relevant. */
+const DEFAULT_GIT_PROVENANCE_TIMEOUT_MS = 2000;
+
+function resolveGitTimeoutMs(): number {
+	const raw = process.env.CONDUCTOR_DIARY_GIT_TIMEOUT_MS;
+	if (raw === undefined) return DEFAULT_GIT_PROVENANCE_TIMEOUT_MS;
+	const parsed = Number(raw);
+	return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_GIT_PROVENANCE_TIMEOUT_MS;
+}
+
+/** Runs one git subcommand, best-effort: any failure (not a repo, git missing from PATH, timeout,
+ * empty output) collapses to `undefined` -- never throws, so a caller resolving one provenance field
+ * can never abort resolution of the others (BR-3/FR-3's "each field INDEPENDENTLY omitted"). Mirrors
+ * `conductor-cli/git-status.ts:gitCommitExistsSync`'s `execFileSync` + explicit `timeout` discipline
+ * (an argument array, never a shell string, so no argument is ever shell-interpreted). */
+function tryGit(args: readonly string[], cwd: string, timeoutMs: number): string | undefined {
+	try {
+		const output = execFileSync("git", args, {
+			cwd,
+			timeout: timeoutMs,
+			encoding: "utf8",
+			stdio: ["ignore", "pipe", "ignore"],
+		});
+		const trimmed = output.trim();
+		return trimmed.length > 0 ? trimmed : undefined;
+	} catch {
+		// Not a git repository, git not on PATH, a timeout, or any other failure -- provenance is
+		// best-effort and must never fail the journal write itself (BR-3/FR-3).
+		return undefined;
+	}
+}
+
+/** Best-effort provenance (BR-3/FR-3): each of `branch`/`sha`/`repo` is resolved by its OWN independent
+ * git invocation and independently omitted on failure -- never a single combined call whose partial
+ * failure would take a sibling field down with it. `sha` is machine-read from HEAD, never derived from
+ * `text` (BR-8). GATE-6 DECISION (undocumented by the ADR/tests, so recorded here): `repo` resolves to
+ * the basename of `git rev-parse --show-toplevel` -- a human-readable project name for an audit trail,
+ * deliberately NOT `git remote get-url origin` (many local-only repos, including this monorepo's own
+ * scratch/test fixtures, have no remote at all -- ADR 0005 §15 already left remote-derived identity as
+ * an explicitly open question for a sibling field, `repoId`, for the same reason) and NOT a hash (that
+ * role belongs to `computeProjectId`/`projectId`, a different field with a different job: partitioning,
+ * not human-readable provenance). */
+function resolveProvenance(cwd: string): JournalProvenance {
+	const timeoutMs = resolveGitTimeoutMs();
+	const provenance: JournalProvenance = {};
+	const branch = tryGit(["rev-parse", "--abbrev-ref", "HEAD"], cwd, timeoutMs);
+	if (branch !== undefined) provenance.branch = branch;
+	const sha = tryGit(["rev-parse", "HEAD"], cwd, timeoutMs);
+	if (sha !== undefined) provenance.sha = sha;
+	const topLevel = tryGit(["rev-parse", "--show-toplevel"], cwd, timeoutMs);
+	if (topLevel !== undefined) provenance.repo = basename(topLevel);
+	return provenance;
+}
+
 /** Opens (creating the parent directory if necessary) the append-only JSONL journal at `entriesPath` for
  * writing. */
 export function openJournalWriter(entriesPath: string): JournalWriter {
-	throw new Error("not implemented");
+	/** Deep-redacts `entry` (D8/§10.1: every leaf string, before the entry ever touches disk) and appends
+	 * the result as one JSONL line. Synchronous end-to-end (`mkdirSync` + `appendFileSync`, mode `0o600`,
+	 * `flag: "a"` -- never truncates/rewrites a prior line), mirroring `grounding-ledger.ts`'s own
+	 * `appendEvent`. No try/catch around the fs calls, on purpose (D1/§16: "a caller that believes an
+	 * entry was recorded when the write actually failed silently is a worse lie than a thrown error").
+	 * Returns the REDACTED entry, not the pre-redaction one -- the caller's in-memory return value never
+	 * holds a copy of anything this function decided was unsafe to persist, and it matches exactly what
+	 * `readAll()`/`readActive()` will later read back from disk. */
+	function appendEntry(entry: JournalEntry): JournalEntry {
+		const redacted = deepRedact(entry) as JournalEntry;
+		const line = `${JSON.stringify(redacted)}\n`;
+		mkdirSync(dirname(entriesPath), { recursive: true });
+		appendFileSync(entriesPath, line, { encoding: "utf8", mode: 0o600, flag: "a" });
+		return redacted;
+	}
+
+	return {
+		append(input: JournalAddInput): JournalEntry {
+			const entry: JournalEntry = {
+				id: randomUUID(),
+				schemaVersion: 1,
+				ts: new Date().toISOString(),
+				sessionId: input.sessionId,
+				author: input.author,
+				kind: input.kind,
+				gate: input.gate,
+				source: input.source,
+				text: input.text,
+				provenance: resolveProvenance(process.cwd()),
+			};
+			return appendEntry(entry);
+		},
+
+		supersede(
+			originalId: string,
+			newText: string,
+			mode: EditMode,
+		): { ok: true; entry: JournalEntry } | { ok: false; kind: "unknown-entry"; id: string } {
+			// Reuses the reader (D7/§8.1's own note: "pode reusar um reader interno ou reimplementar
+			// leitura mínima -- decida, documente a escolha"). GATE-6 DECISION: reuse, not reimplement --
+			// duplicating corrupted-line-skipping/shape-checking here would be a second, drifting parser
+			// for the exact same file (DRY; the Pragmatic Programmer's "don't duplicate knowledge"). The
+			// `projectId` argument is a documented no-op for filtering here (journal-reader.ts's own
+			// header: "JournalEntry itself carries no projectId field... partitioning is a property of
+			// WHICH FILE the caller opens, not a per-record filter") -- an empty string is passed rather
+			// than inventing an identity this writer was never given.
+			const reader = openJournalReader(entriesPath, "");
+			const original = reader.readAll().find((candidate) => candidate.id === originalId);
+			if (!original) {
+				return { ok: false, kind: "unknown-entry", id: originalId };
+			}
+
+			const entry: JournalEntry = {
+				id: randomUUID(),
+				schemaVersion: 1,
+				ts: new Date().toISOString(),
+				// Inherits sessionId/gate/kind/author from the original (D7/§8.1: "uma correção pertence à
+				// mesma conversa e gate"). `source` is NOT in that inherited list (ADR §8.1/§16 name only
+				// session/gate/kind/author) and no test constrains it -- GATE-6 DECISION: a correction is
+				// always `"manual"`, since `journal supersede` (the only production caller, §16's CLI
+				// surface) is inherently a deliberate human/agent-issued command, never itself a captured
+				// observation, regardless of what kind of entry the ORIGINAL was.
+				sessionId: original.sessionId,
+				author: original.author,
+				kind: original.kind,
+				gate: original.gate,
+				source: "manual",
+				text: newText,
+				// Fresh provenance (D7/§8.1: "uma correção feita de outra branch/commit deve dizê-lo") --
+				// never inherited from the original.
+				provenance: resolveProvenance(process.cwd()),
+				supersedes: originalId,
+				editMode: mode,
+			};
+			return { ok: true, entry: appendEntry(entry) };
+		},
+	};
 }

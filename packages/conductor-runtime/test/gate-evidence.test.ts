@@ -158,10 +158,18 @@ describe("hasSufficientEvidenceForMandatoryGate (R25 golden rule: runtime-derive
 		expect(hasSufficientEvidenceForMandatoryGate(evidence)).toBe(false);
 	});
 
-	it('true as soon as at least one attached item is "runtime-derived", regardless of how many file-only author-declared items also exist', () => {
+	// UPDATE (Fase 6, ADR 0007 §4.2 D2/R40/T59): this test originally used a "journal-entry" runtime-derived
+	// item as its example — correct at the time (a journal-entry was still treated as equivalent to a
+	// test-run for this predicate), but Fase 6's D2 fix narrows the runtime-derived branch to
+	// `ref.kind === "test-run"` specifically, because a journal-entry proves a WRITE happened (existence),
+	// never that a test actually ran (work). The fixture below is updated to "test-run" so this test keeps
+	// proving its own stated claim ("true as soon as at least one attached item is runtime-derived[+test-run],
+	// regardless of file-only items"); the journal-entry-alone-is-insufficient case now has its own dedicated
+	// test, test/gate-evidence-journal-entry-not-sole.test.ts.
+	it('true as soon as at least one attached item is "runtime-derived" test-run, regardless of how many file-only author-declared items also exist', () => {
 		const evidence: EvidenceProvenanceInfo[] = [
 			{ provenance: "author-declared", ref: { kind: "file" } },
-			{ provenance: "runtime-derived", ref: { kind: "journal-entry" } },
+			{ provenance: "runtime-derived", ref: { kind: "test-run" } },
 		];
 
 		expect(hasSufficientEvidenceForMandatoryGate(evidence)).toBe(true);

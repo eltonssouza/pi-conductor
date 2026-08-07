@@ -59,6 +59,32 @@
 
 import type { JournalAddInput } from "./journal-entry.ts";
 
+/** No role/human author is attached to an automatically-captured event (none of the `CaptureEvent`
+ * variants carry one) -- a stable sentinel distinguishes it from a `source:"manual"` entry's real
+ * author, without inventing an identity the runtime never observed. */
+const CAPTURE_AUTHOR = "capture";
+
+/** Keyword heuristic shared by every curable event kind that carries free text (`summary`/`outcome`):
+ * only `decision|error|solution|checkpoint` are ever auto-captured (FR-14) -- `reasoning`/`plan` are
+ * NEVER inferred here, so this function's own return type is restricted to that 4-value subset,
+ * enforced by the compiler rather than left to convention. */
+type CapturedKind = "decision" | "error" | "solution" | "checkpoint";
+
+function inferCapturedKind(text: string, fallback: CapturedKind): CapturedKind {
+	const lower = text.toLowerCase();
+	if (/\b(erro|error|falh|fail|exception|crash)/u.test(lower)) return "error";
+	if (/\b(corrig|resolv|solucion|fix|solved|solution)/u.test(lower)) return "solution";
+	return fallback;
+}
+
+/** Trims and rejects empty/whitespace-only content -- the ONE `null` case Gate 5 traveled by test
+ * (this file's own header, "DECIDED AMBIGUITY"): no curable content in, no entry out, never an
+ * empty/junk entry persisted. */
+function curatedTextOrNull(raw: string): string | null {
+	const trimmed = raw.trim();
+	return trimmed.length === 0 ? null : trimmed;
+}
+
 export interface CaptureConfig {
 	/** default true (só para eventos curados). */
 	enabled: boolean;
@@ -77,6 +103,79 @@ export type CaptureEvent =
 	| { kind: "session-shutdown"; sessionId: string; summary: string }
 	| { kind: "gate-concluded"; gate: number; sessionId: string; outcome: string };
 
-export function curateCaptureEvent(_event: CaptureEvent, _cfg: CaptureConfig): JournalAddInput | null {
-	throw new Error("not implemented");
+export function curateCaptureEvent(event: CaptureEvent, cfg: CaptureConfig): JournalAddInput | null {
+	// enabled:false -- no auto-capture at all, whatever the event (the config's own gate for this
+	// whole feature, secure-default territory alongside captureHighRiskBodies).
+	if (!cfg.enabled) return null;
+
+	switch (event.kind) {
+		case "turn-end": {
+			const text = curatedTextOrNull(event.summary);
+			if (text === null) return null;
+			return {
+				kind: inferCapturedKind(text, "decision"),
+				text,
+				sessionId: event.sessionId,
+				author: CAPTURE_AUTHOR,
+				gate: event.gate,
+				source: "capture",
+			};
+		}
+
+		case "agent-settled": {
+			const summary = curatedTextOrNull(event.summary);
+			if (summary === null) return null;
+			// FR-17: the subagent's OWN session, never overwritten by parentSessionId (the orchestrator/
+			// subagent separation from Fase 3 is respected, not reopened). parentSessionId is carried as
+			// a short text prefix -- the only surface JournalAddInput exposes for it today (DECIDED
+			// AMBIGUITY, this file's own header) -- never silently merged in unlabeled.
+			const text = `[subagent of ${event.parentSessionId}] ${summary}`;
+			return {
+				kind: inferCapturedKind(summary, "checkpoint"),
+				text,
+				sessionId: event.sessionId,
+				author: CAPTURE_AUTHOR,
+				gate: event.gate,
+				source: "capture",
+			};
+		}
+
+		case "session-shutdown": {
+			const text = curatedTextOrNull(event.summary);
+			if (text === null) return null;
+			// Literal ADR wording (D5 §7.1): "session_shutdown -> um checkpoint de fim de sessão" --
+			// deterministic, no keyword inference needed.
+			return {
+				kind: "checkpoint",
+				text,
+				sessionId: event.sessionId,
+				author: CAPTURE_AUTHOR,
+				source: "capture",
+			};
+		}
+
+		case "gate-concluded": {
+			const outcome = curatedTextOrNull(event.outcome);
+			if (outcome === null) return null;
+			const text = `Gate ${event.gate} concluded: ${outcome}`;
+			// D5 §7.1: "-> uma entrada decision/checkpoint amarrada ao gate" -- a rejection is a decision
+			// worth its own kind; anything else (approval etc.) is the checkpoint the gate machinery marks.
+			const kind: CapturedKind = /\breject/u.test(outcome.toLowerCase()) ? "decision" : "checkpoint";
+			return {
+				kind,
+				text,
+				sessionId: event.sessionId,
+				author: CAPTURE_AUTHOR,
+				gate: event.gate,
+				source: "capture",
+			};
+		}
+
+		default: {
+			// Exhaustiveness guard -- a future CaptureEvent variant landing without updating this switch
+			// is a compile error here, not a silently-dropped event.
+			const exhaustive: never = event;
+			return exhaustive;
+		}
+	}
 }

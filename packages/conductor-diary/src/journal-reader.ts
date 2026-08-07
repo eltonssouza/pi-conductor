@@ -3,44 +3,17 @@
  * `@conductor/library`'s `grounding-ledger.ts` reader already established, ported here per
  * docs/adr/0007-fase6-diary-and-capture.md D7/§8.2/§8.3, R44/T63/T59, and §4.3 for the Fase-4 interop).
  *
- * GATE 5 (test-first): `openJournalReader`/`readRecordedJournalEntryIds` are STUBS that throw "not
- * implemented" -- Gate 6 implements the bodies. This file ships the signatures
- * test/journal-reader.test.ts already compiles and tests against. `JournalEntry` is imported from
- * `./journal-entry.ts`, NOT redeclared here -- see that file's own header for the type-ownership
- * decision (a PARALLEL Gate 5 stream, `recall.ts`/`search.ts`/`digest.ts`/`capture.ts`, shares this same
- * package and claimed `journal-entry.ts` first; `recall.ts`/`search.ts` already import `JournalReader`
- * from this file).
- *
- * What Gate 6's bodies owe this contract (ADR §16/§8.2/§8.3/§4.3, verbatim):
- *
- *   - `readAll()` is the RAW history -- every entry ever appended, INCLUDING superseded originals (the
- *     analogue of `journal.py:_read_mirror`, which never filters). `log`/`digest`/export read this
- *     (digest.ts's own header already documents that it is the CALLER's choice, not renderDigest's, to
- *     pass `readAll()` here).
- *   - `readActive()` is CURRENT knowledge only -- an entry a later `supersedes` names is excluded (BR-5,
- *     the analogue of `journal.py:active_entries`). `recall.ts`/`search.ts` read this.
- *   - NEITHER throws (R44/T63, R36 ported): a missing directory, an unreadable file, or a corrupted
- *     individual line all collapse to "no entries" for that method -- a bad line is skipped on its own,
- *     the entries before and after it still read (the same single-try/catch-around-the-whole-read plus
- *     per-line try/catch discipline `grounding-ledger.ts`'s own `readEvents` already uses). The net
- *     effect (§6.3/D4): deleting the journal REVOKES the evidence it produced, it never FABRICATES any --
- *     a session becomes LESS permissive when the log disappears, never more.
- *   - `readRecordedJournalEntryIds(reader)` is the Fase-4 interop point (D2/G12/FR-25): the exact set the
- *     CLI (composition root) passes as `ResolveEvidenceRefContext.runtimeRecordedJournalEntryIds`, so a
- *     `--ref journal-entry:<id>` typed by hand (never actually written by this runtime) is refused
- *     (R25). DECISION (the ADR's §4.3 does not name readAll vs. readActive explicitly, so this is a
- *     documented Gate-5 call, not an invented contract shape): it is built from `readAll()`, NOT
- *     `readActive()`. D2's whole point is "existence, not work" -- an id this runtime once minted is a
- *     genuine existence fact regardless of a LATER correction; §4/D2 already caps what a resolved
- *     `journal-entry` ref can prove (context/provenance, never sole closure of a mandatory gate, since
- *     `hasSufficientEvidenceForMandatoryGate` requires `ref.kind === "test-run"` for that) REGARDLESS of
- *     whether the cited entry is still active, so narrowing this set to `readActive()` would silently
- *     invent a NEW behaviour (supersede retroactively un-registering an id) the ADR's D7/D2 never
- *     describes, for zero security benefit the ADR actually asks for. FAIL-CLOSED either way: a reader
- *     that cannot read anything returns an EMPTY `Set`, never throws.
+ * GATE 6 (this implementation): `readAll`/`readActive` parse the JSONL file line-by-line, skipping any
+ * line that fails to parse OR fails a shape check (a defense-in-depth pair -- `JSON.parse` catches
+ * syntactic corruption, the shape check catches a syntactically valid but structurally wrong record,
+ * e.g. a foreign JSONL file pointed at this path by mistake) -- never aborting the read of the entries
+ * before/after it. A missing directory, a missing file, a path that is a directory instead of a file,
+ * and a permission error all collapse to `[]` identically (the same single-try/catch-around-the-whole-
+ * read discipline `grounding-ledger.ts:readEvents` already uses).
  */
 
-import type { JournalEntry } from "./journal-entry.ts";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import type { EditMode, JournalEntry, JournalKind, JournalProvenance, JournalSource } from "./journal-entry.ts";
 
 export interface JournalReader {
 	/** Raw history -- ALL entries, including superseded ones. NEVER throws. */
@@ -49,17 +22,152 @@ export interface JournalReader {
 	readActive(): readonly JournalEntry[];
 }
 
+const JOURNAL_KINDS: readonly JournalKind[] = ["reasoning", "decision", "plan", "error", "solution", "checkpoint"];
+const JOURNAL_SOURCES: readonly JournalSource[] = ["manual", "capture", "document"];
+const EDIT_MODES: readonly EditMode[] = ["update", "forget", "invalidate"];
+
+/** A raw JSONL record, before it is known to match `JournalEntry`'s shape -- deliberately untyped past
+ * this point (parsed JSON is `unknown` by nature), the same "shape-check then trust" discipline
+ * `grounding-ledger.ts`'s own `RawLedgerEvent`/`toQueryView` apply to their parsed JSON. */
+interface RawJournalRecord {
+	[key: string]: unknown;
+}
+
+/**
+ * Reads and parses every line of `path`, collapsing EVERY failure mode to an empty array rather than
+ * throwing (R44/T63/R36 ported): a missing directory, a missing file, a path that is a directory instead
+ * of a file, and a permission error all fail closed identically. A corrupted individual LINE (invalid
+ * JSON) is skipped on its own -- caught line-by-line -- so one bad line never aborts the read of every
+ * other, valid line before and after it.
+ */
+function readRawRecords(path: string): RawJournalRecord[] {
+	try {
+		if (!existsSync(path)) return [];
+		if (!statSync(path).isFile()) return [];
+		const raw = readFileSync(path, "utf8");
+		const records: RawJournalRecord[] = [];
+		for (const line of raw.split("\n")) {
+			const trimmed = line.trim();
+			if (trimmed.length === 0) continue;
+			try {
+				const parsed: unknown = JSON.parse(trimmed);
+				if (parsed !== null && typeof parsed === "object") records.push(parsed as RawJournalRecord);
+			} catch {
+				// Corrupted line -- skip it, keep reading the rest (R44/T63/R36).
+			}
+		}
+		return records;
+	} catch {
+		// Missing/unreadable directory or file, or any other unexpected fs error: fail closed to "no
+		// entries", never throw (R44/T63 -- an unreadable journal is not proof of anything, so it must be
+		// indistinguishable from an empty one to every caller of this reader).
+		return [];
+	}
+}
+
+function isJournalKind(value: unknown): value is JournalKind {
+	return typeof value === "string" && (JOURNAL_KINDS as readonly string[]).includes(value);
+}
+
+function isJournalSource(value: unknown): value is JournalSource {
+	return typeof value === "string" && (JOURNAL_SOURCES as readonly string[]).includes(value);
+}
+
+function toProvenance(value: unknown): JournalProvenance {
+	if (value === null || typeof value !== "object") return {};
+	const raw = value as Record<string, unknown>;
+	const provenance: JournalProvenance = {};
+	if (typeof raw.branch === "string") provenance.branch = raw.branch;
+	if (typeof raw.sha === "string") provenance.sha = raw.sha;
+	if (typeof raw.repo === "string") provenance.repo = raw.repo;
+	return provenance;
+}
+
+/** Shape-checks a raw parsed record against every field `JournalEntry` requires, returning `null` for
+ * anything that does not match (the same "skip, never throw, never fabricate a field" discipline
+ * `grounding-ledger.ts:toQueryView` applies to its own sink). `gate`/`supersedes`/`editMode` are
+ * optional -- present only when the raw record actually carries a validly-shaped value for them. */
+function toJournalEntry(record: RawJournalRecord): JournalEntry | null {
+	if (
+		typeof record.id !== "string" ||
+		record.schemaVersion !== 1 ||
+		typeof record.ts !== "string" ||
+		typeof record.sessionId !== "string" ||
+		typeof record.author !== "string" ||
+		!isJournalKind(record.kind) ||
+		!isJournalSource(record.source) ||
+		typeof record.text !== "string"
+	) {
+		return null;
+	}
+
+	const entry: JournalEntry = {
+		id: record.id,
+		schemaVersion: 1,
+		ts: record.ts,
+		sessionId: record.sessionId,
+		author: record.author,
+		kind: record.kind,
+		source: record.source,
+		text: record.text,
+		provenance: toProvenance(record.provenance),
+	};
+	if (typeof record.gate === "number") entry.gate = record.gate;
+	if (typeof record.supersedes === "string") entry.supersedes = record.supersedes;
+	if (typeof record.editMode === "string" && (EDIT_MODES as readonly string[]).includes(record.editMode)) {
+		entry.editMode = record.editMode as EditMode;
+	}
+	return entry;
+}
+
+function parseEntries(path: string): JournalEntry[] {
+	const entries: JournalEntry[] = [];
+	for (const record of readRawRecords(path)) {
+		const entry = toJournalEntry(record);
+		if (entry) entries.push(entry);
+	}
+	return entries;
+}
+
+/** An entry `id` is excluded from the ACTIVE set the moment some OTHER entry's `supersedes` names it
+ * (BR-5, `journal.py:active_entries`'s analogue) -- a chain of two-or-more corrections still leaves only
+ * the last, most-recent entry standing, since every earlier link in the chain is named by exactly one
+ * later `supersedes`. */
+function excludeSuperseded(all: readonly JournalEntry[]): JournalEntry[] {
+	const supersededIds = new Set<string>();
+	for (const entry of all) {
+		if (entry.supersedes !== undefined) supersededIds.add(entry.supersedes);
+	}
+	return all.filter((entry) => !supersededIds.has(entry.id));
+}
+
 /** Opens the journal at `entriesPath` for reading, scoped to `projectId` (kept for shape parity with
  * `grounding-ledger.ts`'s own reader factory and for Gate-6's future use; `JournalEntry` itself carries
  * no `projectId` field per §16 -- partitioning is a property of WHICH FILE the caller opens, D4/§6.1's
- * one-file-per-project-per-session layout, not a per-record filter here). NEVER throws once implemented. */
-export function openJournalReader(entriesPath: string, projectId: string): JournalReader {
-	throw new Error("not implemented");
+ * one-file-per-project-per-session layout, not a per-record filter here). NEVER throws. */
+export function openJournalReader(entriesPath: string, _projectId: string): JournalReader {
+	return {
+		readAll(): readonly JournalEntry[] {
+			return parseEntries(entriesPath);
+		},
+		readActive(): readonly JournalEntry[] {
+			return excludeSuperseded(parseEntries(entriesPath));
+		},
+	};
 }
 
 /** Fase-4 interop (D2/G12/FR-25): the set of ids this runtime genuinely recorded, for
  * `ResolveEvidenceRefContext.runtimeRecordedJournalEntryIds`. FAIL-CLOSED: an unreadable journal yields
- * an EMPTY set, never throws -- see this file's header for why `readAll()`, not `readActive()`. */
+ * an EMPTY set, never throws -- see this file's header for why `readAll()`, not `readActive()`. Wraps
+ * `reader.readAll()` in its own try/catch as a belt-and-braces measure (mirroring
+ * `gate-evidence.ts:resolveEvidenceRef`'s own "wraps every branch in a try/catch... not required for
+ * this to be safe on its own"): `readAll()` never throws by contract, but a future reader implementation
+ * that violated that contract must still not be able to turn this fail-closed interop point into a
+ * thrown exception. */
 export function readRecordedJournalEntryIds(reader: JournalReader): ReadonlySet<string> {
-	throw new Error("not implemented");
+	try {
+		return new Set(reader.readAll().map((entry) => entry.id));
+	} catch {
+		return new Set();
+	}
 }

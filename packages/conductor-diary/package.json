@@ -2,7 +2,7 @@
 	"name": "@conductor/diary",
 	"version": "0.0.0",
 	"private": true,
-	"description": "Local, per-machine append-only diary (docs/adr/0007-fase6-diary-and-capture.md D1-D8): entries.jsonl as the source of truth, a derived node:sqlite index for recall/search, curateCaptureEvent for minimized-at-the-source automatic capture, and renderDigest as the only workspace-facing artifact. Imports ONLY the PURE retrieval primitives of @conductor/library (D3 -- never its I/O edge modules); zero @conductor/runtime dependency (the diary/runtime coupling is the two surgical deltas in gate-evidence.ts/redaction.ts/workspace-policy.ts, owned by @conductor/runtime itself, not by this package).",
+	"description": "Local, per-machine append-only diary (docs/adr/0007-fase6-diary-and-capture.md D1-D8): entries.jsonl as the source of truth, a derived node:sqlite index for recall/search, curateCaptureEvent for minimized-at-the-source automatic capture, and renderDigest as the only workspace-facing artifact. Imports ONLY the PURE retrieval primitives of @conductor/library (D3 -- never its I/O edge modules); zero @conductor/runtime dependency (gate-evidence.ts/workspace-policy.ts's diary/runtime coupling is owned by @conductor/runtime itself, not by this package) -- @conductor/runtime is deliberately avoided because it carries the full pi-agent-core/pi-ai/pi-coding-agent chain as real transitive dependencies, which a local JSONL-append package has no reason to pull in. D8/§10.1's JournalWriter-side deep-redaction instead depends directly on @conductor/secrets (the same zero-dependency leaf matcher package @conductor/runtime's own redaction.ts imports), so 'secret-shaped' can never diverge between sinks.",
 	"type": "module",
 	"main": "./src/index.ts",
 	"types": "./src/index.ts",
@@ -10,7 +10,8 @@
 		"test": "vitest --run"
 	},
 	"dependencies": {
-		"@conductor/library": "0.0.0"
+		"@conductor/library": "0.0.0",
+		"@conductor/secrets": "0.0.0"
 	},
 	"devDependencies": {
 		"@types/node": "24.12.4",

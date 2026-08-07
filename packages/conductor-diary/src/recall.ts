@@ -43,8 +43,56 @@
  * backend-unreachable scenario, and this Gate 5 task's final report for the full reasoning.
  */
 
+import { buildFtsMatchExpression } from "@conductor/library";
+
 import type { JournalEntry, JournalSource } from "./journal-entry.ts";
 import type { JournalReader } from "./journal-reader.ts";
+
+/**
+ * Tokenizes `text` by REUSING `@conductor/library`'s `buildFtsMatchExpression` (D3 §5.1: "uma função
+ * pura, tratada por R41 como a instrução que o runtime autora... tem que ter UM dono") rather than
+ * re-implementing its character-class split (`[^\p{L}\p{N}_]+`) here -- a second copy of that regex
+ * is exactly the kind of divergence-prone duplication D3 forbids, even though this function's own
+ * output never reaches SQLite (there is no FTS5 injection surface inside this pure in-memory scorer;
+ * the reuse is about a single owner for the tokenization RULE, not about this specific vulnerability
+ * class). The tokens are recovered from `buildFtsMatchExpression`'s own deterministic
+ * `"tok1" OR "tok2"` output instead of splitting `text` a second time.
+ */
+function tokenize(text: string): string[] {
+	const expression = buildFtsMatchExpression(text, "OR");
+	if (expression.length === 0) return [];
+	return expression.split(" OR ").map((quoted) => quoted.slice(1, -1).replace(/""/g, '"').toLowerCase());
+}
+
+/** Fraction of `queryTokens` present as a case-insensitive substring of `haystack`. `0` with no query
+ * tokens to match -- never a division by zero (the same guard `@conductor/library`'s hybrid-search.ts
+ * own `coverage()` uses; a structural echo, not a cross-package import -- ranking is D3's own, §5.1
+ * point 2). */
+function lexicalCoverage(queryTokens: readonly string[], haystack: string): number {
+	if (queryTokens.length === 0) return 0;
+	const lower = haystack.toLowerCase();
+	const matched = queryTokens.filter((token) => lower.includes(token)).length;
+	return matched / queryTokens.length;
+}
+
+/**
+ * Recency-as-PRIOR (BR-10/G11, ADR §9.1 / Context Engineering §10.3: "Recency is a prior, not a
+ * verdict"): decays smoothly with age, never reaches 0 (the past is a ranking factor, never a filter
+ * that discards it), and never produces `NaN`/`Infinity` for a malformed `ts` -- falls back to a
+ * neutral prior instead of propagating a broken computation into `score` (ADR §5.3's finiteness
+ * guard, ported from `@conductor/runtime`'s `validateGroundingCitation`).
+ */
+function recencyPrior(ts: string, now: Date): number {
+	const entryMs = Date.parse(ts);
+	if (Number.isNaN(entryMs)) return 0.5;
+	const ageDays = Math.max(0, (now.getTime() - entryMs) / (1000 * 60 * 60 * 24));
+	return 1 / (1 + ageDays / 30);
+}
+
+// Lexical match dominates (this IS the relevance signal); recency is a modest PRIOR on top of it,
+// never strong enough to surface an unrelated-but-recent entry over a genuinely matching old one.
+const LEXICAL_WEIGHT = 0.85;
+const RECENCY_WEIGHT = 0.15;
 
 export interface RecalledEntry {
 	entry: JournalEntry;
@@ -69,6 +117,37 @@ export interface RecallContext {
 	now: Date;
 }
 
-export function recall(_query: string, _reader: JournalReader, _ctx: RecallContext): RecallOutcome {
-	throw new Error("not implemented");
+export function recall(query: string, reader: JournalReader, ctx: RecallContext): RecallOutcome {
+	// Current knowledge only (D7/BR-5) -- a superseded entry stops counting as current.
+	const entries = reader.readActive();
+	if (entries.length === 0) {
+		return { ok: true, hits: [], reason: "no-matching-memory" };
+	}
+
+	const queryTokens = tokenize(query);
+
+	const scored = entries.map((entry) => {
+		const coverage = lexicalCoverage(queryTokens, entry.text);
+		const recency = recencyPrior(entry.ts, ctx.now);
+		const score = LEXICAL_WEIGHT * coverage + RECENCY_WEIGHT * recency;
+		return { entry, coverage, score };
+	});
+
+	// FR-6: nothing crosses the relevance threshold -> explicit "no-matching-memory", never the
+	// least-bad candidates forced through. Zero lexical coverage means the entry shares no term with
+	// the query at all -- the threshold below which a hit is not a match, only a coincidental prior.
+	const relevant = scored.filter((candidate) => candidate.coverage > 0 && Number.isFinite(candidate.score));
+	if (relevant.length === 0) {
+		return { ok: true, hits: [], reason: "no-matching-memory" };
+	}
+
+	relevant.sort((a, b) => b.score - a.score);
+
+	const hits: RecalledEntry[] = relevant.map(({ entry, score }) => ({
+		entry,
+		score,
+		citedAs: { source: entry.source, sessionId: entry.sessionId, gate: entry.gate, ts: entry.ts },
+	}));
+
+	return { ok: true, hits };
 }

@@ -1,8 +1,9 @@
 /**
- * Redaction pipeline -- the choke point for every one of the seven closed sinks
+ * Redaction pipeline -- the choke point for every one of the eight closed sinks
  * (docs/adr/0003-fase2-security-architecture.md §6.2/§16; docs/conductor/gate3-addendum-fase2.md
  * T21/T22, R6; docs/conductor/gate2-spec-fase2.md FR-12/FR-13/FR-14/FR-15, BR-7/BR-12; sink #7
- * "codeIndex" added at Fase 5 D6 §9.1, ADR 0006 §19).
+ * "codeIndex" added at Fase 5 D6 §9.1, ADR 0006 §19; sink #8 "diary" added at Fase 6 D8 §10.1,
+ * ADR 0007 §12.4/§16).
  *
  * GATE 5 (test-first): redactSecrets() and redactSessionEntryForPersistence() are STUBS that throw
  * "not implemented" -- Gate 6 implements the bodies. Wiring each of the six sinks to call these
@@ -31,6 +32,10 @@
  *   7. codeIndex     -- the code-aware index (Fase 5, D6 §9.1): redaction runs BEFORE chunk/embed/
  *                       upsert, never after -- a secret embedded before redaction stays recoverable by
  *                       semantic similarity even once the displayed text is masked.
+ *   8. diary         -- the Diary (Fase 6, D8 §10.1): every write, manual (`journal add`) AND
+ *                       automatic capture (D5), deep-redacts every leaf string before it ever touches
+ *                       disk -- same reasoning as sessionJsonl/codeIndex above, applied to the
+ *                       diary's own entries.jsonl/index.sqlite.
  */
 
 import { redactSecrets as redactSecretsShared } from "@conductor/secrets";
@@ -43,6 +48,7 @@ export const REDACTION_SINKS = [
 	"rethrownError",
 	"sessionExport",
 	"codeIndex",
+	"diary",
 ] as const;
 
 export type RedactionSink = (typeof REDACTION_SINKS)[number];

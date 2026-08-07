@@ -20,8 +20,12 @@
  * deste arquivo) leem o histórico bruto (`readAll()`) em vez disso.
  */
 
-import type { JournalEntry, JournalKind } from "./journal-entry.ts";
+import { JOURNAL_KINDS, type JournalEntry, type JournalKind } from "./journal-entry.ts";
 import type { JournalReader } from "./journal-reader.ts";
+
+const MIN_GATE = 1;
+const MAX_GATE = 14;
+const VALID_GATES: readonly string[] = Array.from({ length: MAX_GATE - MIN_GATE + 1 }, (_, i) => String(i + MIN_GATE));
 
 export interface JournalSearchFilters {
 	kind?: JournalKind[];
@@ -39,6 +43,68 @@ export type JournalSearchOutcome =
 	| { ok: true; entries: JournalEntry[] }
 	| { ok: false; kind: "unknown-facet"; facet: string; value: string; available: string[] }; // FR-9/BR-8
 
-export function search(_filters: JournalSearchFilters, _reader: JournalReader): JournalSearchOutcome {
-	throw new Error("not implemented");
+/** Every `filters.kind` entry must be a member of the closed `JOURNAL_KINDS` vocabulary -- an
+ * unrecognized value is REPORTED explicitly (FR-9/BR-8), naming both the offender and the accepted
+ * set, never silently dropped or treated as "no filter". */
+function validateKindFacet(kind: readonly JournalKind[] | undefined): JournalSearchOutcome | undefined {
+	if (!kind) return undefined;
+	for (const value of kind) {
+		if (!JOURNAL_KINDS.includes(value)) {
+			return {
+				ok: false,
+				kind: "unknown-facet",
+				facet: "kind",
+				value: String(value),
+				available: [...JOURNAL_KINDS],
+			};
+		}
+	}
+	return undefined;
+}
+
+/** `filters.gate` must be an integer in 1-14 (the closed gate range this whole flow uses) -- outside
+ * it is REPORTED explicitly (FR-9/BR-8), never silently ignored. */
+function validateGateFacet(gate: number | undefined): JournalSearchOutcome | undefined {
+	if (gate === undefined) return undefined;
+	if (!Number.isInteger(gate) || gate < MIN_GATE || gate > MAX_GATE) {
+		return { ok: false, kind: "unknown-facet", facet: "gate", value: String(gate), available: [...VALID_GATES] };
+	}
+	return undefined;
+}
+
+/** `since`/`until` must be parseable ISO-8601 instants -- an unparseable value is REPORTED explicitly
+ * rather than silently matching everything (a malformed date range that were treated as "no filter"
+ * would be the same silent-widening class of bug FR-9/BR-8 exists to close). */
+function validateDateFacet(facet: "since" | "until", value: string | undefined): JournalSearchOutcome | undefined {
+	if (value === undefined) return undefined;
+	if (Number.isNaN(Date.parse(value))) {
+		return { ok: false, kind: "unknown-facet", facet, value, available: ["an ISO-8601 date-time string"] };
+	}
+	return undefined;
+}
+
+export function search(filters: JournalSearchFilters, reader: JournalReader): JournalSearchOutcome {
+	const invalid =
+		validateKindFacet(filters.kind) ??
+		validateGateFacet(filters.gate) ??
+		validateDateFacet("since", filters.since) ??
+		validateDateFacet("until", filters.until);
+	if (invalid) return invalid;
+
+	const sinceMs = filters.since !== undefined ? Date.parse(filters.since) : undefined;
+	const untilMs = filters.until !== undefined ? Date.parse(filters.until) : undefined;
+
+	// Current knowledge only (D7/BR-5) -- a superseded entry stops counting as current, the same read
+	// scope `recall` uses; `log`/`digest`/export read `readAll()` instead (out of scope here).
+	const entries = reader.readActive().filter((entry) => {
+		if (filters.kind && !filters.kind.includes(entry.kind)) return false;
+		if (filters.gate !== undefined && entry.gate !== filters.gate) return false;
+		if (filters.sessionId !== undefined && entry.sessionId !== filters.sessionId) return false;
+		if (sinceMs !== undefined && Date.parse(entry.ts) < sinceMs) return false;
+		if (untilMs !== undefined && Date.parse(entry.ts) > untilMs) return false;
+		if (filters.text !== undefined && !entry.text.includes(filters.text)) return false;
+		return true;
+	});
+
+	return { ok: true, entries: [...entries] };
 }
