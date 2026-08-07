@@ -1,0 +1,24 @@
+{
+	"name": "@conductor/diary",
+	"version": "0.0.0",
+	"private": true,
+	"description": "Local, per-machine append-only diary (docs/adr/0007-fase6-diary-and-capture.md D1-D8): entries.jsonl as the source of truth, a derived node:sqlite index for recall/search, curateCaptureEvent for minimized-at-the-source automatic capture, and renderDigest as the only workspace-facing artifact. Imports ONLY the PURE retrieval primitives of @conductor/library (D3 -- never its I/O edge modules); zero @conductor/runtime dependency (the diary/runtime coupling is the two surgical deltas in gate-evidence.ts/redaction.ts/workspace-policy.ts, owned by @conductor/runtime itself, not by this package).",
+	"type": "module",
+	"main": "./src/index.ts",
+	"types": "./src/index.ts",
+	"scripts": {
+		"test": "vitest --run"
+	},
+	"dependencies": {
+		"@conductor/library": "0.0.0"
+	},
+	"devDependencies": {
+		"@types/node": "24.12.4",
+		"@vitest/coverage-v8": "4.1.9",
+		"typescript": "5.9.3",
+		"vitest": "4.1.9"
+	},
+	"engines": {
+		"node": ">=22.19.0"
+	}
+}
