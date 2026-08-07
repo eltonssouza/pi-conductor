@@ -2,7 +2,9 @@ export {
 	type ApprovalMethod,
 	type AuditEntry,
 	type AuditTrailWriter,
+	appendSecurityEvent,
 	createAuditTrailWriter,
+	type SecurityDetectionEntry,
 } from "./audit-trail.ts";
 export {
 	type ClassificationContext,

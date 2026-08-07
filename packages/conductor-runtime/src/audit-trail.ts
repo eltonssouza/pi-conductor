@@ -68,6 +68,61 @@ export interface AuditTrailWriter {
 	appendAuditEntry(entry: AuditEntry): void;
 }
 
+/**
+ * A security-detection event (Fase 5 loop-back, R37/T56 — gate3-addendum-fase5.md §8.3/§8.4). Distinct
+ * from a `PermissionGateDecision`-derived `AuditEntry`: this records a durable, escalated DENY for an
+ * artifact whose mere presence is an attack indicator — a `.conductor/library` index/ledger found UNDER
+ * a workspace, which no legitimate build of this tool writes there after D7/D9 (its detection is by
+ * PATH ALONE, never opening the file). Modeled as the ADR §8.4-sanctioned "evento-irmão": a separate
+ * JSONL shape discriminated by `kind: "security-detection"` on the SAME `.conductor/audit.jsonl`,
+ * carried by `appendSecurityEvent` below — ZERO change to `AuditEntry`/`appendAuditEntry`, so every
+ * existing tool-decision entry (which has no `kind`) and its tests are untouched.
+ */
+export interface SecurityDetectionEntry {
+	/** ISO-8601 UTC timestamp of the detection. */
+	timestamp: string;
+	/** Closed union — the kind of artifact detected (extend consciously, never a free string). */
+	event: "repo-supplied-library-artifact";
+	/** The detected artifact path — redacted at THIS sink independently of the caller (R6/R38). */
+	path: string;
+	/** Closed union — this class of finding is always HIGH (R37). */
+	severity: "high";
+	/** R37: recorded as a security DENY, the same disposition the Permission Engine audits its denies with. */
+	decision: "deny";
+}
+
+/**
+ * Appends one `SecurityDetectionEntry` to the append-only audit trail at `filePath`, discriminated by
+ * `kind: "security-detection"`. Same fail-closed discipline as `createAuditTrailWriter`'s
+ * `appendAuditEntry` (R9/FR-18): validates the timestamp, then `mkdir`+`appendFileSync` (mode `0o600`,
+ * `flag: "a"` — never truncates, never rewrites a prior line) so the record is durable on return, and
+ * ANY I/O failure (a `filePath` that is a directory, a blocked parent, a full disk) propagates straight
+ * out rather than being swallowed. `path` passes through this sink's OWN `redactSecrets` (R6/R38: every
+ * persisted string field is scrubbed here without presuming the upstream did it — a no-op on a
+ * well-formed path, defense in depth against a future mispopulate); `event`/`severity`/`decision` are
+ * closed unions that cannot carry a secret and are written as-is.
+ */
+export function appendSecurityEvent(filePath: string, entry: SecurityDetectionEntry): void {
+	if (!isValidIsoTimestamp(entry.timestamp)) {
+		throw new Error(
+			"audit-trail: refusing to persist a security event with a missing/invalid ISO-8601 timestamp — fail closed",
+		);
+	}
+	const record = {
+		kind: "security-detection" as const,
+		timestamp: entry.timestamp,
+		event: entry.event,
+		path: redactSecrets(entry.path),
+		severity: entry.severity,
+		decision: entry.decision,
+	};
+	const line = `${JSON.stringify(record)}\n`;
+	// mkdirSync is part of the fail-closed contract (same as appendAuditEntry): a non-directory parent
+	// throws synchronously here and the append is never reached.
+	mkdirSync(dirname(filePath), { recursive: true });
+	appendFileSync(filePath, line, { encoding: "utf8", mode: 0o600, flag: "a" });
+}
+
 function isValidIsoTimestamp(value: string): boolean {
 	return value.length > 0 && !Number.isNaN(Date.parse(value)) && new Date(value).toISOString() === value;
 }

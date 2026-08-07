@@ -53,6 +53,31 @@ export type OpenCodeIndexResult =
 	| { ok: true; store: CodeIndexStore }
 	| { ok: false; reason: "project-mismatch" | "repo-supplied-path-refused" | "missing" | "corrupt" };
 
+/** The `.conductor/library` path checked under a workspace, plus whether it exists — detection BY PATH
+ * ALONE (R37/T56), the exact discipline `openCodeIndex` refuses on, factored out so the composition
+ * root (`library status`) can reuse it to audit + escalate the same forgery indicator. */
+export interface RepoSuppliedArtifactDetection {
+	/** True iff a `.conductor/library` artifact exists under `workspaceRealPath` — after D7/D9 no
+	 * legitimate build of this tool ever writes one there, so its presence is a forgery indicator. */
+	detected: boolean;
+	/** The `<workspaceRealPath>/.conductor/library` path that was checked — always present, so a caller
+	 * can name it in an alert whether or not it was detected. */
+	path: string;
+}
+
+/**
+ * R37/T56 (gate3-addendum-fase5.md §8.3): detect a repo-supplied `.conductor/library` artifact under a
+ * workspace BY PATH ALONE — never opening/parsing the (attacker-suppliable, possibly binary) file, the
+ * one thing "never open it" avoids needing to do. `existsSync` is intentionally the whole check: the
+ * trigger is the path existing, not the content. Shared by `openCodeIndex` (which refuses) and the
+ * `library status` composition root (which additionally audits the detection as a security deny and
+ * escalates it HIGH — R37's two additive requirements on top of §10.3's "never open, never delete").
+ */
+export function detectRepoSuppliedLibraryArtifact(workspaceRealPath: string): RepoSuppliedArtifactDetection {
+	const path = join(workspaceRealPath, ".conductor", "library");
+	return { detected: existsSync(path), path };
+}
+
 /**
  * Opens the per-project code index for `projectId` (D7 §10.2: `sha256(realpath(workspaceRoot))
  * .slice(0, 16)`, computed by the caller via `library-home.ts`'s `computeProjectId`).
@@ -77,9 +102,10 @@ export function openCodeIndex(
 ): OpenCodeIndexResult {
 	// D7 §10.3/R37: refuse BY PATH ALONE, before ANY attempt to open/parse anything under the
 	// workspace -- checked first, and unconditionally, so a forged artifact's bytes are never touched
-	// regardless of whether a legitimate per-machine index also happens to exist for this project.
-	const repoSuppliedPath = join(workspaceRealPath, ".conductor", "library");
-	if (existsSync(repoSuppliedPath)) {
+	// regardless of whether a legitimate per-machine index also happens to exist for this project. Uses
+	// the SAME detection primitive the `library status` composition root uses to audit + escalate it,
+	// so the "what counts as a repo-supplied artifact" definition never drifts between the two.
+	if (detectRepoSuppliedLibraryArtifact(workspaceRealPath).detected) {
 		return { ok: false, reason: "repo-supplied-path-refused" };
 	}
 

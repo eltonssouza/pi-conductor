@@ -60,11 +60,13 @@
  */
 
 import { realpathSync } from "node:fs";
+import { join } from "node:path";
 import {
 	computeProjectId,
 	type CorpusSearchFilters,
 	createOllamaEmbeddingClient,
 	DEFAULT_BASE_URL as OLLAMA_DEFAULT_BASE_URL,
+	detectRepoSuppliedLibraryArtifact,
 	type EmbeddingClient,
 	enrichQuery,
 	fuseAndRerank,
@@ -73,6 +75,7 @@ import {
 	type RetrievedPassage,
 	resolveLibraryHome,
 } from "@conductor/library";
+import { appendSecurityEvent } from "@conductor/runtime";
 
 export interface LibraryStatusOptions {
 	cwd: string;
@@ -131,21 +134,79 @@ function safeAppend(write: () => void): void {
 	}
 }
 
+/** A HIGH security finding `library status` surfaces (R37/T56) — the structured half that goes into
+ * `--json` output, alongside the durable audit-trail record. */
+export interface LibrarySecurityAlert {
+	severity: "high";
+	event: "repo-supplied-library-artifact";
+	path: string;
+}
+
+/**
+ * R37/T56 (gate3-addendum-fase5.md §8.3): a `.conductor/library` artifact found UNDER the workspace has
+ * no legitimate producer after D7/D9 — its presence is a forgery indicator (the delivery vehicle for
+ * the T53 citation forgery by a new door). On detection (BY PATH ALONE — the same primitive
+ * `openCodeIndex` refuses on, never opening the file), this records a durable DENY security event in the
+ * workspace audit trail AND returns a HIGH alert for `runLibraryStatus` to escalate — never a neutral
+ * note beside the chunk counts. The audit write is best-effort so a status command never bricks on an
+ * unwritable audit dir, but a failure is logged loudly to stderr (never silently swallowed) — the
+ * user-visible HIGH escalation in the output is the primary signal regardless. */
+function detectAndAuditRepoSuppliedArtifact(cwd: string): LibrarySecurityAlert[] {
+	let workspaceRealPath: string;
+	try {
+		workspaceRealPath = realpathSync(cwd);
+	} catch {
+		// cwd itself is unresolvable (e.g. deleted out from under us) — fall back to the raw path rather
+		// than crash a status command; the detection below simply won't find an artifact under it.
+		workspaceRealPath = cwd;
+	}
+
+	const detection = detectRepoSuppliedLibraryArtifact(workspaceRealPath);
+	if (!detection.detected) return [];
+
+	// R37(i): record the detection as a durable, escalated DENY in the append-only audit trail.
+	try {
+		appendSecurityEvent(join(workspaceRealPath, ".conductor", "audit.jsonl"), {
+			timestamp: new Date().toISOString(),
+			event: "repo-supplied-library-artifact",
+			path: detection.path,
+			severity: "high",
+			decision: "deny",
+		});
+	} catch (error) {
+		console.error(
+			`[conductor-cli:library] ${new Date().toISOString()} operation=security-event-write degraded-loudly: ${describeError(error)} — the HIGH alert below is still surfaced`,
+		);
+	}
+
+	return [{ severity: "high", event: "repo-supplied-library-artifact", path: detection.path }];
+}
+
 /** Wired to `@conductor/library`'s corpus-store.ts (FR-8). Never fails because the corpus has not been
  * ingested yet -- `openCorpusStore` creates the schema on demand and `status()` answers `chunkCount:
- * 0` for a brand-new, empty corpus rather than throwing (corpus-store.ts's own contract). */
+ * 0` for a brand-new, empty corpus rather than throwing (corpus-store.ts's own contract).
+ *
+ * R37/T56: before reporting corpus stats, checks for a repo-supplied `.conductor/library` artifact under
+ * the workspace and, if present, records it as a security DENY and escalates it HIGH (never a neutral
+ * line beside the counts). */
 export function runLibraryStatus(options: LibraryStatusOptions): string {
+	const securityAlerts = detectAndAuditRepoSuppliedArtifact(options.cwd);
 	const home = resolveLibraryHome();
 	const corpusStore = openCorpusStore(home.corpusDatabase);
 	try {
 		const status = corpusStore.status();
 		if (options.json) {
-			return `${JSON.stringify(status, null, 2)}\n`;
+			return `${JSON.stringify({ ...status, securityAlerts }, null, 2)}\n`;
 		}
-		if (status.chunkCount === 0) {
-			return "0 chunks indexed — run 'conductor library ingest' first.\n";
-		}
-		return `${status.chunkCount} chunk(s) indexed (corpus version: ${status.corpusVersion ?? "unknown"}, embedding model: ${status.embeddingModel ?? "unknown"}).\n`;
+		const alertLines = securityAlerts.map(
+			(alert) =>
+				`[HIGH] SECURITY: repo-supplied library artifact detected under the workspace at ${alert.path} — refused and NOT opened. No legitimate build writes this here (D7/D9); its presence is a forged-grounding indicator (gate3-addendum-fase5.md R37/T56). Remove it from the repository; do not trust it.`,
+		);
+		const body =
+			status.chunkCount === 0
+				? "0 chunks indexed — run 'conductor library ingest' first.\n"
+				: `${status.chunkCount} chunk(s) indexed (corpus version: ${status.corpusVersion ?? "unknown"}, embedding model: ${status.embeddingModel ?? "unknown"}).\n`;
+		return alertLines.length > 0 ? `${alertLines.join("\n")}\n${body}` : body;
 	} finally {
 		corpusStore.close();
 	}
