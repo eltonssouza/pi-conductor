@@ -122,7 +122,17 @@ function isValidAllowlist(value: unknown): value is PolicyAllowlistEntry[] {
 
 function isValidNetwork(value: unknown): value is PolicyNetworkEntry[] {
 	if (!Array.isArray(value)) return false;
-	return value.every((item) => isPlainObject(item) && typeof item.destination === "string");
+	return value.every((item) => {
+		if (!isPlainObject(item) || typeof item.destination !== "string") return false;
+		if (item.scheme !== undefined && item.scheme !== "https" && item.scheme !== "http") return false;
+		if (item.port !== undefined) {
+			if (typeof item.port !== "number" || !Number.isInteger(item.port)) return false;
+			if (item.port < 1 || item.port > 65535) return false;
+		}
+		if (item.allowPlaintext !== undefined && typeof item.allowPlaintext !== "boolean") return false;
+		if (item.allowPrivateAddress !== undefined && typeof item.allowPrivateAddress !== "boolean") return false;
+		return true;
+	});
 }
 
 /**

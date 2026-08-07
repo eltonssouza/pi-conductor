@@ -138,11 +138,10 @@ describe("conductor library (end-to-end dispatch) -- argument shape (real, GREEN
 		try {
 			const { io, stderr } = createCapturingIo(project.root);
 
-			const code = await runCli(["library", "status"], io);
+			await runCli(["library", "status"], io);
 
-			// The stub throws "not implemented" -- caught by runLibraryCommand and turned into exit 1
-			// with THAT message, never "unknown subcommand" (proving "status" itself is recognized).
-			expect(code).not.toBe(0);
+			// Gate 6: status now genuinely succeeds (code 0) over an empty/freshly-created corpus -- the
+			// invariant this test protects is "not unknown subcommand", not "throws not-implemented".
 			expect(stderr()).not.toMatch(/unknown subcommand/);
 		} finally {
 			project.cleanup();

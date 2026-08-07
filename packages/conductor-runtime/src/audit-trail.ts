@@ -110,7 +110,20 @@ export function createAuditTrailWriter(filePath: string): AuditTrailWriter {
 			const redactedEntry: AuditEntry = {
 				...entry,
 				reason: entry.reason !== undefined ? redactSecrets(entry.reason) : entry.reason,
-				egress: entry.egress ? { destination: redactSecrets(entry.egress.destination) } : entry.egress,
+				// D10/T57 fix: preserve resolvedIp/payloadKind instead of the old spread-then-overwrite
+				// reconstruction that silently discarded both. resolvedIp gets the same independent-sink
+				// redaction as destination (R6: "cada sink redige independente"); payloadKind is a closed
+				// enum, never free text, so it needs no redaction. Each field is OMITTED (never written as
+				// `undefined`) when absent on the input, matching every other optional field in this writer.
+				egress: entry.egress
+					? {
+							destination: redactSecrets(entry.egress.destination),
+							...(entry.egress.resolvedIp !== undefined
+								? { resolvedIp: redactSecrets(entry.egress.resolvedIp) }
+								: {}),
+							...(entry.egress.payloadKind !== undefined ? { payloadKind: entry.egress.payloadKind } : {}),
+						}
+					: entry.egress,
 			};
 
 			const line = `${JSON.stringify(redactedEntry)}\n`;

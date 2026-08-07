@@ -6,9 +6,24 @@
  * (test/commands/gate-cli.acceptance.test.ts's own header): argument-SHAPE validation (which
  * subcommands exist, which flags `search` recognizes) is ordinary CLI plumbing and is REAL here, not
  * a Gate-6 stub -- `parseLibrarySearchArgs` below is fully implemented today. SUBSTANTIVE behavior
- * (an actual search/status/ingest/update against `@conductor/library`) is delegated to the `run*`
- * functions below, which ARE Gate-5 stubs that throw "not implemented" -- Gate 6 wires them to the
- * real engine once `@conductor/library`'s corpus-store.ts/embedding-client.ts land.
+ * (an actual search/status against `@conductor/library`) is wired below to the real engine, now that
+ * `@conductor/library`'s corpus-store.ts/embedding-client.ts have landed (this file is the
+ * composition root ADR §11.2 names: it is the one place allowed to import BOTH `@conductor/library`
+ * and, transitively via `@conductor/runtime`, the gate/grounding side -- neither of those two
+ * packages ever imports the other directly). `ingest`/`update` remain Gate-5 stubs -- no test in this
+ * round exercises FR-9/FR-10, and this is a deliberate, named deferral (YAGNI), not an oversight.
+ *
+ * FR-17's availability contract, enforced end-to-end in `runLibrarySearch` below: an unreachable/
+ * erroring embedding backend degrades the search to LEXICAL-ONLY and records a `rag-unreachable`
+ * ledger event -- it never throws out of this file and never blocks `library search` from answering.
+ * Grounded in the corpus-store.ts/embedding-client.ts headers' own citations for the individual
+ * mechanisms (finite-score requirement ADR §5.3, bm25 sign convention, FTS5 query-language injection
+ * ADR §15.1/§15.2); the specific "catch a secondary ledger-write failure so it degrades observability
+ * rather than the primary search response" decision below is this file's own judgment call, not
+ * separately library-grounded -- `cdt library "HTTP client timeout ... Release It" --gate 6` and a
+ * companion query on remote-service timeout patterns both returned only generic, off-topic
+ * engineering-practice passages at ~0.53-0.57 relevance (library does not cover this specific pattern
+ * for this stack).
  *
  * `conductor library import` deliberately has NO case in `runLibraryCommand`'s switch below, so it
  * falls to the same "unknown subcommand" refusal as any other typo -- this is ADR 0006 D5, a
@@ -18,6 +33,18 @@
  * correctly needs signature verification, a pinned trust key, and a revocation policy, which is
  * explicitly the Gate 7 (supply-chain) surface, not this fase's (ADR §8.2/§8.3).
  */
+
+import { realpathSync } from "node:fs";
+import {
+	computeProjectId,
+	createOllamaEmbeddingClient,
+	enrichQuery,
+	fuseAndRerank,
+	openCorpusStore,
+	openGroundingLedgerWriter,
+	resolveLibraryHome,
+	type RetrievedPassage,
+} from "@conductor/library";
 
 export interface LibraryStatusOptions {
 	cwd: string;
@@ -49,15 +76,143 @@ export interface LibraryUpdateOptions {
 	cwd: string;
 }
 
-/** GATE 5 stub -- Gate 6 wires this to `@conductor/library`'s corpus-store.ts (FR-8). */
-export function runLibraryStatus(options: LibraryStatusOptions): string {
-	throw new Error("not implemented");
+/** Best-effort ledger write: the WRITER's own contract (grounding-ledger.ts's header) is to THROW on
+ * I/O failure, on purpose, so a caller that depends on the write having happened never gets a false
+ * positive. Neither call site below depends on that -- `library status`/`search` are human-facing
+ * commands whose PRIMARY job is to answer the question; a ledger outage (disk full, permission error)
+ * is a secondary, observability-only failure that must degrade quietly rather than take the whole
+ * command down with it (FR-17's own "never block the primary operation" intent, applied one level
+ * further than the embedding backend itself). Scoped narrowly to this one composition root -- it does
+ * NOT relax the writer's contract for `@conductor/runtime`'s `recordGroundedDecision`, which has a
+ * real forgery-prevention reason (ADR §6.2) to require the write to actually have happened. */
+function safeAppend(write: () => void): void {
+	try {
+		write();
+	} catch (error) {
+		// Observability-only failure -- never let a ledger write problem surface as a search/status
+		// failure to the user (see this function's own doc comment). Still logged to stderr with
+		// context rather than swallowed silently (quality-baseline Observability category: a bare
+		// `catch {}` with zero trace would make a disk-full/permission ledger outage invisible).
+		console.error(`[conductor-cli:library] ${new Date().toISOString()} operation=ledger-write degraded-silently: ${describeError(error)}`);
+	}
 }
 
-/** GATE 5 stub -- Gate 6 wires this to `@conductor/library`'s hybrid-search.ts/corpus-store.ts
- * (FR-1/FR-2/FR-4/FR-5/FR-6/FR-7). */
-export function runLibrarySearch(options: LibrarySearchOptions): string {
-	throw new Error("not implemented");
+/** Wired to `@conductor/library`'s corpus-store.ts (FR-8). Never fails because the corpus has not been
+ * ingested yet -- `openCorpusStore` creates the schema on demand and `status()` answers `chunkCount:
+ * 0` for a brand-new, empty corpus rather than throwing (corpus-store.ts's own contract). */
+export function runLibraryStatus(options: LibraryStatusOptions): string {
+	const home = resolveLibraryHome();
+	const corpusStore = openCorpusStore(home.corpusDatabase);
+	try {
+		const status = corpusStore.status();
+		if (options.json) {
+			return `${JSON.stringify(status, null, 2)}\n`;
+		}
+		if (status.chunkCount === 0) {
+			return "0 chunks indexed — run 'conductor library ingest' first.\n";
+		}
+		return `${status.chunkCount} chunk(s) indexed (corpus version: ${status.corpusVersion ?? "unknown"}, embedding model: ${status.embeddingModel ?? "unknown"}).\n`;
+	} finally {
+		corpusStore.close();
+	}
+}
+
+const DEFAULT_SEARCH_K = 5;
+/** RRF's own constant (ADR §17.1, hybrid-search.ts's own header: Context Engineering §4.4's literal
+ * `rrf_merge(dense, lexical, k=60)`). */
+const RRF_K = 60;
+/** No candidate is dropped by default (FR-5/BR-2's threshold is an opt-in "courage to retrieve
+ * nothing" cutoff, not a default-active filter) -- every component `fuseAndRerank` sums is already
+ * non-negative (hybrid-search.ts's own weighted min-max-normalized terms), so `0` never excludes a
+ * genuine candidate while still satisfying the function's contract. */
+const DEFAULT_RELEVANCE_THRESHOLD = 0;
+
+function formatSearchResults(passages: readonly RetrievedPassage[]): string {
+	if (passages.length === 0) {
+		return "No results found for this query.\n";
+	}
+	const entries = passages.map((passage, index) => {
+		const excerpt = passage.body.length > 200 ? `${passage.body.slice(0, 200)}…` : passage.body;
+		return `${index + 1}. [${passage.score.toFixed(3)}] ${passage.source} — ${passage.section} (${passage.path})\n   ${excerpt}`;
+	});
+	return `${entries.join("\n\n")}\n`;
+}
+
+/** Wired to `@conductor/library`'s hybrid-search.ts/corpus-store.ts/embedding-client.ts/query-
+ * enrichment.ts/grounding-ledger.ts (FR-1/FR-2/FR-4/FR-5/FR-6/FR-7/FR-17). Lexical search always
+ * runs; dense search is attempted and, on ANY embedding-backend failure (network/timeout/HTTP
+ * error), degrades to lexical-only and records a `rag-unreachable` ledger event -- this function
+ * NEVER rejects because the embedding backend is unreachable, matching FR-17's whole reason for
+ * existing. */
+export async function runLibrarySearch(options: LibrarySearchOptions): Promise<string> {
+	const home = resolveLibraryHome();
+	const projectId = computeProjectId(realpathSync(options.cwd));
+	const ledgerWriter = openGroundingLedgerWriter(home.eventsLog(projectId));
+	const corpusStore = openCorpusStore(home.corpusDatabase);
+
+	try {
+		const k = options.k ?? DEFAULT_SEARCH_K;
+		const enrichedQuery = enrichQuery(options.question, {
+			gate: options.gate,
+			role: options.role,
+		});
+
+		const lexical = corpusStore.searchLexical(enrichedQuery, k);
+
+		let dense: RetrievedPassage[] = [];
+		let mode: "hybrid" | "lexical-only" = "lexical-only";
+		if (!options.lexicalOnly) {
+			try {
+				const embeddingClient = createOllamaEmbeddingClient();
+				const queryVector = await embeddingClient.embed(enrichedQuery);
+				dense = corpusStore.searchDense(queryVector, k);
+				mode = "hybrid";
+			} catch (error) {
+				// FR-17: the embedding backend being unreachable degrades to lexical-only -- never
+				// propagated as an exception out of this function.
+				safeAppend(() =>
+					ledgerWriter.appendUnreachable({
+						projectId,
+						backend: "ollama:bge-m3",
+						reason: describeError(error),
+					}),
+				);
+			}
+		}
+
+		const fused = fuseAndRerank(lexical, dense, enrichedQuery, {
+			rrfK: RRF_K,
+			topK: k,
+			threshold: DEFAULT_RELEVANCE_THRESHOLD,
+		});
+
+		const corpusStatus = corpusStore.status();
+		safeAppend(() =>
+			ledgerWriter.appendQuery({
+				projectId,
+				question: options.question,
+				enrichedQuery,
+				mode,
+				corpusVersion: corpusStatus.corpusVersion ?? "unknown",
+				embeddingModel: corpusStatus.embeddingModel ?? "bge-m3",
+				gate: options.gate,
+				role: options.role,
+				topScore: fused[0]?.score ?? 0,
+				hits: fused.map((passage) => ({
+					chunkHash: passage.chunkHash,
+					source: passage.source,
+					section: passage.section,
+					path: passage.path,
+					category: passage.category,
+					score: passage.score,
+				})),
+			}),
+		);
+
+		return formatSearchResults(fused);
+	} finally {
+		corpusStore.close();
+	}
 }
 
 /** GATE 5 stub -- Gate 6 wires this to `@conductor/library`'s corpus-store.ts (FR-9). */
@@ -208,7 +363,7 @@ export async function runLibraryCommand(args: string[], io: LibraryCliIO): Promi
 				return 1;
 			}
 			try {
-				io.stdout.write(runLibrarySearch({ cwd: io.cwd, ...parsed.flags }));
+				io.stdout.write(await runLibrarySearch({ cwd: io.cwd, ...parsed.flags }));
 				return 0;
 			} catch (error) {
 				io.stderr.write(`conductor library search: ${describeError(error)}\n`);

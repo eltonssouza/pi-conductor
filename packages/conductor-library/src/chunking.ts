@@ -38,10 +38,93 @@ export interface ChunkMarkdownOptions {
 	maxChars?: number;
 }
 
+const FENCE_LINE = /^```/;
+const HEADING_LINE = /^(#{1,6})\s+(.+)$/;
+
+/** Splits `text` into paragraphs on blank lines, except while inside a ``` fence (a blank line
+ * inside a fence is part of that paragraph, never a split point). */
+function splitParagraphs(text: string): string[] {
+	const lines = text.split("\n");
+	const paragraphs: string[] = [];
+	let current: string[] = [];
+	let inFence = false;
+
+	for (const line of lines) {
+		if (FENCE_LINE.test(line.trim())) {
+			inFence = !inFence;
+			current.push(line);
+			continue;
+		}
+		if (line.trim() === "" && !inFence) {
+			if (current.length > 0) {
+				paragraphs.push(current.join("\n"));
+				current = [];
+			}
+			continue;
+		}
+		current.push(line);
+	}
+	if (current.length > 0) paragraphs.push(current.join("\n"));
+
+	return paragraphs;
+}
+
+/** Extracts the heading text from a paragraph's OWN first line, e.g. "## Intro" -> "Intro"; `undefined`
+ * if the paragraph's first line is not an ATX heading. */
+function headingOf(paragraph: string): string | undefined {
+	const firstLine = paragraph.split("\n", 1)[0]!.trim();
+	const match = HEADING_LINE.exec(firstLine);
+	return match ? match[2]!.trim().replace(/\s+#+$/, "") : undefined;
+}
+
 /**
  * Splits `text` into paragraph-packed chunks, never splitting a fenced (``` ... ```) code block
  * across two chunks, and labeling each chunk with the heading in effect for its own first paragraph.
  */
 export function chunkMarkdown(text: string, options: ChunkMarkdownOptions = {}): MarkdownChunk[] {
-	throw new Error("not implemented");
+	const targetChars = options.targetChars ?? 1500;
+	const maxChars = options.maxChars ?? 2400;
+
+	const paragraphs = splitParagraphs(text);
+	const chunks: MarkdownChunk[] = [];
+
+	let currentParagraphs: string[] = [];
+	let currentLen = 0;
+	let currentSection = "";
+	let runningHeading = "";
+
+	const flush = () => {
+		if (currentParagraphs.length === 0) return;
+		chunks.push({ ordinal: chunks.length, section: currentSection, body: currentParagraphs.join("\n\n") });
+		currentParagraphs = [];
+		currentLen = 0;
+	};
+
+	for (const paragraph of paragraphs) {
+		const heading = headingOf(paragraph);
+		if (heading !== undefined) runningHeading = heading;
+
+		if (currentParagraphs.length > 0) {
+			const wouldBeLen = currentLen + 2 + paragraph.length;
+			if (wouldBeLen > targetChars) flush();
+		}
+
+		if (currentParagraphs.length === 0) {
+			// The heading in effect for THIS chunk's first paragraph -- captured now, after this
+			// paragraph's own heading-ness (if any) has already updated `runningHeading` above, but
+			// never overwritten later by a heading that only appears further into the same chunk.
+			currentSection = runningHeading;
+			currentLen = paragraph.length;
+		} else {
+			currentLen = currentLen + 2 + paragraph.length;
+		}
+		currentParagraphs.push(paragraph);
+
+		// Hard cap: a chunk is never carried past maxChars into the next paragraph decision, even if a
+		// single atomic paragraph (never split) pushed it past the target.
+		if (currentLen >= maxChars) flush();
+	}
+	flush();
+
+	return chunks;
 }

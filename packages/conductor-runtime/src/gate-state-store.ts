@@ -64,15 +64,24 @@ export interface GateStateEnvelopeV1 {
  * `state` é uma mudança de schema"). Identical to V1 except the literal `schemaVersion` — `Omit` keeps
  * this a single source of truth rather than a second, independently-drifting copy of every V1 field.
  *
- * GATE 5 (test-first, Fase 5): declared here as a PURE type addition — `createGateStateStore`'s
- * `read()`/`mutate()` bodies below are NOT touched by this declaration. A reader MUST eventually
- * accept both v1 and v2 (migrating a v1 in memory, `groundingCitations` treated as absent — never an
- * error, since ADR §5.2 item 3 confirms zero v1 file in the world has ever populated that field); a v1
- * envelope that SOMEHOW carries a populated `groundingCitations` (impossible today, but a defense
- * worth keeping) resolves to `could-not-verify`, fail-closed, never "interpret as best it can".
- * test/gate-state-schema-v2.test.ts drives the REAL, unmodified reader against both cases and fails
- * RED for the single correct reason: `isValidEnvelopeShape` below still hard-refuses anything but the
- * literal `1` — Gate 6 teaches it to accept both.
+ * GATE 6 (Fase 5, closing this file's own §7.3 gap): `read()`/`isValidEnvelopeShape` accept BOTH v1
+ * and v2 (migrating a read v1 in memory, `groundingCitations` treated as absent — never an error,
+ * since ADR §5.2 item 3 confirms zero v1 file in the world has ever legitimately populated that
+ * field); a v1 envelope that SOMEHOW carries a populated `groundingCitations` (impossible today via
+ * any real producer, but a defense worth keeping — a hand-edited file under a protected path, or a
+ * future downgrade) resolves to `could-not-verify`, fail-closed, never "interpret as best it can".
+ *
+ * `mutate()` below writes `schemaVersion: 2` exactly when the state it is about to persist actually
+ * carries a populated `groundingCitations` somewhere, `1` otherwise — "mudar a FORMA de um campo
+ * dentro de `state` é uma mudança de schema" (ADR §7.3): the schema version tracks whether the v2-only
+ * shape is actually in use, not a blanket rewrite-everything-as-v2 on touch (test/gate-state-schema-
+ * v2.test.ts's own seeding step, `store.mutate((current) => current)` on a fresh, citation-free
+ * bootstrap state, is documented in that file as writing "a genuine, checksummed v1 envelope" — an
+ * unconditional v2 stamp would falsify that comment and break that test's own fixture). This is also
+ * the necessary write-side half of the v1→v2 migration for `recordGroundedDecision` (gate-grounding.ts,
+ * the real producer of a populated `groundingCitations`): discovered as a genuine round-trip
+ * regression (write via `recordGroundedDecision`, then `read()` back refuses its own output as
+ * `could-not-verify`) while closing this gap, not a hypothetical.
  */
 export interface GateStateEnvelopeV2 extends Omit<GateStateEnvelopeV1, "schemaVersion"> {
 	schemaVersion: 2;
@@ -112,8 +121,14 @@ export interface GateStateStore {
 	 * or checksum mismatch all resolve to `{ kind: "could-not-verify" }` — a file that has never
 	 * been written yet resolves to the SAME `could-not-verify` shape (never a silently-invented
 	 * default `GateState`, and never a thrown exception a caller could forget to catch).
+	 *
+	 * ADR 0006 §7.3 (Fase 5): accepts BOTH `schemaVersion: 1` and `schemaVersion: 2` envelopes — the
+	 * union return type is honest about that (a caller narrowing on the literal `schemaVersion` gets
+	 * a compile-time reminder both are possible). `mutate()` below still only ever WRITES v1 (this
+	 * fase adds v2 read-tolerance, not a v2 writer) — see `isValidEnvelopeShape`'s own header for the
+	 * fail-closed defense this widening is paired with.
 	 */
-	read(): Result<GateStateEnvelopeV1, GateStateMutationError>;
+	read(): Result<GateStateEnvelopeV1 | GateStateEnvelopeV2, GateStateMutationError>;
 
 	/**
 	 * Check-and-write (R27): acquire the exclusive lock (`O_EXCL`/`CREATE_NEW`, stale-by-age
@@ -221,11 +236,15 @@ function isValidGateStateShape(value: unknown): value is GateState {
 	return true;
 }
 
-function isValidEnvelopeShape(value: unknown): value is GateStateEnvelopeV1 {
+/**
+ * ADR 0006 §7.3 (Fase 5): `schemaVersion` accepts the literal `1` OR `2` (FR-12's "a literal, never
+ * just `typeof === 'number'`" discipline extended to a two-member union, still never a bare
+ * `number` guess) — a v1 producer predates this fase and a v2 producer is `@conductor/library`'s own
+ * future concern; either is a real, recognized schema, anything else fails closed here.
+ */
+function isValidEnvelopeShape(value: unknown): value is GateStateEnvelopeV1 | GateStateEnvelopeV2 {
 	if (!isPlainObject(value)) return false;
-	// schemaVersion is a LITERAL 1 (FR-12), never just `typeof === "number"` — a v2 (or any other
-	// value) fails closed here rather than being guessed at.
-	if (value.schemaVersion !== 1) return false;
+	if (value.schemaVersion !== 1 && value.schemaVersion !== 2) return false;
 	if (typeof value.demandId !== "string" || typeof value.repoId !== "string" || typeof value.branch !== "string") {
 		return false;
 	}
@@ -233,6 +252,22 @@ function isValidEnvelopeShape(value: unknown): value is GateStateEnvelopeV1 {
 	if (typeof value.checksum !== "string") return false;
 	if (!isValidGateStateShape(value.state)) return false;
 	return true;
+}
+
+/**
+ * ADR 0006 §7.3/§5.2 item 3: zero `schemaVersion: 1` envelope in the world has ever legitimately
+ * populated a `Decision.groundingCitations` — no v1 producer existed before this fase, and
+ * `recordGroundedDecision` (gate-grounding.ts, the sole mint site) only ever writes that field
+ * alongside a `schemaVersion: 2`-worthy shape. A v1 file that carries one anyway (a hand-edited file
+ * under a protected path, or a future downgrade) is therefore "impossible today" but still checked
+ * for and refused fail-closed — the same "defended even though unreachable by any real producer"
+ * discipline as the demandId/repoId/branch content-authoritative check below it, never "interpret as
+ * best it can" (R28/T44's own direction, applied to this new field).
+ */
+function hasPopulatedGroundingCitations(state: GateState): boolean {
+	return Object.values(state.gates).some((record) =>
+		record.decisions.some((decision) => (decision.groundingCitations?.length ?? 0) > 0),
+	);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -357,7 +392,7 @@ const RENAME_RETRY_DELAYS_MS = [10, 20, 40];
 function writeEnvelopeAtomic(
 	destPath: string,
 	gatesDir: string,
-	envelope: GateStateEnvelopeV1,
+	envelope: GateStateEnvelopeV1 | GateStateEnvelopeV2,
 ): GateStateMutationError | null {
 	const tempPath = join(gatesDir, `.${basename(destPath)}.tmp-${randomBytes(4).toString("hex")}`);
 
@@ -412,7 +447,7 @@ export function createGateStateStore(options: GateStateStoreOptions): GateStateS
 
 	type ReadOutcome =
 		| { kind: "not-found" }
-		| { kind: "parsed"; envelope: GateStateEnvelopeV1 }
+		| { kind: "parsed"; envelope: GateStateEnvelopeV1 | GateStateEnvelopeV2 }
 		| { kind: "error"; error: GateStateMutationError };
 
 	/**
@@ -449,6 +484,21 @@ export function createGateStateStore(options: GateStateStoreOptions): GateStateS
 			};
 		}
 
+		// ADR 0006 §7.3: a schemaVersion:1 envelope carrying a populated groundingCitations is
+		// "impossible today" (see hasPopulatedGroundingCitations's own header) but is refused
+		// fail-closed rather than silently trusted -- a schemaVersion:2 envelope is exempt, the field
+		// is expected there.
+		if (parsed.schemaVersion === 1 && hasPopulatedGroundingCitations(parsed.state)) {
+			return {
+				kind: "error",
+				error: {
+					kind: "could-not-verify",
+					reason:
+						"schemaVersion:1 gate state envelope carries a populated groundingCitations, which no v1 producer could legitimately have written (ADR 0006 §7.3)",
+				},
+			};
+		}
+
 		if (
 			parsed.demandId !== options.demandId ||
 			parsed.repoId !== options.repoId ||
@@ -470,7 +520,7 @@ export function createGateStateStore(options: GateStateStoreOptions): GateStateS
 	return {
 		filePath,
 
-		read(): Result<GateStateEnvelopeV1, GateStateMutationError> {
+		read(): Result<GateStateEnvelopeV1 | GateStateEnvelopeV2, GateStateMutationError> {
 			const outcome = readEnvelopeFile();
 			if (outcome.kind === "not-found") {
 				// BR-9/G5: a file that has never been written yet is NOT "everything approved so far" --
@@ -565,15 +615,29 @@ export function createGateStateStore(options: GateStateStoreOptions): GateStateS
 					});
 				}
 
-				const envelope: GateStateEnvelopeV1 = {
-					schemaVersion: 1,
-					demandId: options.demandId,
-					repoId: options.repoId,
-					branch: options.branch,
-					revision: nextRevision,
-					checksum,
-					state: nextState,
-				};
+				// ADR 0006 §7.3: schemaVersion is 2 exactly when `nextState` actually carries a populated
+				// groundingCitations somewhere (see GateStateEnvelopeV2's own doc comment above for why
+				// this is content-conditioned, never an unconditional stamp) — 1 otherwise, e.g. every
+				// mutation before `recordGroundedDecision` (gate-grounding.ts) ever adds a citation.
+				const envelope: GateStateEnvelopeV1 | GateStateEnvelopeV2 = hasPopulatedGroundingCitations(nextState)
+					? {
+							schemaVersion: 2,
+							demandId: options.demandId,
+							repoId: options.repoId,
+							branch: options.branch,
+							revision: nextRevision,
+							checksum,
+							state: nextState,
+						}
+					: {
+							schemaVersion: 1,
+							demandId: options.demandId,
+							repoId: options.repoId,
+							branch: options.branch,
+							revision: nextRevision,
+							checksum,
+							state: nextState,
+						};
 
 				const writeError = writeEnvelopeAtomic(filePath, options.gatesDir, envelope);
 				if (writeError) return Result.err(writeError);

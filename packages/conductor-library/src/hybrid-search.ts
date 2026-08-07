@@ -69,11 +69,113 @@ export interface FuseAndRerankOptions {
  * Every returned `score` MUST be finite (`Number.isFinite`) -- a tied/degenerate candidate set must
  * never propagate `NaN`/`Infinity` out of this function (ADR §5.3/§17.2; see this file's header).
  */
+/** Splits into lowercase tokens the same way `fts-query.ts` does, so rerank features and lexical
+ * search agree on what counts as a "word". */
+function tokenize(text: string): string[] {
+	return text
+		.toLowerCase()
+		.split(/[^\p{L}\p{N}_]+/u)
+		.filter((token) => token.length > 0);
+}
+
+/** Fraction of `questionTokens` present (as a substring match) in `haystack`, case-insensitive.
+ * `0` when there are no question tokens to match against -- never a division by zero. */
+function coverage(questionTokens: readonly string[], haystack: string): number {
+	if (questionTokens.length === 0) return 0;
+	const lowerHaystack = haystack.toLowerCase();
+	const matched = questionTokens.filter((token) => lowerHaystack.includes(token)).length;
+	return matched / questionTokens.length;
+}
+
+/** Min-max normalizes `value` into `[min, max]` -> `[0, 1]`. When every candidate ties (`max ===
+ * min`), the naive formula divides by zero and produces `NaN` -- this is the exact degenerate input
+ * ADR §5.3/§17.2 names as a real (not hypothetical) bug. Guarded explicitly: a fully-tied set is
+ * treated as uniformly at its own maximum (there is no weaker/stronger candidate to compare against),
+ * never propagating `NaN`. */
+function normalize(value: number, min: number, max: number): number {
+	const range = max - min;
+	return range === 0 ? 1 : (value - min) / range;
+}
+
+// Composite rerank weights (ADR §17.2: deterministic light rerank, NOT a cross-encoder). Not fixed by
+// the docstring/ADR beyond naming the three features (lexical coverage, title match, normalized
+// first-stage score) plus the RRF fusion signal itself; the library has no IR/ranking-specific
+// guidance for this monorepo's stack (queried this Gate 6, only off-topic Software Construction /
+// Spec-Driven Development passages returned at ~0.49-0.52 relevance -- library does not cover this).
+// Chosen so the RRF consensus signal (both stages agreeing) dominates a single-stage top hit, per this
+// function's own contract test, while still letting lexical coverage, title match, and the original
+// first-stage score contribute.
+const RRF_WEIGHT = 0.4;
+const LEXICAL_COVERAGE_WEIGHT = 0.2;
+const TITLE_MATCH_WEIGHT = 0.1;
+const ORIGINAL_SCORE_WEIGHT = 0.3;
+
+/**
+ * Fuses two independently-ranked candidate lists (lexical FTS5 bm25, dense cosine) via reciprocal-
+ * rank fusion, reranks the fused set with a light deterministic feature re-score, and applies the
+ * relevance threshold -- returning at most `options.topK` passages, sorted by descending final score.
+ *
+ * Every returned `score` MUST be finite (`Number.isFinite`) -- a tied/degenerate candidate set must
+ * never propagate `NaN`/`Infinity` out of this function (ADR §5.3/§17.2; see this file's header).
+ */
 export function fuseAndRerank(
 	lexical: readonly RetrievedPassage[],
 	dense: readonly RetrievedPassage[],
 	question: string,
 	options: FuseAndRerankOptions,
 ): RetrievedPassage[] {
-	throw new Error("not implemented");
+	const { rrfK, topK, threshold } = options;
+
+	// Stage 1: reciprocal-rank fusion -- score(doc) = sum(1 / (k + rank)) over every list the doc
+	// appears in (Context Engineering §4.4, k=60, rank 1-indexed).
+	const rrfScores = new Map<string, number>();
+	const byId = new Map<string, RetrievedPassage>();
+
+	const accumulate = (list: readonly RetrievedPassage[]) => {
+		list.forEach((passage, index) => {
+			const rank = index + 1;
+			const contribution = 1 / (rrfK + rank);
+			rrfScores.set(passage.chunkId, (rrfScores.get(passage.chunkId) ?? 0) + contribution);
+			if (!byId.has(passage.chunkId)) byId.set(passage.chunkId, passage);
+		});
+	};
+	accumulate(lexical);
+	accumulate(dense);
+
+	const candidates = Array.from(byId.values());
+	if (candidates.length === 0) return [];
+
+	// Stage 2: light deterministic rerank over the fused set -- features the first stage did not use.
+	const questionTokens = tokenize(question);
+
+	const rrfValues = candidates.map((c) => rrfScores.get(c.chunkId) ?? 0);
+	const rrfMin = Math.min(...rrfValues);
+	const rrfMax = Math.max(...rrfValues);
+
+	const originalScores = candidates.map((c) => c.score);
+	const originalMin = Math.min(...originalScores);
+	const originalMax = Math.max(...originalScores);
+
+	const rescored = candidates.map((passage) => {
+		const rrfNorm = normalize(rrfScores.get(passage.chunkId) ?? 0, rrfMin, rrfMax);
+		const lexicalCoverage = coverage(questionTokens, passage.body);
+		const titleMatch = coverage(questionTokens, `${passage.section} ${passage.source}`);
+		const originalScoreNorm = normalize(passage.score, originalMin, originalMax);
+
+		const finalScore =
+			RRF_WEIGHT * rrfNorm +
+			LEXICAL_COVERAGE_WEIGHT * lexicalCoverage +
+			TITLE_MATCH_WEIGHT * titleMatch +
+			ORIGINAL_SCORE_WEIGHT * originalScoreNorm;
+
+		return { ...passage, score: finalScore };
+	});
+
+	// Stage 3: relevance threshold, applied AFTER fusion+rerank -- below it is DROPPED, never kept to
+	// pad out topK (FR-5/BR-2, "the courage to retrieve nothing").
+	const survivors = rescored.filter((passage) => passage.score >= threshold);
+
+	// Sorted by descending final score, capped at topK.
+	survivors.sort((a, b) => b.score - a.score);
+	return survivors.slice(0, topK);
 }

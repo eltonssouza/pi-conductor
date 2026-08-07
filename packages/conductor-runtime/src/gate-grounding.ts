@@ -48,7 +48,7 @@
 
 import type { Result } from "@earendil-works/pi-agent-core";
 import type { ApprovalMethod } from "./gate-approval.ts";
-import type { GateState } from "./gate-state.ts";
+import type { Decision, GateState } from "./gate-state.ts";
 import type { GateStateMutationError, GateStateStore } from "./gate-state-store.ts";
 
 /**
@@ -95,8 +95,14 @@ export interface GroundingCitation {
  */
 export type ValidateGroundingCitationResult = { ok: true } | { ok: false; reason: string };
 
-export function validateGroundingCitation(_citation: GroundingCitation): ValidateGroundingCitationResult {
-	throw new Error("not implemented");
+export function validateGroundingCitation(citation: GroundingCitation): ValidateGroundingCitationResult {
+	if (Number.isFinite(citation.score) && citation.score >= 0 && citation.score <= 1) {
+		return { ok: true };
+	}
+	return {
+		ok: false,
+		reason: `grounding citation score must be a finite number in [0,1], got ${JSON.stringify(citation.score)}`,
+	};
 }
 
 /** One hit inside a recorded `rag-query` event — the shape `@conductor/library`'s ledger adapter
@@ -183,17 +189,102 @@ export type RecordDecisionError =
  *      never silently clamped or forwarded to `GateStateStore.mutate()` to fail there with a
  *      misleading checksum error (D3 §5.3).
  */
+/**
+ * Appends `decision` to `gate`'s record inside a `GateStateStore.mutate()` callback, tolerating a
+ * gate number the store's own bootstrap never pre-populated (defensive fallback only — every gate
+ * 1-14 is already seeded `not-started` by `createDefaultGateState`, gate-state-store.ts). Shared by
+ * both mint functions below so the two never drift on how a `Decision` is folded into `GateState`.
+ */
+function appendDecisionToGate(current: GateState, gate: number, decision: Decision): GateState {
+	const record = current.gates[gate] ?? {
+		gate,
+		status: "not-started" as const,
+		evidence: [],
+		decisions: [],
+		risks: [],
+		approvals: [],
+	};
+	return {
+		...current,
+		gates: { ...current.gates, [gate]: { ...record, decisions: [...record.decisions, decision] } },
+	};
+}
+
 export function recordGroundedDecision(
-	_store: GateStateStore,
-	_input: {
+	store: GateStateStore,
+	input: {
 		gate: number;
 		text: string;
 		method: ApprovalMethod;
 		citations: readonly { queryEventId: string; chunkHash: string }[];
 	},
-	_ledger: GroundingLedgerReader,
+	ledger: GroundingLedgerReader,
 ): Result<{ next: GateState; revision: number }, RecordDecisionError> {
-	throw new Error("not implemented");
+	if (input.citations.length === 0) {
+		return { ok: false, error: { kind: "citation-required" } };
+	}
+
+	// Resolve + validate every pointer BEFORE attempting the mutation (D3 §5.3) — a citation is only
+	// ever built from what the ledger observed (event.question/corpusVersion/embeddingModel/mode/at,
+	// hit.source/section/path/category/score), never from anything the caller declared.
+	const resolvedCitations: GroundingCitation[] = [];
+	for (const pointer of input.citations) {
+		let event: RagQueryEventView | null;
+		try {
+			event = ledger.findQueryEvent(pointer.queryEventId);
+		} catch {
+			// R36/T55: a misbehaving adapter that throws collapses to the SAME refusal a genuine `null`
+			// would have produced — never propagated, never treated as proof of anything.
+			event = null;
+		}
+
+		const hit = event?.hits.find((candidate) => candidate.chunkHash === pointer.chunkHash);
+		if (!event || !hit) {
+			return {
+				ok: false,
+				error: { kind: "citation-unresolved", queryEventId: pointer.queryEventId, chunkHash: pointer.chunkHash },
+			};
+		}
+
+		const citation: GroundingCitation = {
+			queryEventId: event.id,
+			chunkHash: hit.chunkHash,
+			question: event.question,
+			source: hit.source,
+			section: hit.section,
+			path: hit.path,
+			category: hit.category,
+			corpusVersion: event.corpusVersion,
+			embeddingModel: event.embeddingModel,
+			score: hit.score,
+			retrievedAt: event.at,
+			mode: event.mode,
+		};
+
+		const validation = validateGroundingCitation(citation);
+		if (!validation.ok) {
+			return { ok: false, error: { kind: "citation-invalid", reason: validation.reason } };
+		}
+
+		resolvedCitations.push(citation);
+	}
+
+	const result = store.mutate((current) => {
+		const decision: Decision = {
+			gate: input.gate,
+			kind: "decision",
+			text: input.text,
+			method: input.method,
+			groundingCitations: resolvedCitations,
+			recordedAt: new Date().toISOString(),
+		};
+		return appendDecisionToGate(current, input.gate, decision);
+	});
+
+	if (!result.ok) {
+		return { ok: false, error: { kind: "store", error: result.error } };
+	}
+	return { ok: true, value: result.value };
 }
 
 /**
@@ -211,10 +302,44 @@ export function recordGroundedDecision(
  * be trusted is the explicit, attributed override in (b).
  */
 export function recordUngroundedDecision(
-	_store: GateStateStore,
-	_input: { gate: number; text: string; method: ApprovalMethod; override?: { reason: string; acceptedBy: string } },
-	_ledger: GroundingLedgerReader,
-	_now: Date,
+	store: GateStateStore,
+	input: { gate: number; text: string; method: ApprovalMethod; override?: { reason: string; acceptedBy: string } },
+	ledger: GroundingLedgerReader,
+	now: Date,
 ): Result<{ next: GateState; revision: number }, RecordDecisionError> {
-	throw new Error("not implemented");
+	// (b) An explicit, attributed override is accepted WITHOUT consulting the ledger at all (D11/§14.2)
+	// — checked first so a genuine override never even attempts the ledger read.
+	let accepted = input.override !== undefined;
+	if (!accepted) {
+		try {
+			// D13 §16.3: UNREACHABLE_WINDOW_MS passed unchanged, never a locally re-derived window.
+			accepted = ledger.findRecentUnreachable(now, UNREACHABLE_WINDOW_MS) !== null;
+		} catch {
+			// R36/T55: a misbehaving adapter that throws collapses to the same refusal a genuine `null`
+			// would have produced — an illegible ledger is never synthesized into proof of unreachability.
+			accepted = false;
+		}
+	}
+
+	if (!accepted) {
+		return { ok: false, error: { kind: "no-recent-unreachable" } };
+	}
+
+	const result = store.mutate((current) => {
+		// groundingCitations is OMITTED entirely (never a present key holding `undefined`) — this is the
+		// FR-17 escape hatch, never a Decision carrying citations.
+		const decision: Decision = {
+			gate: input.gate,
+			kind: "decision",
+			text: input.text,
+			method: input.method,
+			recordedAt: new Date().toISOString(),
+		};
+		return appendDecisionToGate(current, input.gate, decision);
+	});
+
+	if (!result.ok) {
+		return { ok: false, error: { kind: "store", error: result.error } };
+	}
+	return { ok: true, value: result.value };
 }

@@ -1,7 +1,8 @@
 /**
- * Redaction pipeline -- the choke point for every one of the six closed sinks
+ * Redaction pipeline -- the choke point for every one of the seven closed sinks
  * (docs/adr/0003-fase2-security-architecture.md §6.2/§16; docs/conductor/gate3-addendum-fase2.md
- * T21/T22, R6; docs/conductor/gate2-spec-fase2.md FR-12/FR-13/FR-14/FR-15, BR-7/BR-12).
+ * T21/T22, R6; docs/conductor/gate2-spec-fase2.md FR-12/FR-13/FR-14/FR-15, BR-7/BR-12; sink #7
+ * "codeIndex" added at Fase 5 D6 §9.1, ADR 0006 §19).
  *
  * GATE 5 (test-first): redactSecrets() and redactSessionEntryForPersistence() are STUBS that throw
  * "not implemented" -- Gate 6 implements the bodies. Wiring each of the six sinks to call these
@@ -15,7 +16,7 @@
  * call sites themselves -- proving the primitive's behavior is what Gate 6's wiring will need,
  * without this Gate 5 file reaching into a sibling agent's in-flight files to wire it prematurely.
  *
- * The six closed sinks (ADR §6.2, GAP-C's fix -- REDACTION_SINKS below turns "the enumeration is
+ * The seven closed sinks (ADR §6.2, GAP-C's fix -- REDACTION_SINKS below turns "the enumeration is
  * closed and complete" into an assertable fact, not just a paragraph in a doc that could quietly
  * shrink):
  *   1. transcript   -- conductor-cli's live TUI/stdout transcript funnel (FR-13)
@@ -27,6 +28,9 @@
  *   6. sessionExport -- a future `session export` command; BR-7's guarantee applies the moment it
  *                       ships (gate2-spec-fase2.md §9 open question #4) -- not built in this fase,
  *                       so it is a documented `it.todo` in the test file, never silently dropped.
+ *   7. codeIndex     -- the code-aware index (Fase 5, D6 §9.1): redaction runs BEFORE chunk/embed/
+ *                       upsert, never after -- a secret embedded before redaction stays recoverable by
+ *                       semantic similarity even once the displayed text is masked.
  */
 
 import { redactSecrets as redactSecretsShared } from "@conductor/secrets";
@@ -38,6 +42,7 @@ export const REDACTION_SINKS = [
 	"auditTrail",
 	"rethrownError",
 	"sessionExport",
+	"codeIndex",
 ] as const;
 
 export type RedactionSink = (typeof REDACTION_SINKS)[number];

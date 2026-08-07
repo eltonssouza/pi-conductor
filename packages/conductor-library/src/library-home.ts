@@ -28,6 +28,10 @@
  * `project-mismatch` check (D7 §10.2) has something durable to compare against.
  */
 
+import { createHash } from "node:crypto";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
 /** The per-scope paths D7/D9 define. `projectDir`/`codeDatabase`/`eventsLog` are functions of
  * `projectId` rather than fixed strings, because every project gets its OWN code index and ledger
  * (never the corpus's global sharing). */
@@ -48,8 +52,20 @@ export interface LibraryHomePaths {
  * Resolves the D7/D9 path layout rooted at `homeDir` (defaults to `os.homedir()` -- callers never
  * need to duplicate that lookup themselves).
  */
-export function resolveLibraryHome(homeDir?: string): LibraryHomePaths {
-	throw new Error("not implemented");
+export function resolveLibraryHome(homeDir: string = homedir()): LibraryHomePaths {
+	const root = join(homeDir, ".conductor", "library");
+	const corpusDatabase = join(root, "corpus.sqlite");
+	const projectsDir = join(root, "projects");
+
+	const projectDir = (projectId: string): string => join(projectsDir, projectId);
+
+	return {
+		root,
+		corpusDatabase,
+		projectDir,
+		codeDatabase: (projectId: string): string => join(projectDir(projectId), "code.sqlite"),
+		eventsLog: (projectId: string): string => join(projectDir(projectId), "events.jsonl"),
+	};
 }
 
 /**
@@ -58,5 +74,5 @@ export function resolveLibraryHome(homeDir?: string): LibraryHomePaths {
  * REAL path so the id is stable across symlink aliases of the same project (D7 §10.2).
  */
 export function computeProjectId(workspaceRealPath: string): string {
-	throw new Error("not implemented");
+	return createHash("sha256").update(workspaceRealPath, "utf8").digest("hex").slice(0, 16);
 }

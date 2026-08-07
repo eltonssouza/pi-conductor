@@ -34,5 +34,17 @@ export interface QueryEnrichmentContext {
  * caller must never lose the literal question by enriching it).
  */
 export function enrichQuery(raw: string, ctx: QueryEnrichmentContext): string {
-	throw new Error("not implemented");
+	const axes: string[] = [];
+	if (ctx.projectType) axes.push(`project: ${ctx.projectType}`);
+	if (ctx.technologies && ctx.technologies.length > 0) axes.push(`stack: ${ctx.technologies.join(", ")}`);
+	if (ctx.gate !== undefined) axes.push(`gate ${ctx.gate}`);
+	if (ctx.role) axes.push(`role: ${ctx.role}`);
+
+	// No axis known: the raw question is still searchable, unenriched -- never an error condition
+	// (Context Engineering §4.1: enrichment is optional per-call, not a hard gate).
+	if (axes.length === 0) return raw;
+
+	// The raw question is always a literal, contiguous substring of the output -- a caller must never
+	// lose it by enriching it (FR-3).
+	return `${axes.join(" | ")} — ${raw}`;
 }

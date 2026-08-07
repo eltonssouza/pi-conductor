@@ -42,5 +42,7 @@
  * the caller's job, same as any other bound value).
  */
 export function buildFtsMatchExpression(text: string, join: "OR" | "AND"): string {
-	throw new Error("not implemented");
+	const tokens = text.split(/[^\p{L}\p{N}_]+/u).filter((token) => token.length > 0);
+	const quoted = tokens.map((token) => `"${token.replace(/"/g, '""')}"`);
+	return quoted.join(` ${join} `);
 }

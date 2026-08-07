@@ -33,6 +33,10 @@
  * methods.
  */
 
+import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { dirname } from "node:path";
+
 /** One retrieval hit, as the runtime actually observed it (never as a caller declares it) -- the
  * per-hit fields `GroundingCitation` (in `@conductor/runtime`) is built from once a citation resolves
  * against a `rag-query` event by this id. */
@@ -79,9 +83,55 @@ export interface GroundingLedgerWriter {
 	appendUnreachable(input: RagUnreachableEventInput): AppendedEvent;
 }
 
+/**
+ * Appends `record` (already shaped as the exact JSONL fields ADR §16.1 specifies for its `kind`) as
+ * one line, stamped with a fresh `id`/`at`. Synchronous end-to-end (`appendFileSync`, mode `0o600`,
+ * `flag: "a"` -- never truncates, never rewrites a prior line, mirroring `audit-trail.ts`'s
+ * `createAuditTrailWriter`): by the time this returns without throwing, the line is already durable
+ * on disk, so a caller performing a dependent action right after gets a real ordering guarantee from
+ * this synchronous contract, not from a race. Any I/O failure (e.g. `path` resolving to a directory,
+ * a blocked parent, a full disk) propagates straight out -- this function has no try/catch of its
+ * own, on purpose (D13/§16.1: "swallowing a write failure here would let a caller believe grounding
+ * was recorded when it was not").
+ */
+function appendEvent(path: string, record: Record<string, unknown>): AppendedEvent {
+	const id = randomUUID();
+	const at = new Date().toISOString();
+	const line = `${JSON.stringify({ ...record, id, at })}\n`;
+	// mkdirSync is part of the fail-closed contract, same as audit-trail.ts: if the parent exists as
+	// a non-directory, this throws synchronously and execution never reaches appendFileSync.
+	mkdirSync(dirname(path), { recursive: true });
+	appendFileSync(path, line, { encoding: "utf8", mode: 0o600, flag: "a" });
+	return { id, at };
+}
+
 /** Opens (creating if necessary) the append-only JSONL ledger at `path` for writing. */
 export function openGroundingLedgerWriter(path: string): GroundingLedgerWriter {
-	throw new Error("not implemented");
+	return {
+		appendQuery(input: RagQueryEventInput): AppendedEvent {
+			return appendEvent(path, {
+				kind: "rag-query",
+				projectId: input.projectId,
+				question: input.question,
+				enrichedQuery: input.enrichedQuery,
+				mode: input.mode,
+				corpusVersion: input.corpusVersion,
+				embeddingModel: input.embeddingModel,
+				gate: input.gate,
+				role: input.role,
+				topScore: input.topScore,
+				hits: input.hits,
+			});
+		},
+		appendUnreachable(input: RagUnreachableEventInput): AppendedEvent {
+			return appendEvent(path, {
+				kind: "rag-unreachable",
+				projectId: input.projectId,
+				backend: input.backend,
+				reason: input.reason,
+			});
+		},
+	};
 }
 
 /** A `rag-query` event as a reader observes it (ADR Apêndice §19's `RagQueryEventView` shape --
@@ -114,8 +164,110 @@ export interface GroundingLedgerReader {
 	findRecentUnreachable(now: Date, windowMs: number): RagUnreachableEventView | null;
 }
 
+/** A raw JSONL record, before it is known to match the caller's query -- deliberately untyped past
+ * this point (parsed JSON is `unknown` by nature); each `find*` method below picks the fields it
+ * needs and casts, the same "shape-check then trust" discipline `policy-trust-store.ts`'s
+ * `isTrustStoreDocument` applies to its own parsed JSON. */
+interface RawLedgerEvent {
+	kind?: unknown;
+	id?: unknown;
+	projectId?: unknown;
+	[key: string]: unknown;
+}
+
+/**
+ * Reads and parses every line of `path`, collapsing EVERY failure mode to an empty array rather than
+ * throwing (R36, same single-try/catch-around-the-whole-read discipline `policy-trust-store.ts`'s
+ * `readTrustedEntries` already uses): a missing directory, a missing file, a path that is a
+ * directory instead of a file, and a permission error all fail closed identically. A corrupted
+ * individual LINE (invalid JSON) is skipped on its own -- caught line-by-line -- so one bad line
+ * never aborts the read of every other, valid line before and after it.
+ */
+function readEvents(path: string): RawLedgerEvent[] {
+	try {
+		if (!existsSync(path)) return [];
+		if (!statSync(path).isFile()) return [];
+		const raw = readFileSync(path, "utf8");
+		const events: RawLedgerEvent[] = [];
+		for (const line of raw.split("\n")) {
+			const trimmed = line.trim();
+			if (trimmed.length === 0) continue;
+			try {
+				const parsed: unknown = JSON.parse(trimmed);
+				if (parsed !== null && typeof parsed === "object") events.push(parsed as RawLedgerEvent);
+			} catch {
+				// Corrupted line -- skip it, keep reading the rest (R36).
+			}
+		}
+		return events;
+	} catch {
+		// Missing/unreadable directory or file, or any other unexpected fs error: fail closed to "no
+		// events", never throw (R36 -- an unreadable ledger is not proof of anything, so it must be
+		// indistinguishable from an empty one to every caller of this reader).
+		return [];
+	}
+}
+
+function toQueryView(event: RawLedgerEvent): RagQueryEventView | null {
+	if (
+		typeof event.id !== "string" ||
+		typeof event.question !== "string" ||
+		typeof event.enrichedQuery !== "string" ||
+		(event.mode !== "hybrid" && event.mode !== "lexical-only") ||
+		typeof event.corpusVersion !== "string" ||
+		typeof event.embeddingModel !== "string" ||
+		typeof event.at !== "string"
+	) {
+		return null;
+	}
+	return {
+		id: event.id,
+		question: event.question,
+		enrichedQuery: event.enrichedQuery,
+		mode: event.mode,
+		corpusVersion: event.corpusVersion,
+		embeddingModel: event.embeddingModel,
+		at: event.at,
+		hits: (Array.isArray(event.hits) ? event.hits : []) as readonly RagQueryHit[],
+	};
+}
+
+function toUnreachableView(event: RawLedgerEvent): RagUnreachableEventView | null {
+	if (typeof event.id !== "string" || typeof event.backend !== "string" || typeof event.reason !== "string" || typeof event.at !== "string") {
+		return null;
+	}
+	return { id: event.id, backend: event.backend, reason: event.reason, at: event.at };
+}
+
 /** Opens the ledger at `path` for reading, scoped to `projectId` (R36's defense-in-depth: an event
  * whose own recorded `projectId` does not match is treated the same as not found). */
 export function openGroundingLedgerReader(path: string, projectId: string): GroundingLedgerReader {
-	throw new Error("not implemented");
+	return {
+		findQueryEvent(queryEventId: string): RagQueryEventView | null {
+			const match = readEvents(path).find(
+				(event) => event.kind === "rag-query" && event.id === queryEventId && event.projectId === projectId,
+			);
+			return match ? toQueryView(match) : null;
+		},
+		findRecentUnreachable(now: Date, windowMs: number): RagUnreachableEventView | null {
+			const candidates = readEvents(path).filter(
+				(event) => event.kind === "rag-unreachable" && event.projectId === projectId,
+			);
+
+			let best: RawLedgerEvent | null = null;
+			let bestAt = -Infinity;
+			for (const event of candidates) {
+				const at = typeof event.at === "string" ? Date.parse(event.at) : Number.NaN;
+				if (Number.isNaN(at)) continue;
+				// D13 §16.3: only events within the fixed window count -- no permanent free pass for a
+				// single old event recorded once and never revisited.
+				if (now.getTime() - at > windowMs) continue;
+				if (at > bestAt) {
+					bestAt = at;
+					best = event;
+				}
+			}
+			return best ? toUnreachableView(best) : null;
+		},
+	};
 }

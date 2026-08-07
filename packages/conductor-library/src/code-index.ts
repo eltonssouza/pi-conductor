@@ -28,6 +28,11 @@
  *      packages together at Gate 6).
  */
 
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
+import { resolveLibraryHome } from "./library-home.ts";
+
 /** The open per-project code index handle. Minimal on purpose at Gate 5 -- ingestion/search
  * operations are added when Gate 6 wires the real `node:sqlite` schema (D1/D7); this file's own test
  * only exercises `openCodeIndex`'s OPEN-time decisions (manifest match, refusal to open a
@@ -70,7 +75,51 @@ export function openCodeIndex(
 	workspaceRealPath: string,
 	options: OpenCodeIndexOptions = {},
 ): OpenCodeIndexResult {
-	throw new Error("not implemented");
+	// D7 §10.3/R37: refuse BY PATH ALONE, before ANY attempt to open/parse anything under the
+	// workspace -- checked first, and unconditionally, so a forged artifact's bytes are never touched
+	// regardless of whether a legitimate per-machine index also happens to exist for this project.
+	const repoSuppliedPath = join(workspaceRealPath, ".conductor", "library");
+	if (existsSync(repoSuppliedPath)) {
+		return { ok: false, reason: "repo-supplied-path-refused" };
+	}
+
+	const home = options.home ?? resolveLibraryHome();
+	const dbPath = home.codeDatabase(projectId);
+
+	if (!existsSync(dbPath)) {
+		return { ok: false, reason: "missing" };
+	}
+
+	let db: DatabaseSync;
+	try {
+		db = new DatabaseSync(dbPath);
+	} catch {
+		// Exists but does not even open as a well-formed SQLite database (e.g. truncated/corrupted file).
+		return { ok: false, reason: "corrupt" };
+	}
+
+	let storedProjectId: string | undefined;
+	try {
+		const row = db.prepare("SELECT value FROM meta WHERE key = ?").get("projectId") as { value: string } | undefined;
+		storedProjectId = row?.value;
+	} catch {
+		// Opens as SQLite but the expected `meta` manifest table/row is missing or malformed.
+		db.close();
+		return { ok: false, reason: "corrupt" };
+	}
+
+	if (storedProjectId === undefined) {
+		db.close();
+		return { ok: false, reason: "corrupt" };
+	}
+
+	if (storedProjectId !== projectId) {
+		// Defense in depth: never silently trust a hand-edited/swapped file (D7 §10.2).
+		db.close();
+		return { ok: false, reason: "project-mismatch" };
+	}
+
+	return { ok: true, store: { close: () => db.close() } };
 }
 
 /**
@@ -81,8 +130,44 @@ export function openCodeIndex(
  * `id_rsa*`, `.netrc`, `.htpasswd`, `.tfvars`, `.tfstate`) named explicitly in the ADR so a future
  * addition to the allowlist is a conscious decision, never an oversight.
  */
+/** D6 §9.2's exact allowlist -- copied verbatim from the ADR, not approximated, so an addition is a
+ * conscious edit to this literal set rather than a guess at "common code extensions". */
+const ALLOWED_CODE_INDEX_EXTENSIONS: ReadonlySet<string> = new Set([
+	".ts",
+	".tsx",
+	".js",
+	".jsx",
+	".mjs",
+	".cjs",
+	".py",
+	".go",
+	".rs",
+	".java",
+	".kt",
+	".scala",
+	".rb",
+	".php",
+	".cs",
+	".c",
+	".h",
+	".cpp",
+	".hpp",
+	".swift",
+	".md",
+]);
+
 export function isAllowedCodeIndexExtension(path: string): boolean {
-	throw new Error("not implemented");
+	const basename = path.split(/[/\\]/).pop() ?? path;
+	const lastDot = basename.lastIndexOf(".");
+	// No dot at all (e.g. `id_rsa`), or a dotfile whose only dot is its leading one (e.g. `.env`,
+	// `.env.local`'s FIRST dot, `.netrc`, `.htpasswd`) -- neither has an extension this allowlist can
+	// match, so both fail closed to denied. This is what keeps every credential-shaped filename D6
+	// §9.2 names (`.env*`, `id_rsa*`, `.netrc`, `.htpasswd`) out WITHOUT a second, separate denylist:
+	// they are denied for the same reason `.env.local` is (its own extension, `.local`, is simply
+	// absent from the allowlist below) -- one mechanism, not two.
+	if (lastDot <= 0) return false;
+	const extension = basename.slice(lastDot).toLowerCase();
+	return ALLOWED_CODE_INDEX_EXTENSIONS.has(extension);
 }
 
 export interface GitIgnoreChecker {
@@ -109,7 +194,14 @@ export function filterIndexableCodeFiles(
 	paths: readonly string[],
 	gitIgnore: GitIgnoreChecker,
 ): FilterIndexableCodeFilesResult {
-	throw new Error("not implemented");
+	const ignored = gitIgnore.checkIgnored(paths);
+	if (ignored === null) {
+		// The check itself could not be answered -- refuse the WHOLE batch (D6 §9.3: uncertainty about
+		// confidentiality fails closed, never "index everything to be safe").
+		return { ok: false, reason: "git-check-failed" };
+	}
+	const ignoredSet = new Set(ignored);
+	return { ok: true, paths: paths.filter((path) => !ignoredSet.has(path)) };
 }
 
 /**
@@ -150,5 +242,12 @@ export function prepareCodeChunkForEmbedding(
 	redactor: CodeIndexRedactor,
 	chunk: (redactedText: string) => import("./chunking.ts").MarkdownChunk[],
 ): import("./chunking.ts").MarkdownChunk[] {
-	throw new Error("not implemented");
+	// D6 §9.1's ordering invariant: redact BEFORE chunk, always -- `rawContent` itself is never passed
+	// to `chunk`.
+	const redacted = redactor.redact(rawContent, "codeIndex");
+	if (redacted === SECRET_SCAN_FAILED_MARKER) {
+		// A scan failure is not degraded content to index anyway -- it is nothing to index at all.
+		return [];
+	}
+	return chunk(redacted);
 }
