@@ -23,7 +23,12 @@ export {
 	parseSkillBlock,
 	type SessionStats,
 } from "./core/agent-session.ts";
-export { readStoredCredential } from "./core/auth-storage.ts";
+// AuthStorage: ADR 0008 ("Fase 7 -- model routing e provedores") D8 / §14.2's sanctioned, single-line,
+// purely-additive export -- see docs/conductor/pi-upstream-gaps.md Gap 9 for the full rationale. The
+// class already lives in this same source file and is already used internally by this package's own
+// TUI login dialog; it was simply never re-exported alongside its neighbor `readStoredCredential`,
+// leaving no PUBLIC path to the hardened, persistent CredentialStore for any composing embedder.
+export { AuthStorage, readStoredCredential } from "./core/auth-storage.ts";
 // Compaction
 export {
 	type BranchPreparation,

@@ -17,6 +17,7 @@
 		"@conductor/diary": "0.0.0",
 		"@conductor/library": "0.0.0",
 		"@conductor/project": "0.0.0",
+		"@conductor/providers": "0.0.0",
 		"@conductor/runtime": "0.0.0",
 		"@earendil-works/pi-ai": "^0.83.0",
 		"@earendil-works/pi-coding-agent": "^0.83.0",

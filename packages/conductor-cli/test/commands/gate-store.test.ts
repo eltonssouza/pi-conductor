@@ -19,6 +19,7 @@
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createPersistedGateStateStore } from "../../src/commands/gate-store.ts";
+import { alwaysSatisfiedModelResolutionPort } from "../support/model-resolution-port.ts";
 import { createScratchProject, type ScratchProject } from "../support/scratch.ts";
 
 const DEMAND = "demand-1";
@@ -34,10 +35,14 @@ afterEach(() => {
 });
 
 function makeStore() {
+	// `modelResolutionPort` is required since ADR 0008 §21/D11 -- see test/support/model-resolution-port.ts
+	// for why this stub is a statement of scope, not a disabled check. This file's subject is the
+	// store's own `approve()` happy path and FR-13 idempotency, not model routing.
 	return createPersistedGateStateStore({
 		gatesDir: join(project.root, ".conductor", "gates"),
 		repoId: "test-repo",
 		branch: "feature/fase4-demo",
+		modelResolutionPort: alwaysSatisfiedModelResolutionPort(),
 	});
 }
 

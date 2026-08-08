@@ -16,6 +16,7 @@
 import { existsSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
 export interface WorkspacePolicyOptions {
 	/** Absolute path to the workspace root. Must already exist. */
@@ -125,6 +126,24 @@ export function isWithinRoot(candidateRealPath: string, rootRealPath: string): b
  * policy.json grant by another door, reopening T18 through the very store meant to gate it (ADR
  * §5.3: "o ledger... é ele próprio um store sensível"). Folded in here for the same
  * secure-by-default reason as its three siblings above: no future caller can forget it.
+ *
+ * D10/S1 (Fase 7, ADR 0008-fase7-model-routing-and-providers.md §1.1 finding F3, §14.2, §15;
+ * gate3-addendum-fase7.md secure-default 64): the vendor's own per-machine credential+catalog
+ * directory, `getAgentDir()` (`~/.pi/agent/`, holding `auth.json` and `models.json` — a provider's
+ * `baseUrl`/`apiKey`), was reachable by the agent's own read/write/edit/bash tools with no prior
+ * fase protecting it — the SAME confused-deputy reasoning as `~/.conductor/{library,diary}` above,
+ * now applied to a subtree this package does not own. The REAL exported vendor function is used
+ * (never a hardcoded `join(homedir(), ".pi", "agent")` literal), so this stays correct under a
+ * `PI_CODING_AGENT_DIR` override.
+ *
+ * D10/S2 (same ADR §14.2/§15; secure-default 65): the delegation child's own catalog/credential
+ * directory (`tools/task.ts`'s `createGovernedChildSessionSpawner`, historically `agentDir =
+ * join(workspaceRoot, ".conductor-agent")`) is the T73 attack surface — a hostile clone planting
+ * `.conductor-agent/models.json` (an `openai-compatible` provider with an attacker `baseUrl` +
+ * inline `apiKey`, both permitted by the vendor's schema) is closed here at the path-authority
+ * layer, in DEFENSE IN DEPTH alongside `task.ts`'s own fix (the spawner no longer points the
+ * child's model paths inside the workspace at all) — the subtree stays protected regardless of
+ * whether some future call site reintroduces a workspace-scoped pointer into it.
  */
 export function defaultProtectedPaths(workspaceRoot?: string): string[] {
 	const home = homedir();
@@ -146,12 +165,27 @@ export function defaultProtectedPaths(workspaceRoot?: string): string[] {
 		// write/edit/bash as the audit trail and GateState store already are -- same confused-deputy
 		// reasoning as every other entry in this list, applied to the whole ~/.conductor/diary subtree.
 		join(home, ".conductor", "diary"),
+		// D10/S1 (Fase 7, secure-default 64) -- see this function's own doc comment above.
+		getAgentDir(),
+		// GATE 9 (pentest Fase 7, achado F-G9-2 / T73 / R54(ii)): the per-machine home of the model-policy
+		// TOFU trust store (`~/.conductor/providers/projects/<projectId>/model-policy-trust.json`, see
+		// conductor-cli's `resolveModelPolicyTrustStorePath`). This store decides whether a non-catalog
+		// provider endpoint and a downward mandatory-gate remap are authorized at all, so an agent able to
+		// write it could grant ITSELF the very trust the store exists to withhold -- the same
+		// confused-deputy reasoning that already protects `policy-trust.json`, `audit.jsonl` and
+		// `.conductor/gates/`, applied to the one trust store that was missing from this list.
+		join(home, ".conductor", "providers"),
 	];
 	if (workspaceRoot) {
 		paths.push(
 			join(workspaceRoot, ".conductor", "config.json"),
 			join(workspaceRoot, ".conductor", "policy.json"),
 			join(workspaceRoot, ".conductor", "policy-trust.json"),
+			// F-G9-2 (Gate 9 pentest, Fase 7): the LEGACY in-workspace location of the model-policy trust
+			// store. The store itself moved per-machine (entry above) precisely because a repo-supplied pin
+			// is no pin at all; this entry is defense in depth, so that a future call site reintroducing a
+			// workspace-scoped pointer cannot also make the file agent-writable.
+			join(workspaceRoot, ".conductor", "model-policy-trust.json"),
 			join(workspaceRoot, ".conductor", "audit.jsonl"),
 			// Fase 4 (ADR 0005 §9.1, gate3-addendum-fase4.md R28/T44): the GateState governance store
 			// is a NEW security boundary the store's own on-disk location exposes, not a new
@@ -163,6 +197,8 @@ export function defaultProtectedPaths(workspaceRoot?: string): string[] {
 			// mutate a GateState is through the `gate *` commands (which route through
 			// mutateGateState/GateStateStore, R22/R27), never a direct write/edit/bash on the file.
 			join(workspaceRoot, ".conductor", "gates"),
+			// D10/S2 (Fase 7, secure-default 65) -- see this function's own doc comment above.
+			join(workspaceRoot, ".conductor-agent"),
 		);
 	}
 	return paths;

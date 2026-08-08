@@ -22,6 +22,7 @@ import { join } from "node:path";
 import { createGateStateStore } from "@conductor/runtime";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createPersistedGateStateStore } from "../../src/commands/gate-store.ts";
+import { alwaysSatisfiedModelResolutionPort } from "../support/model-resolution-port.ts";
 import { createScratchProject, type ScratchProject } from "../support/scratch.ts";
 
 const DEMAND = "demand-reject-kind";
@@ -43,7 +44,15 @@ function gatesDir(): string {
 }
 
 function makeCliStore() {
-	return createPersistedGateStateStore({ gatesDir: gatesDir(), repoId: REPO_ID, branch: BRANCH });
+	// `modelResolutionPort` is required since ADR 0008 §21/D11 -- see test/support/model-resolution-port.ts
+	// for why this stub is a statement of scope, not a disabled check. This file's subject is what
+	// `reject()` writes as a Decision `kind`, not model routing.
+	return createPersistedGateStateStore({
+		gatesDir: gatesDir(),
+		repoId: REPO_ID,
+		branch: BRANCH,
+		modelResolutionPort: alwaysSatisfiedModelResolutionPort(),
+	});
 }
 
 /** Reads the RAW persisted GateState via the same runtime store the CLI adapter wraps — the CLI's own

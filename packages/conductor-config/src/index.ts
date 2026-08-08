@@ -18,6 +18,31 @@ export {
 } from "./delegation-graph.ts";
 export { ConfigNotFoundError, ConfigParseError, ConfigValidationError, WorkspaceContainmentError } from "./errors.ts";
 export {
+	type ModelBinding,
+	type ModelPolicy,
+	type ModelPolicyDiagnostic,
+	type ParseModelPolicyResult,
+	parseModelPolicy,
+	type ResolveProjectModelPolicyResult,
+	resolveProjectModelPolicy,
+} from "./model-policy.ts";
+export {
+	loadModelPolicyTrustStore,
+	MODEL_POLICY_TRUST_STORE_SCHEMA_VERSION,
+	type ModelPolicyTrustEntry,
+	type ModelPolicyTrustStore,
+	type ModelPolicyTrustStoreDocument,
+	type ModelPolicyTrustStoreOptions,
+} from "./model-policy-trust-store.ts";
+export {
+	DEFAULT_GATE_MODEL_ROLE_RANK,
+	DEFAULT_GATE_MODEL_ROLES,
+	type GateModelRole,
+	MODEL_ROLE_RANK,
+	type NormalizePlanModelRoleResult,
+	normalizePlanModelRole,
+} from "./model-role.ts";
+export {
 	type BuiltinPolicyDefaults,
 	type EffectivePolicy,
 	loadPolicyDocument,

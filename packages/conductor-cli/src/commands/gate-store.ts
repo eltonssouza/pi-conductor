@@ -36,11 +36,25 @@ import {
 	type Evidence,
 	evaluateAdvance,
 	evaluateCalibration,
+	// Fase 7 D4 (see the ModelResolutionPort doc comment below): `evaluateModelPrecondition` is a REAL
+	// value import -- the sibling Fase-7 stream that owns `@conductor/runtime` landed it during this
+	// same Gate 6 pass (packages/conductor-runtime/src/model-precondition.ts). It is safe to import
+	// directly even though `@conductor/providers` (a DIFFERENT sibling package, still landing) is not
+	// yet resolvable: `model-precondition.ts`'s own header confirms it only ever TYPE-imports from
+	// `@conductor/providers` ("A plain `import type` compiles to nothing at runtime, so this file is
+	// safe to import and test even before the sibling stream's `@conductor/providers/src/index.ts`
+	// lands") -- confirmed here by a full `npx vitest run` of this package after adding this import
+	// (339/340, the one pre-existing/expected failure unrelated to this line). `ModelResolutionPort`
+	// stays type-only: this file never constructs a real adapter (that needs `@conductor/providers`'s
+	// engine, out of this stream's scope) -- only the composition root that eventually calls
+	// `createPersistedGateStateStore` will.
+	evaluateModelPrecondition,
 	type GateRecord,
 	type GateState,
 	type GateStateMutationError,
 	type GateStateStore,
 	hasSufficientEvidenceForMandatoryGate,
+	type ModelResolutionPort,
 	mintHumanApproval,
 } from "@conductor/runtime";
 import { DEFAULT_GIT_STATUS_TIMEOUT_MS, getGitStatus, resolveTimeoutMs } from "../git-status.ts";
@@ -51,6 +65,37 @@ export interface PersistedGateStateStoreOptions {
 	gatesDir: string;
 	repoId: string;
 	branch: string;
+	/**
+	 * Fase 7 D4 (ADR 0008 §6/§16 -- "recusa fail-closed imposta em três pontos de autorização de
+	 * trabalho", P1 = gate opening, this file). The evaluator (`evaluateModelPrecondition`, imported
+	 * for real above) is fixed; only the PORT is injected -- the same Dependency Inversion seam
+	 * `commands/gate.ts`'s `GateStateStoreView`/`RoleRegistryView` decoupling already uses ("never a
+	 * concrete [cross-package] type directly"), with the real adapter built by the composition root
+	 * (`commands/model-context.ts`'s `createGateModelResolutionPort`, over `@conductor/providers`).
+	 *
+	 * **REQUIRED, deliberately (ADR 0008 §21/D11, Gate-8 loop-back).** It was optional in the first
+	 * Gate-6 pass, and Gate 8 measured the consequence: production never passed one, so the
+	 * `if (options.modelResolutionPort)` guard that used to sit in `start()` made the whole
+	 * fail-closed check permanently INERT -- the mutation "`evaluateModelPrecondition` always returns
+	 * satisfied" SURVIVED both this package's and `@conductor/runtime`'s full suites. §21's remedy is
+	 * exactly this signature: "`evaluateModelPrecondition` passa a ser chamado incondicionalmente a
+	 * partir do composition root, nunca atrás de um campo opcional que a produção nunca preenche".
+	 * Making it required moves that guarantee into the type system, where it cannot silently regress:
+	 * a future caller that forgets the port does not compile. Mirrors `MANDATORY_GATES` at this very
+	 * call site -- injected into every policy call, never left to a default.
+	 *
+	 * *Grounding:* **SOLID Design Principles §3.1/§3.2/§3.6** (0.656/0.648/0.639: the Dependency
+	 * Inversion Principle -- depend on an abstraction the consumer owns, "wire implementations via a
+	 * dependency-injection container at the composition root").
+	 *
+	 * `start()` runs the precondition BEFORE `evaluateAdvance` (ADR §6.2 point 3: a "no model for this
+	 * gate" refusal is a cheaper, more actionable diagnostic than an evidence/order refusal), refusing
+	 * gate opening on `{kind:"refused"}` the same way an `evaluateAdvance` refusal already does -- a
+	 * second, independent, composed verdict, never a new arm bolted onto `GateAdvanceVerdict` itself
+	 * (D4's own explicit "zero mudança na máquina de gates" -- see the regression guard in
+	 * `@conductor/runtime`'s own test suite).
+	 */
+	modelResolutionPort: ModelResolutionPort;
 }
 
 function describeStoreError(error: GateStateMutationError): string {
@@ -158,6 +203,23 @@ export function createPersistedGateStateStore(options: PersistedGateStateStoreOp
 		start(demandId, gate) {
 			const store = storeFor(options, demandId);
 			readOrBootstrap(store); // ensures the demand/gate-1 auto-open exists before evaluating the floor
+			// Fase 7 D4 (ADR 0008 §6.2 point 3): the model-resolution precondition is evaluated BEFORE
+			// evaluateAdvance -- a "no model authorized for this gate" refusal is a cheaper, more
+			// actionable diagnostic than an evidence/order refusal, and the ADR requires exactly this
+			// order (two round-trips to the same fix otherwise: "gate 8 not approved" now, "no model"
+			// on the next attempt). A SECOND, independent, composed verdict (`ModelPreconditionVerdict`)
+			// -- never a value folded into `GateAdvanceVerdict` itself (D4's own "zero mudança na
+			// máquina de gates", guarded by @conductor/runtime's own composition-regression test).
+			// UNCONDITIONAL (ADR 0008 §21/D11, Gate-8 loop-back): the `if (options.modelResolutionPort)`
+			// guard that used to wrap these lines is precisely what made this check inert -- production
+			// never passed a port, so the mutation "evaluateModelPrecondition always returns satisfied"
+			// survived every suite. The port is now a REQUIRED option (see its doc comment above), so
+			// there is nothing left to guard against. Same (gate, port, MANDATORY_GATES) call shape as
+			// evaluateAdvance/evaluateCalibration below.
+			const modelVerdict = evaluateModelPrecondition(gate, options.modelResolutionPort, MANDATORY_GATES);
+			if (modelVerdict.kind === "refused") {
+				throw new GateCommandError(`cannot start gate ${gate}: ${modelVerdict.humanReadable}`);
+			}
 			// R23/FR-2: fail-closed against the REAL mandatory-floor policy (gate-state-policy.ts's
 			// evaluateAdvance/isMandatorySatisfied), never a second, duplicated inline check -- this is
 			// exactly the wiring this pendency closes; a bug inside this callback (including the throw
