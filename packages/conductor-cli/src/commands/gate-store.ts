@@ -55,10 +55,17 @@ import {
 	type GateStateStore,
 	hasSufficientEvidenceForMandatoryGate,
 	type ModelResolutionPort,
+	mintAutoApproval,
 	mintHumanApproval,
 } from "@conductor/runtime";
 import { DEFAULT_GIT_STATUS_TIMEOUT_MS, getGitStatus, resolveTimeoutMs } from "../git-status.ts";
-import { GateCommandError, type GateRecordSnapshot, type GateStateStoreView, type GateStatusSnapshot } from "./gate.ts";
+import {
+	GateCommandError,
+	type GateRecordSnapshot,
+	type GateStateStoreView,
+	type GateStatusSnapshot,
+	type InteractivityWitness,
+} from "./gate.ts";
 
 export interface PersistedGateStateStoreOptions {
 	/** Absolute path to the `.conductor/gates` directory (ADR 0005 §3.1). */
@@ -96,7 +103,42 @@ export interface PersistedGateStateStoreOptions {
 	 * `@conductor/runtime`'s own test suite).
 	 */
 	modelResolutionPort: ModelResolutionPort;
+
+	/**
+	 * Fase 8 / D3 layer 2 (ADR 0009 §5.3/§16, Gate 3 T75/R56 — **Gate 8 loop-back, finding 5**: wired for
+	 * real here; Gate 6's first pass declared this out of its touched-files scope, see `gate.ts`'s own
+	 * `InteractivityWitness` doc comment). The independent interactivity witness `approve()` below crosses
+	 * against `confirmResult` before ever minting `method:"human"` — production default
+	 * `defaultInteractivityWitness` (below), reading the REAL process TTY state via a code path
+	 * deliberately distinct from `io.tty`/`resolveConfirmChannel` (D3 layer 1, `tty-confirm.ts`'s own
+	 * seam). The binding rule: `confirmResult === true && isInteractive() === false` never mints — the
+	 * same `needs-human` branch a `confirmResult !== true` already produces.
+	 *
+	 * **REQUIRED, deliberately** — same discipline as `modelResolutionPort` above (ADR 0008 §21/D11): an
+	 * optional field with a production default nothing overrides in a test is precisely the shape that
+	 * already made `modelResolutionPort`'s own fail-closed check silently inert once (Gate 8 found it).
+	 * Making this required moves the guarantee into the type system: a future caller (production or test)
+	 * that forgets to state which posture it wants does not compile — it cannot silently inherit whatever
+	 * `process.stdin.isTTY` happens to be under that call site's own process (unstable across test
+	 * runners/CI, and exactly the ambiguity a security-relevant witness must never have).
+	 *
+	 * *Grounding:* **SOLID Design Principles §3.1/§3.2/§3.6** (Dependency Inversion — depend on an
+	 * abstraction the consumer owns, wire the concrete witness at the composition root), same citation
+	 * already recorded above for `modelResolutionPort`; this is the same pattern applied to a second,
+	 * independent security-relevant collaborator.
+	 */
+	isInteractive: InteractivityWitness;
 }
+
+/**
+ * Fase 8 / D3 layer 2 (ADR 0009 §5.3): the production default `InteractivityWitness`, reading the REAL
+ * process TTY state directly (`process.stdin`/`process.stdout`) — a code path deliberately distinct from
+ * `io.tty`/`tty-confirm.ts`'s injected `TtyStreams` seam (D3 layer 1), so forging a sign-off requires
+ * defeating BOTH independently. Composition roots (`cli.ts`'s `case "gate"`, `commands/auto.ts`'s
+ * internal store) pass this; tests pass an explicit double from `test/support/interactivity-witness.ts`.
+ */
+export const defaultInteractivityWitness: InteractivityWitness = () =>
+	Boolean(process.stdin.isTTY && process.stdout.isTTY);
 
 function describeStoreError(error: GateStateMutationError): string {
 	switch (error.kind) {
@@ -315,7 +357,14 @@ export function createPersistedGateStateStore(options: PersistedGateStateStoreOp
 				// R22: this adapter never writes method:"human" itself -- it only calls the sole factory
 				// (mintHumanApproval), which itself only ever mints from a confirmResult that already came
 				// out of the one real channel (runGateApprove's own options.confirm).
-				const approval = mintHumanApproval(confirmResult, {
+				// D3 layer 2 (Gate 8 loop-back finding 5): the boolean fed into mintHumanApproval is the
+				// AND of confirmResult and the independent interactivity witness -- a `true` confirmResult
+				// alone is no longer sufficient; a synthetic `true` reaching this point through a wiring
+				// bug in the channel (layer 1) still cannot mint on a non-interactive process. Computed
+				// here, not passed to mintHumanApproval as a second parameter, because that factory's own
+				// signature is locked (ADR 0005 §6 -- "do not change these shapes without a new ADR").
+				const effectiveConfirmResult = confirmResult === true && options.isInteractive();
+				const approval = mintHumanApproval(effectiveConfirmResult, {
 					gate,
 					demandId,
 					branch: current.branch,
@@ -396,6 +445,70 @@ export function createPersistedGateStateStore(options: PersistedGateStateStoreOp
 				return { ...current, calibration: decision };
 			});
 			if (!result.ok) throw new GateCommandError(`cannot register calibration: ${describeStoreError(result.error)}`);
+			return projectSnapshot(result.value.next);
+		},
+
+		// FASE 8 / N1 (docs/adr/0009-fase8-autonomous-mode.md §1.1/§14, Gate 6 wiring closure): the FIRST
+		// call site of @conductor/runtime's mintAutoApproval, composing the SAME store.mutate every other
+		// method on this interface already uses (never a second mutator). GUARDED by MANDATORY_GATES,
+		// checked BEFORE any store I/O at all -- a mandatory gate refuses unconditionally, independent of
+		// whether it was ever started (gate-approve-auto-mandatory-guard.test.ts's it.each calls this with
+		// no prior store.start() at all, so the refusal must not depend on gate/demand state).
+		approveAuto(demandId, gate) {
+			if (MANDATORY_GATES.has(gate)) {
+				throw new GateCommandError(
+					`cannot auto-approve gate ${gate}: it is a mandatory gate (N1/R55) -- a mandatory gate is never auto-cunhado, only a genuine human sign-off (\`conductor gate approve\`) can close it`,
+				);
+			}
+			const store = storeFor(options, demandId);
+			readOrBootstrap(store);
+			const result = store.mutate((current) => {
+				const record = current.gates[gate];
+				if (!record || record.status === "not-started" || record.status === "rejected") {
+					throw new GateCommandError(`cannot auto-approve gate ${gate}: it was never started (or is rejected)`);
+				}
+				// Mirrors approve()'s own idempotency guard: re-approving an already-approved gate reaffirms
+				// the existing state, never mints a second, redundant Approval.
+				if (record.status === "approved") {
+					return current;
+				}
+				// Gate 8 loop-back, finding 1 (hollow gate completion): a non-mandatory gate is exempt from
+				// hasSufficientEvidenceForMandatoryGate's stronger runtime-derived/git-commit bar (R25's
+				// golden rule is a MANDATORY-gate floor, BR-6), but "exempt from the strong bar" was never
+				// meant to read as "exempt from having done anything at all". Before this fix, approveAuto
+				// minted method:"auto" for a gate with ZERO attached evidence -- because no subagent
+				// delegation exists yet (runAuto's own header, step (c)), every non-mandatory gate a headless
+				// run passed through was recorded as genuinely "approved" while representing no real work
+				// whatsoever. This floor is deliberately LIGHTER than the mandatory one (any attached
+				// evidence item counts, author-declared or runtime-derived -- see gate-evidence.ts's own
+				// EvidenceProvenanceInfo) because a non-mandatory gate never had the stronger bar to begin
+				// with; it only refuses the ZERO case, forcing a hollow run to fail loud (the caller,
+				// runAuto, already converts any GateCommandError here into a needs-human stop, never a
+				// silent false completion).
+				if (record.evidence.length === 0) {
+					throw new GateCommandError(
+						`cannot auto-approve gate ${gate}: no evidence attached -- an auto-approved gate can never be a hollow completion, even when non-mandatory (Gate 8 loop-back finding 1)`,
+					);
+				}
+				// N1: the ONE producer of method:"auto" for this call site -- mintAutoApproval itself can
+				// never return a method:"human" value under any input (BR-7), so this mint can never be
+				// confused with a genuine human sign-off however it is later read back.
+				const approval = mintAutoApproval({ gate, demandId, branch: current.branch, source: "conductor-auto" });
+				return {
+					...current,
+					gates: {
+						...current.gates,
+						[gate]: {
+							...record,
+							status: "approved",
+							completedAt: new Date().toISOString(),
+							approvals: [...record.approvals, approval],
+						},
+					},
+				};
+			});
+			if (!result.ok)
+				throw new GateCommandError(`cannot auto-approve gate ${gate}: ${describeStoreError(result.error)}`);
 			return projectSnapshot(result.value.next);
 		},
 	};
