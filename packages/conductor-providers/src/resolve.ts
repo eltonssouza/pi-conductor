@@ -110,6 +110,75 @@ function destinationHostFor(ctx: ResolutionContext, ref: ModelRef): string {
 	return ref.provider;
 }
 
+/**
+ * D11/§21's compatibility branch, kept as ONE named, auditable function rather than a set of `if`s
+ * threaded through stages 4-7 -- so "what exactly is exempt in compatibility mode" is readable in a
+ * single place instead of reconstructed from six scattered conditions.
+ *
+ * What it deliberately does NOT do, and why:
+ *   - it does not apply the CREDENTIAL filter (stage 5) or the AVAILABILITY filter (stage 6). §21's
+ *     requirement is that the pre-Fase-7 behavior is "preservado byte a byte": opening a gate never
+ *     called a model and never consulted a credential, so making `gate start` refuse on a machine
+ *     that has not run `conductor login` would be the universal regression §21 exists to prevent.
+ *     The credential/availability facts are still EMITTED as trace steps (what `models why` prints):
+ *     the filter is relaxed, the information is not deleted (§21's own grounding, Managing Software
+ *     Complexity §3.12).
+ *   - it does not apply the TIER floor (stage 7, region A). §21 states this outright: there is no
+ *     second model to compare a tier against in this mode, so `UNIVERSAL_FALLBACK_RANK` satisfies any
+ *     floor by construction. `floor` is still recorded in the trace (stage 2 already pushed it).
+ *   - it does not apply the same-provider/cross-provider egress split (stage 7, region B). With
+ *     exactly one candidate, which IS the session's own model, there is no second destination to
+ *     cross to -- BR6's floor is trivially satisfied, never waived.
+ * It DOES keep the catalog requirement: without a real `Model<Api>` there is nothing to hand back,
+ * and fabricating one would be the silent invention R54(i) forbids.
+ */
+function resolveUniversalFallback(
+	candidate: ResolvedCandidate,
+	ctx: ResolutionContext,
+	floor: number,
+	steps: ResolutionStep[],
+	trace: () => ResolutionTrace,
+	refuse: (refusal: ResolutionRefusal) => ModelResolution,
+): ModelResolution {
+	const gate = trace().gate;
+	const model = ctx.catalog[catalogKey(candidate.ref.provider, candidate.ref.modelId)];
+
+	steps.push({
+		stage: "credential",
+		perProvider: [
+			{
+				provider: candidate.ref.provider,
+				configured: candidate.credential.configured,
+				...(candidate.credential.source !== undefined ? { source: candidate.credential.source } : {}),
+				authorizedByPolicy: candidate.credential.authorizedByPolicy,
+			},
+		],
+	});
+	steps.push({
+		stage: "availability",
+		perProvider: [
+			{
+				provider: candidate.ref.provider,
+				state: candidate.availability.state,
+				...(candidate.availability.checkedAt !== undefined ? { checkedAt: candidate.availability.checkedAt } : {}),
+				...(candidate.availability.cooldownUntil !== undefined
+					? { cooldownUntil: candidate.availability.cooldownUntil }
+					: {}),
+			},
+		],
+	});
+
+	if (!model) {
+		// Only reachable from a hand-built context (`buildResolutionContext` never seeds a fallback it
+		// cannot back with a catalog entry). Refusing here keeps R49(i)'s "never throws" contract while
+		// still naming the exact problem, rather than asserting an invariant a caller could violate.
+		return refuse({ kind: "unknown-model", gate, declared: candidate.ref.modelId });
+	}
+
+	steps.push({ stage: "selection", selected: candidate.ref, rejected: [] });
+	return { resolved: true, model, ref: candidate.ref, effectiveRank: floor, trace: trace() };
+}
+
 export function resolveModelForGate(request: ResolveModelRequest, ctx: ResolutionContext): ModelResolution {
 	const { gate } = request;
 	const steps: ResolutionStep[] = [];
@@ -146,12 +215,24 @@ export function resolveModelForGate(request: ResolveModelRequest, ctx: Resolutio
 	steps.push({ stage: "floor", gateRank, ...(personaRank !== undefined ? { personaRank } : {}), effective: floor });
 
 	// Stage 3: bindings declared for the resolved role (FR-8/FR-14).
-	const rawCandidates = ctx.bindingsByRole[gateRoleEntry.role] ?? [];
+	//
+	// D11/§21: with ZERO declared bindings anywhere in the policy, `ctx.universalFallback` carries the
+	// session's flat `provider.model` as the implicit binding for EVERY role. It is consulted only when
+	// this role has no declared candidate of its own AND the context is in that mode at all -- a policy
+	// that declares any real binding never populates the field, so a role missing from THAT policy
+	// still refuses fail-closed (BR-3/FR-14/R48: a project that opted into an explicit policy opted
+	// into being explicit).
+	const declaredCandidates = ctx.bindingsByRole[gateRoleEntry.role] ?? [];
+	const universalFallback = declaredCandidates.length === 0 ? ctx.universalFallback : undefined;
+	const rawCandidates = universalFallback ? [universalFallback] : declaredCandidates;
 	steps.push({
 		stage: "bindings",
 		role: gateRoleEntry.role,
 		candidates: rawCandidates.map((c): CandidateView => ({ ref: c.ref, rank: c.rank, declaredIn: c.declaredIn })),
 	});
+	if (universalFallback) {
+		return resolveUniversalFallback(universalFallback, ctx, floor, steps, trace, refuse);
+	}
 	if (rawCandidates.length === 0) {
 		const untrusted = ctx.untrustedBindings?.[gateRoleEntry.role]?.[0];
 		if (untrusted) {

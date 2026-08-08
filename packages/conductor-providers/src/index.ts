@@ -10,7 +10,11 @@ export {
 	createAvailabilityCache,
 } from "./availability-cache.ts";
 export { resolvePriceProvenance } from "./price-provenance.ts";
-export { type BuildResolutionContextOptions, buildResolutionContext } from "./resolution-context.ts";
+export {
+	type BuildResolutionContextOptions,
+	buildResolutionContext,
+	UNIVERSAL_FALLBACK_RANK,
+} from "./resolution-context.ts";
 export { resolveModelForGate } from "./resolve.ts";
 export type {
 	AvailabilityCache,

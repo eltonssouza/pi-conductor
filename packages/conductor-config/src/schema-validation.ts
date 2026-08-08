@@ -119,4 +119,18 @@ export function assertValidConfigShape(value: unknown): asserts value is Conduct
 			`config.provider.thinkingLevel must be a string when present, got ${describeUnknown(provider.thinkingLevel)}`,
 		);
 	}
+
+	// Fase 7 / FR-11 (ADR 0008 §8.1, landed by the §21/D11 loop-back). DELIBERATELY SHALLOW: this
+	// validator only asserts "an object, or nothing". The deep validation of a model policy belongs to
+	// `parseModelPolicy` (model-policy.ts) and its result has to be a distinguishable third state --
+	// §8.2's "política ilegível != ausente" -- which a `fail()` here could never express: throwing
+	// would make a malformed policy break `readConfig` itself, taking `conductor doctor`/`config show`
+	// down with it and making a corrupt POLICY indistinguishable from a corrupt CONFIG. The two
+	// concerns are kept apart for the same reason this module's own header already keeps
+	// `assertNoRawSecrets` separate from structural validation.
+	if (value.modelPolicy !== undefined && !isPlainObject(value.modelPolicy)) {
+		// `describeUnknown` (never a raw echo): a hand-edited config could have pasted anything here,
+		// including a credential, and this message is what `doctor`/`config show` surface (T12/ASVS V6.4).
+		fail(`config.modelPolicy must be an object when present, got ${describeUnknown(value.modelPolicy)}`);
+	}
 }

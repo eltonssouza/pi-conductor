@@ -68,28 +68,34 @@ export interface PersistedGateStateStoreOptions {
 	/**
 	 * Fase 7 D4 (ADR 0008 §6/§16 -- "recusa fail-closed imposta em três pontos de autorização de
 	 * trabalho", P1 = gate opening, this file). The evaluator (`evaluateModelPrecondition`, imported
-	 * for real above) is fixed; only the PORT is injected here -- `ModelResolutionPort`'s real adapter
-	 * needs `@conductor/providers`'s resolution engine (a different sibling stream's scope, still
-	 * landing: `@conductor/providers/src/index.ts` does not exist yet), so this file cannot construct
-	 * one itself. Mirrors `commands/gate.ts`'s own documented `GateStateStoreView`/`RoleRegistryView`
-	 * decoupling ("never a concrete [cross-package] type directly") and this file's own `tty`/
-	 * `homeDir`-on-`CliIO` precedent: omitted by every existing caller/test today (backward
-	 * compatible), and this check is INERT (never runs) until the real composition root constructs a
-	 * real port and passes it in -- a pure ADDITION at that call site, never a second change here.
+	 * for real above) is fixed; only the PORT is injected -- the same Dependency Inversion seam
+	 * `commands/gate.ts`'s `GateStateStoreView`/`RoleRegistryView` decoupling already uses ("never a
+	 * concrete [cross-package] type directly"), with the real adapter built by the composition root
+	 * (`commands/model-context.ts`'s `createGateModelResolutionPort`, over `@conductor/providers`).
+	 *
+	 * **REQUIRED, deliberately (ADR 0008 §21/D11, Gate-8 loop-back).** It was optional in the first
+	 * Gate-6 pass, and Gate 8 measured the consequence: production never passed one, so the
+	 * `if (options.modelResolutionPort)` guard that used to sit in `start()` made the whole
+	 * fail-closed check permanently INERT -- the mutation "`evaluateModelPrecondition` always returns
+	 * satisfied" SURVIVED both this package's and `@conductor/runtime`'s full suites. §21's remedy is
+	 * exactly this signature: "`evaluateModelPrecondition` passa a ser chamado incondicionalmente a
+	 * partir do composition root, nunca atrás de um campo opcional que a produção nunca preenche".
+	 * Making it required moves that guarantee into the type system, where it cannot silently regress:
+	 * a future caller that forgets the port does not compile. Mirrors `MANDATORY_GATES` at this very
+	 * call site -- injected into every policy call, never left to a default.
 	 *
 	 * *Grounding:* **SOLID Design Principles §3.1/§3.2/§3.6** (0.656/0.648/0.639: the Dependency
 	 * Inversion Principle -- depend on an abstraction the consumer owns, "wire implementations via a
-	 * dependency-injection container at the composition root" -- exactly this seam for the one
-	 * genuinely-still-missing collaborator, the adapter).
+	 * dependency-injection container at the composition root").
 	 *
-	 * When provided, `start()` runs the precondition BEFORE `evaluateAdvance` (ADR §6.2 point 3: a "no
-	 * model for this gate" refusal is a cheaper, more actionable diagnostic than an evidence/order
-	 * refusal), refusing gate opening on `{kind:"refused"}` the same way an `evaluateAdvance` refusal
-	 * already does -- a second, independent, composed verdict, never a new arm bolted onto
-	 * `GateAdvanceVerdict` itself (D4's own explicit "zero mudança na máquina de gates" -- see the
-	 * regression guard in `@conductor/runtime`'s own test suite).
+	 * `start()` runs the precondition BEFORE `evaluateAdvance` (ADR §6.2 point 3: a "no model for this
+	 * gate" refusal is a cheaper, more actionable diagnostic than an evidence/order refusal), refusing
+	 * gate opening on `{kind:"refused"}` the same way an `evaluateAdvance` refusal already does -- a
+	 * second, independent, composed verdict, never a new arm bolted onto `GateAdvanceVerdict` itself
+	 * (D4's own explicit "zero mudança na máquina de gates" -- see the regression guard in
+	 * `@conductor/runtime`'s own test suite).
 	 */
-	modelResolutionPort?: ModelResolutionPort;
+	modelResolutionPort: ModelResolutionPort;
 }
 
 function describeStoreError(error: GateStateMutationError): string {
@@ -204,16 +210,15 @@ export function createPersistedGateStateStore(options: PersistedGateStateStoreOp
 			// on the next attempt). A SECOND, independent, composed verdict (`ModelPreconditionVerdict`)
 			// -- never a value folded into `GateAdvanceVerdict` itself (D4's own "zero mudança na
 			// máquina de gates", guarded by @conductor/runtime's own composition-regression test).
-			// `modelResolutionPort` is optional (see PersistedGateStateStoreOptions's own doc comment)
-			// -- omitted by every existing caller/test today, so this check is INERT (never runs) until
-			// the real composition root injects a real port, matching this file's own
-			// `tty`/`homeDir`-on-CliIO precedent for additive, backward-compatible seams. Same
-			// (gate, port, MANDATORY_GATES) call shape as evaluateAdvance/evaluateCalibration below.
-			if (options.modelResolutionPort) {
-				const modelVerdict = evaluateModelPrecondition(gate, options.modelResolutionPort, MANDATORY_GATES);
-				if (modelVerdict.kind === "refused") {
-					throw new GateCommandError(`cannot start gate ${gate}: ${modelVerdict.humanReadable}`);
-				}
+			// UNCONDITIONAL (ADR 0008 §21/D11, Gate-8 loop-back): the `if (options.modelResolutionPort)`
+			// guard that used to wrap these lines is precisely what made this check inert -- production
+			// never passed a port, so the mutation "evaluateModelPrecondition always returns satisfied"
+			// survived every suite. The port is now a REQUIRED option (see its doc comment above), so
+			// there is nothing left to guard against. Same (gate, port, MANDATORY_GATES) call shape as
+			// evaluateAdvance/evaluateCalibration below.
+			const modelVerdict = evaluateModelPrecondition(gate, options.modelResolutionPort, MANDATORY_GATES);
+			if (modelVerdict.kind === "refused") {
+				throw new GateCommandError(`cannot start gate ${gate}: ${modelVerdict.humanReadable}`);
 			}
 			// R23/FR-2: fail-closed against the REAL mandatory-floor policy (gate-state-policy.ts's
 			// evaluateAdvance/isMandatorySatisfied), never a second, duplicated inline check -- this is

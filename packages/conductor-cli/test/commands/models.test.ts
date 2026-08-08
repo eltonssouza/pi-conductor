@@ -8,40 +8,65 @@
  * module-resolution failure IS the RED signal for every test below; once Gate 6 exists, each test's own
  * body is the real spec.
  *
- * IMPORTANT AMBIGUITY, flagged for the orchestrator/Gate 6 (not something this stream can resolve): ADR
- * 0008 §16 fully specifies `ModelResolution`/`ResolutionRefusal`/`ResolutionTrace`/`ResolutionStep`'s
- * shapes, but NOT `ResolutionContext`'s own internal fields -- only `buildResolutionContext(options):
- * Promise<ResolutionContext>`'s INPUT shape is given, and `@conductor/providers` (the sibling package
- * that owns this type) is being built in parallel by a different stream with no real exports yet. The
- * tests below that need a `ctx` therefore use `fixtureContext()`, a deliberately opaque placeholder cast
- * via `as unknown as ResolutionContext` -- NOT a claim about the real shape. The edge-case-8 test (gate
- * number out of range) needs no such fixture -- that check should run before `ctx` is ever consulted, so
- * it is written with full confidence. The other three ctx-dependent tests document the DESIRED rendered
- * OUTPUT precisely (which is what matters for the spec), but the exact mechanism for making a fixture
- * drive that output may need a small Gate 6 (or a dedicated Gate 6 loop-back) adjustment once
- * `ResolutionContext`'s real fields land -- documented here so that is expected, not a surprise.
+ * GATE 8 (validação FR-a-FR) loop-back — a ambiguidade que este arquivo declarou, resolvida.
+ *
+ * O cabeçalho original registrava uma "IMPORTANT AMBIGUITY": `ResolutionContext`'s real shape não
+ * estava fixada no ADR §16 e `@conductor/providers` ainda não tinha exports, então os testes
+ * `ctx`-dependentes usavam `fixtureContext()` — um placeholder opaco carregando um campo
+ * `resolutions: Map<gate, ModelResolution>` — e o arquivo previa "a small Gate 6 (or a dedicated Gate 6
+ * loop-back) adjustment once `ResolutionContext`'s real fields land". **Os campos reais aterrissaram
+ * no mesmo commit do Gate 6 e o ajuste não foi feito**, o que deixou `models.ts` lendo um campo que a
+ * `buildResolutionContext` real nunca produz (defeito registrado no Gate 8). Este é o ajuste: os
+ * fixtures abaixo constroem `ResolutionContext` **reais** (`gateModelRoles`/`bindingsByRole`/`catalog`/
+ * `untrustedBindings`, `types.ts`) e o comando roda o `resolveModelForGate` **real**. As asserções de
+ * saída renderizada — que é o que a spec exige — são as mesmas de antes, intocadas.
+ *
+ * O teste de edge-case 8 (gate fora de 1-14) continua sem fixture nenhum: essa checagem tem que rodar
+ * antes de `ctx` ser consultado, e passar `undefined` é o que prova isso.
  */
 
-import type {
-	ModelResolution,
-	ResolutionContext,
-	ResolutionRefusal,
-	ResolutionStep,
-	ResolutionTrace,
-} from "@conductor/providers";
+import type { ResolutionContext, ResolvedCandidate } from "@conductor/providers";
 import { sanitizeForTerminal } from "@conductor/runtime";
+import type { Api, Model } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
 import { runModelsList, runModelsWhy } from "../../src/commands/models.ts";
 import { createCapturingIo } from "../support/io.ts";
 import { createScratchProject } from "../support/scratch.ts";
 
-/** See the file header's "IMPORTANT AMBIGUITY" note. */
-function fixtureContext(seed: Record<string, unknown> = {}): ResolutionContext {
-	return seed as unknown as ResolutionContext;
+/** Um `Model<Api>` de catálogo mínimo -- só os campos que o renderizador/o resolvedor tocam. */
+function catalogModel(provider: string, id: string): Model<Api> {
+	return {
+		id,
+		name: id,
+		api: "anthropic-messages",
+		provider,
+		baseUrl: "https://example.invalid",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 1, output: 5, cacheRead: 0.1, cacheWrite: 1.25 },
+		contextWindow: 200_000,
+		maxTokens: 8192,
+	} as unknown as Model<Api>;
 }
 
-function traceFor(gate: number, steps: readonly ResolutionStep[]): ResolutionTrace {
-	return { gate, at: "2026-08-07T00:00:00.000Z", steps };
+function candidate(provider: string, modelId: string, credential: ResolvedCandidate["credential"]): ResolvedCandidate {
+	return {
+		ref: { provider, modelId },
+		rank: 3, // `slow`, o piso do Gate 9 -- nunca abaixo (R48)
+		declaredIn: "project-policy",
+		credential,
+		availability: { state: "reachable", checkedAt: "2026-08-07T00:00:00.000Z" },
+	};
+}
+
+/** Um `ResolutionContext` REAL (a forma de `types.ts`), não um cast opaco. */
+function realContext(overrides: Partial<ResolutionContext> = {}): ResolutionContext {
+	return {
+		gateModelRoles: { 9: { role: "slow", source: "builtin" } },
+		bindingsByRole: {},
+		catalog: {},
+		...overrides,
+	};
 }
 
 describe("runModelsWhy <gate> -- edge case 8, a gate number outside 1-14 refuses naming the valid range", () => {
@@ -83,11 +108,14 @@ describe("runModelsList -- FR-12, a 14-gate table; edge case 1, zero providers c
 		try {
 			const { io, stdout } = createCapturingIo(project.root);
 
-			const code = runModelsList({ io, ctx: fixtureContext() });
+			// Contexto real de um projeto recém-criado: nenhum binding em lugar nenhum.
+			const code = runModelsList({ io, ctx: realContext() });
 
 			expect(code).toBe(0);
 			expect(stdout().trim().length).toBeGreaterThan(0);
 			expect(stdout()).toMatch(/conductor login/);
+			// FR-12: as 14 linhas existem e cada uma nomeia a recusa -- nunca uma linha vazia.
+			expect(stdout()).toMatch(/gate 09: refused --/);
 		} finally {
 			project.cleanup();
 		}
@@ -98,32 +126,28 @@ describe("runModelsWhy <gate> -- FR-13, narrates the resolution pipeline stage b
 	it("prints the resolved model when the pipeline succeeds", () => {
 		const project = createScratchProject();
 		try {
-			// Cast the whole literal rather than hand-authoring a full, valid `Model<Api>` (a large vendor
-			// type with many required fields, e.g. cost/contextWindow/maxTokens -- see fake-model.ts) --
-			// this fixture only needs `ref` (what `runModelsWhy` actually renders per §16) to exercise the
-			// assertions below; `model` is filled with the minimum shape a renderer would plausibly touch.
-			const resolved = {
-				resolved: true,
-				model: { provider: "anthropic", id: "claude-opus-4-8" },
-				ref: { provider: "anthropic", modelId: "claude-opus-4-8" },
-				effectiveRank: 3,
-				trace: traceFor(9, [
-					{ stage: "gate-role", role: "slow", source: "builtin" },
-					{ stage: "floor", gateRank: 3, effective: 3 },
-					{
-						stage: "selection",
-						selected: { provider: "anthropic", modelId: "claude-opus-4-8" },
-						rejected: [],
-					},
-				]),
-			} as unknown as ModelResolution;
+			const ctx = realContext({
+				bindingsByRole: {
+					slow: [
+						candidate("anthropic", "claude-opus-4-8", {
+							configured: true,
+							source: "stored",
+							authorizedByPolicy: true,
+						}),
+					],
+				},
+				catalog: { "anthropic::claude-opus-4-8": catalogModel("anthropic", "claude-opus-4-8") },
+			});
 			const { io, stdout } = createCapturingIo(project.root);
 
-			const code = runModelsWhy({ io, ctx: fixtureContext({ resolutions: new Map([[9, resolved]]) }), gate: 9 });
+			const code = runModelsWhy({ io, ctx, gate: 9 });
 
 			expect(code).toBe(0);
 			expect(stdout()).toMatch(/anthropic/);
 			expect(stdout()).toMatch(/claude-opus-4-8/);
+			// FR-13: a narração é etapa a etapa, não só o resultado final.
+			expect(stdout()).toMatch(/\[gate-role\]/);
+			expect(stdout()).toMatch(/\[selection\]/);
 		} finally {
 			project.cleanup();
 		}
@@ -132,18 +156,10 @@ describe("runModelsWhy <gate> -- FR-13, narrates the resolution pipeline stage b
 	it("names the exact stage where the chain stopped when refused, never just a bare result", () => {
 		const project = createScratchProject();
 		try {
-			const refusal: ResolutionRefusal = { kind: "no-binding-for-role", gate: 9, role: "slow" };
-			const refused: ModelResolution = {
-				resolved: false,
-				refusal,
-				trace: traceFor(9, [
-					{ stage: "gate-role", role: "slow", source: "builtin" },
-					{ stage: "bindings", role: "slow", candidates: [] },
-				]),
-			};
+			// Gate 9 mapeado para `slow`, e nenhum binding declarado para esse papel.
 			const { io, stdout } = createCapturingIo(project.root);
 
-			const code = runModelsWhy({ io, ctx: fixtureContext({ resolutions: new Map([[9, refused]]) }), gate: 9 });
+			const code = runModelsWhy({ io, ctx: realContext(), gate: 9 });
 
 			expect(code).not.toBe(0);
 			expect(stdout()).toMatch(/no-binding-for-role|no binding/i);
@@ -158,22 +174,20 @@ describe("runModelsWhy <gate> -- R50, never prints raw credential material, only
 	it("omits any credential/key-shaped value from a credential-stage trace", () => {
 		const project = createScratchProject();
 		try {
-			const refusal: ResolutionRefusal = { kind: "no-credential", gate: 9, role: "slow", providers: ["anthropic"] };
-			const refused: ModelResolution = {
-				resolved: false,
-				refusal,
-				trace: traceFor(9, [
-					{
-						stage: "credential",
-						perProvider: [{ provider: "anthropic", configured: false, authorizedByPolicy: false }],
-					},
-				]),
-			};
+			// Binding válido no catálogo, mas sem credencial nenhuma -> refusal `no-credential`, cuja
+			// trace inclui a etapa `credential`. Nada em `ResolutionStep` carrega valor de segredo.
+			const ctx = realContext({
+				bindingsByRole: {
+					slow: [candidate("anthropic", "claude-opus-4-8", { configured: false, authorizedByPolicy: true })],
+				},
+				catalog: { "anthropic::claude-opus-4-8": catalogModel("anthropic", "claude-opus-4-8") },
+			});
 			const { io, stdout } = createCapturingIo(project.root);
 
-			runModelsWhy({ io, ctx: fixtureContext({ resolutions: new Map([[9, refused]]) }), gate: 9 });
+			runModelsWhy({ io, ctx, gate: 9 });
 
 			expect(stdout()).toMatch(/anthropic/);
+			expect(stdout()).toMatch(/\[credential\]/);
 			expect(stdout()).not.toMatch(/sk-[a-zA-Z0-9-]{10,}/); // no api-key-shaped token ever, by construction
 		} finally {
 			project.cleanup();
@@ -194,26 +208,17 @@ describe("runModelsWhy <gate> -- secure-default 66 (S3), a hostile provider/host
 			// test, see this stream's report).
 			const hostileHost = "evil\x1b[2Jhost.example.com";
 			const hostileProvider = "evil\x1b[31mprovider";
-			const refusal: ResolutionRefusal = {
-				kind: "untrusted-endpoint",
-				gate: 9,
-				provider: hostileProvider,
-				host: hostileHost,
-			};
-			const refused: ModelResolution = {
-				resolved: false,
-				refusal,
-				trace: traceFor(9, [
-					{
-						stage: "catalog",
-						accepted: [],
-						rejected: [{ ref: `${hostileProvider}/some-model`, why: "untrusted-endpoint" }],
-					},
-				]),
-			};
+			// A forma real de T73(b): o único binding do papel apontava para um endpoint fora do catálogo
+			// oficial sem pin TOFU, então `buildResolutionContext` o registrou em `untrustedBindings` e
+			// NUNCA em `bindingsByRole` -- e a resolução recusa nomeando provedor e host (R54(ii)).
+			const ctx = realContext({
+				untrustedBindings: {
+					slow: [{ ref: { provider: hostileProvider, modelId: "some-model" }, host: hostileHost }],
+				},
+			});
 			const { io, stdout } = createCapturingIo(project.root);
 
-			runModelsWhy({ io, ctx: fixtureContext({ resolutions: new Map([[9, refused]]) }), gate: 9 });
+			runModelsWhy({ io, ctx, gate: 9 });
 
 			const output = stdout();
 			expect(output).not.toContain("\x1b");

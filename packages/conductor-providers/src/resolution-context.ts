@@ -21,7 +21,7 @@
 
 import { createHash } from "node:crypto";
 import type { GateModelRole, ModelPolicy, ModelPolicyTrustStore } from "@conductor/config";
-import { DEFAULT_GATE_MODEL_ROLE_RANK, DEFAULT_GATE_MODEL_ROLES } from "@conductor/config";
+import { DEFAULT_GATE_MODEL_ROLE_RANK, DEFAULT_GATE_MODEL_ROLES, MODEL_ROLE_RANK } from "@conductor/config";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { BuiltinProvider } from "@earendil-works/pi-ai/providers/all";
 import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
@@ -30,6 +30,7 @@ import type {
 	AvailabilityCache,
 	AvailabilityStatus,
 	CredentialStatus,
+	ModelRef,
 	ProviderAvailability,
 	ResolutionContext,
 	ResolvedCandidate,
@@ -121,12 +122,31 @@ function fromProviderAvailability(availability: ProviderAvailability): Availabil
 	return { state: availability.state, checkedAt: availability.checkedAt };
 }
 
+/**
+ * D11/§21: the rank the universal fallback binding carries. Derived as the maximum of BOTH rank
+ * tables (`DEFAULT_GATE_MODEL_ROLE_RANK` for the gate axis, `MODEL_ROLE_RANK` for the persona axis)
+ * so it satisfies any floor `resolveModelForGate`'s stage 2 can ever produce
+ * (`max(rank(gate), rank(persona))`, D1.5) -- never a magic literal that would silently stop
+ * satisfying the floor the day either table grows a higher tier.
+ */
+export const UNIVERSAL_FALLBACK_RANK: number = Math.max(
+	...Object.values(DEFAULT_GATE_MODEL_ROLE_RANK),
+	...Object.values(MODEL_ROLE_RANK),
+);
+
 export interface BuildResolutionContextOptions {
 	workspaceRoot: string;
 	modelRuntime: ModelRuntime;
 	policy: ModelPolicy | undefined;
 	trust: ModelPolicyTrustStore;
 	availability: AvailabilityCache;
+	/**
+	 * D11/§21: the project's flat `provider.model` (Fase 1 config), already split into
+	 * `{provider, modelId}`. Used ONLY to seed the universal fallback binding when the policy declares
+	 * zero `ModelBinding`s. Absent (or naming a model the catalog does not know) means no fallback is
+	 * seeded at all -- this function never invents a model reference of its own.
+	 */
+	sessionModel?: ModelRef;
 }
 
 export async function buildResolutionContext(options: BuildResolutionContextOptions): Promise<ResolutionContext> {
@@ -220,10 +240,44 @@ export async function buildResolutionContext(options: BuildResolutionContextOpti
 		// never silently treated as resolvable.
 	}
 
+	// D11/§21: the universal fallback binding. Seeded ONLY when the project declares zero
+	// `ModelBinding`s -- the condition is read from the POLICY (`policy?.bindings`), never from
+	// `bindingsByRole` above: a policy whose only binding was dropped as untrusted (R54(ii)) has still
+	// left compatibility mode, and must keep refusing rather than silently regaining a fallback the
+	// project's own explicit declaration was meant to replace.
+	const declaresBindings = (policy?.bindings ?? []).length > 0;
+	let universalFallback: ResolvedCandidate | undefined;
+	if (!declaresBindings && options.sessionModel) {
+		const { provider, modelId } = options.sessionModel;
+		const classification = classifyBindingTrust(modelRuntime, trust, provider, modelId);
+		if (classification.kind === "trusted") {
+			catalog[catalogKey(provider, modelId)] = classification.model;
+			universalFallback = {
+				ref: { provider, modelId },
+				rank: UNIVERSAL_FALLBACK_RANK,
+				declaredIn: "builtin-default",
+				// The flat `provider.model` IS the project's own explicit declaration of which model it
+				// runs on (`.conductor/config.json`, hand-written or `conductor config set`) -- R46's
+				// "a credential's mere presence never authorizes, only being bound does" is satisfied by
+				// that declaration, exactly as an explicit `ModelBinding` satisfies it. `configured` is
+				// still the REAL, unmodified status: stage 7's compatibility branch does not FILTER on
+				// it, but the trace must never report a credential that is not there (§21's own
+				// grounding, Managing Software Complexity §3.12 -- do not delete information a caller
+				// needed).
+				credential: { ...credentialFor(provider), authorizedByPolicy: true },
+				availability: availabilityFor(provider),
+			};
+		}
+		// classification "unknown"/"untrusted": no fallback is seeded at all. `resolveModelForGate`
+		// then refuses naming the missing/untrusted model -- this function never fabricates a
+		// `Model<Api>` for a reference the catalog cannot back (R54(i)).
+	}
+
 	return {
 		gateModelRoles,
 		bindingsByRole,
 		catalog,
 		untrustedBindings,
+		...(universalFallback ? { universalFallback } : {}),
 	};
 }

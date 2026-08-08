@@ -23,6 +23,8 @@ export {
 	type ModelPolicyDiagnostic,
 	type ParseModelPolicyResult,
 	parseModelPolicy,
+	type ResolveProjectModelPolicyResult,
+	resolveProjectModelPolicy,
 } from "./model-policy.ts";
 export {
 	loadModelPolicyTrustStore,

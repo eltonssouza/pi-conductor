@@ -44,11 +44,17 @@ export function runAuthStatus(options: RunAuthStatusOptions): Promise<number> {
 	const providers = [...modelRuntime.getProviders()].sort((a, b) => a.id.localeCompare(b.id));
 
 	const lines = providers.map((provider) => {
+		// GATE 8 loop-back (secure-default 66 / S3): `provider.id` also has to be sanitized, not only
+		// `status.source`. The provider list comes from `ModelRuntime.getProviders()`, which includes
+		// entries declared in the per-machine `models.json` -- a custom/self-hosted `openai-compatible`
+		// entry whose id is attacker-chosen is exactly the T73 taint class, and this is a terminal sink.
+		// The Gate 6 implementation sanitized only the `source` half, leaving the id raw.
+		const safeId = sanitizeForTerminal(provider.id);
 		const status = modelRuntime.getProviderAuthStatus(provider.id);
 		if (!status.configured) {
-			return `${provider.id}: not configured`;
+			return `${safeId}: not configured`;
 		}
-		return `${provider.id}: configured (source: ${sanitizeForTerminal(status.source ?? "unknown")})`;
+		return `${safeId}: configured (source: ${sanitizeForTerminal(status.source ?? "unknown")})`;
 	});
 
 	io.stdout.write(`${lines.join("\n")}\n`);

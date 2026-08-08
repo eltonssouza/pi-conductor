@@ -8,6 +8,7 @@
  * spec.
  */
 
+import { sanitizeForTerminal } from "@conductor/runtime";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { runAuthStatus } from "../../src/commands/auth.ts";
 import { createIsolatedCredentialStore, createTestModelRuntime } from "../support/fake-model-runtime.ts";
@@ -86,5 +87,26 @@ describe("runAuthStatus -- edge case 4, environment credential AND a stale store
 		expect(deepseekLine, `no line mentioning "deepseek" in:\n${stdout()}`).toBeTruthy();
 		expect(deepseekLine).toMatch(/stored/);
 		expect(deepseekLine).not.toMatch(/environment/);
+	});
+});
+
+describe("runAuthStatus -- secure-default 66 (S3), GATE 8 loop-back: o ID DO PROVEDOR também é sanitizado", () => {
+	it("nunca escreve um byte ESC cru vindo de um provider id hostil (T73: `models.json` por-máquina pode declarar um `openai-compatible` com id escolhido pelo atacante)", async () => {
+		// O Gate 6 sanitizava apenas `status.source`, deixando `provider.id` cru -- a MESMA classe de
+		// spoofing que a secure-default 66 fecha em `models why`, aberta no sink irmão.
+		const hostileId = "evil\x1b[2Jprovider";
+		const modelRuntime = {
+			getProviders: () => [{ id: hostileId, name: hostileId }],
+			getProviderAuthStatus: () => ({ configured: false }),
+		} as never;
+		const { io, stdout } = createCapturingIo(project.root);
+
+		const code = await runAuthStatus({ io, modelRuntime });
+
+		expect(code).toBe(0);
+		expect(stdout()).not.toContain("\x1b");
+		// Redação de bytes de CONTROLE, nunca do campo inteiro: o usuário ainda precisa ver qual
+		// provedor foi listado.
+		expect(stdout()).toContain(sanitizeForTerminal(hostileId));
 	});
 });

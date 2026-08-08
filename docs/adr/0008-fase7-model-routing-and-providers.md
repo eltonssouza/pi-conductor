@@ -1096,3 +1096,48 @@ O Gate 4 permitia um companheiro `docs/conductor/gate4-design-fase7.md` para o a
 tudo num ADR único com o apêndice §16 de contratos TypeScript, e a rastreabilidade Gate 5 → Gate 6 → Gate 8
 das duas fases anteriores depende de **um** documento por fase. Dividir aqui criaria um segundo lugar para
 procurar a mesma decisão — exatamente a duplicação que este ADR passa 20 seções combatendo em outro domínio.
+
+---
+
+## 21. Loop-back do Gate 8 — D6 amendment: o que "os defaults built-in valem" QUER DIZER na prática (D11)
+
+**Achado do Gate 8** (validação FR-a-FR contra código real, não contra teste): §8.2 já declarava "política
+ausente ⇒ os defaults built-in valem (o produto funciona sem config)", mas essa frase nunca ganhou um
+mecanismo — `DEFAULT_GATE_MODEL_ROLES` (o mapa gate→`GateModelRole`, D1) sempre existiu, mas nenhum
+`ModelBinding` built-in jamais existiu pra nenhum papel. Resultado, medido contra o binário real (não contra
+fixture): com **zero** política de projeto — o estado de **todo** projeto Conductor hoje, incluindo este —
+a resolução não tinha nenhum candidato pra nenhum gate, em nenhum projeto. Ligar `evaluateModelPrecondition`
+de verdade (D4) nessas condições faria `conductor gate start N` recusar **universalmente**, uma regressão de
+comportamento, não uma feature de segurança — e é exatamente por isso que o Gate 8 não ligou o fio sem
+esta decisão.
+
+**D11 — o modelo flat de sessão (config Fase 1, `provider.model`/`provider.thinkingLevel`) é o binding
+universal implícito quando `modelPolicy` está genuinamente ausente.**
+
+| Estado da política do projeto | Comportamento da resolução |
+|---|---|
+| **Ausente** (nenhuma seção `modelPolicy`, ou presente com `bindings: []`) | Todo `GateModelRole`, pra todo gate, resolve pro único modelo já configurado em `provider.model` — o comportamento de sessão único que já existe desde a Fase 1, preservado byte a byte. Este binding sintético é `declaredIn: "builtin-default"` e satisfaz **qualquer** rank pedido (não há como comparar tier sem um segundo modelo pra comparar contra — exigir tier aqui recusaria todo projeto hoje, o que a própria frase do §8.2 já proibia). |
+| **Presente, com ao menos 1 `ModelBinding` real** | Cascata normal (D3/§5): papéis SEM binding próprio nessa política **não** caem de volta pro flat model — isso seria exatamente o downgrade silencioso que BR-3/FR-14/R48 proíbem (um projeto que optou por política explícita optou por ser explícito). Recusa fail-closed nomeando o papel sem binding. |
+| **Presente e ilegível/inválida** | Inalterado — `policy-unreadable` (§8.2), nunca cai pra nenhum dos dois casos acima (R49(iii)). |
+
+**Por que isto não reabre T67/R48 pela porta dos fundos:** o binding universal só existe **na ausência total**
+de política — o instante em que um projeto declara qualquer `ModelBinding`, ele saiu do "modo compatibilidade"
+e entrou no regime de tier real, onde a ausência de binding pra um papel específico É a recusa (não um
+fallback). Isto é simétrico ao runtime atual: hoje, sem Fase 7, todo gate já roda no mesmo modelo único — D11
+não *adiciona* uma superfície de downgrade, só nomeia formalmente o comportamento que já existia e o marca
+como o piso inferior explícito de rank (equivalente a `rank: 0` sob qualquer pedido), nunca um bypass do piso.
+
+**Também fecha FR-11 de ponta a ponta:** a seção `modelPolicy` de `.conductor/config.json` (§8.1 já a
+projetava, nunca foi acrescentada ao schema real) precisa existir de fato pra qualquer projeto sair do modo
+compatibilidade — Gate 6 (loop-back) adiciona o schema, não redecide sua forma (já travada em §16/`ModelPolicy`).
+
+**Ligação real do D4:** `evaluateModelPrecondition` passa a ser chamado **incondicionalmente** a partir do
+composition root (`cli.ts`), nunca atrás de um campo opcional que a produção nunca preenche — o próprio
+padrão que o Gate 6 original já usou pra `MANDATORY_GATES` (injeção, nunca import) se aplica aqui: o
+`ModelResolutionPort` real é construído uma vez no composition root e passado adiante, sempre.
+
+*Grounding:* Managing Software Complexity §3.12 ("some callers act differently on the error... defining an
+error away deletes information a caller needed", 0.567) — o motivo de D11 **não** ser "toda ausência de
+config vira sucesso automático e silencioso pra sempre": o binding universal é explícito, nomeado,
+`declaredIn: "builtin-default"`, visível em `models why`, e desaparece no instante em que qualquer binding
+real é declarado — nunca uma regra permanente que esconde a ausência de tier.

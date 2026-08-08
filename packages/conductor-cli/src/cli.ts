@@ -25,6 +25,9 @@ import {
 	readRecordedJournalEntryIds,
 } from "@conductor/diary";
 import { type ResolveEvidenceRefContext, TOTAL_FLOW_GATES } from "@conductor/runtime";
+import type { CredentialStore } from "@earendil-works/pi-ai";
+import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { runAuthStatus } from "./commands/auth.ts";
 import { runChat } from "./commands/chat.ts";
 import { runConfigGet, runConfigSet, runConfigShow } from "./commands/config.ts";
 import { doctorExitCode, formatDoctorReport, runDoctor } from "./commands/doctor.ts";
@@ -48,6 +51,15 @@ import {
 	runJournalCommand,
 } from "./commands/journal.ts";
 import { runLibraryCommand } from "./commands/library.ts";
+import { runLogin } from "./commands/login.ts";
+import { runLogout } from "./commands/logout.ts";
+import {
+	buildCliResolutionContext,
+	createGateModelResolutionPort,
+	defaultCreateCredentialStore,
+	defaultCreateModelRuntime,
+} from "./commands/model-context.ts";
+import { runModelsList, runModelsWhy } from "./commands/models.ts";
 import { formatRolesListReport, runRolesList } from "./commands/roles.ts";
 import { formatSkillsListReport, runSkillsList } from "./commands/skills.ts";
 import { gitCommitExistsSync } from "./git-status.ts";
@@ -84,6 +96,20 @@ export interface CliIO {
 	 * default). Production wiring (`bin/conductor.js`) never sets it either.
 	 */
 	homeDir?: string;
+	/**
+	 * GATE 8 loop-back (Fase 7): TEST SEAMS ONLY for the four model/credential commands, in the exact
+	 * optional/backward-compatible shape `tty`/`homeDir` above already established, and mirroring
+	 * `ChatOptions.createModelRuntime` (`commands/chat.ts:106`) one-for-one. Production wiring
+	 * (`bin/conductor.js`) never sets either, so both fall back to `commands/model-context.ts`'s real
+	 * per-machine defaults (`ModelRuntime.create({allowModelNetwork:false})` and `AuthStorage.create()`
+	 * -- D10/§8.1: credential and catalog are per-machine, NEVER read from the workspace).
+	 *
+	 * Without these, a dispatcher test for `conductor auth`/`login`/`logout` would construct a real
+	 * `ModelRuntime` and read THIS developer's real `~/.pi/agent/auth.json` -- real credential I/O
+	 * inside a test suite, which this project's own session memory records as unacceptable.
+	 */
+	createModelRuntime?: () => Promise<ModelRuntime>;
+	createCredentialStore?: () => Promise<CredentialStore>;
 }
 
 const USAGE = `conductor -- Conductor CLI (Fase 1)
@@ -117,6 +143,11 @@ Usage:
                           [--since <date>] [--until <date>] [--text "<s>"]
   conductor journal digest  [--session <id>] [--out <path.md>]
   conductor journal supersede --id <id> --mode <update|forget|invalidate> "<text>"
+  conductor login  [provider]
+  conductor logout <provider>
+  conductor auth
+  conductor models
+  conductor models why <N>
   conductor --help
 
 See docs/adr/0002-fase1-cli-foundation.md for the full command contract,
@@ -361,10 +392,21 @@ const DEFAULT_DEMAND_ID = "default";
 async function runGateCommand(args: string[], io: CliIO): Promise<number> {
 	const [sub, ...rest] = args;
 	const gitContext = await resolveGateGitContext(io.cwd);
+	// Fase 7 D4/D11 (ADR 0008 §6/§21): the REAL `ModelResolutionPort`, built here and passed
+	// UNCONDITIONALLY -- `createPersistedGateStateStore` requires it, so `gate start`'s fail-closed
+	// model precondition can never again be silently inert (the Gate-8 finding this loop-back closes).
+	// Built once per invocation, beside the store it belongs to, for the same reason the store itself is
+	// built here: this IS the composition root. `createGateModelResolutionPort` never throws -- a
+	// broken model runtime degrades to a REFUSING port, never to an absent one (R49(iii)).
+	const modelResolutionPort = await createGateModelResolutionPort({
+		workspaceRoot: io.cwd,
+		createModelRuntime: io.createModelRuntime ?? defaultCreateModelRuntime,
+	});
 	const store = createPersistedGateStateStore({
 		gatesDir: join(io.cwd, ".conductor", "gates"),
 		repoId: gitContext.repoId,
 		branch: gitContext.branch,
+		modelResolutionPort,
 	});
 	// `io.homeDir` (test seam, CliIO's own header): defaults to the real per-machine home in production,
 	// exactly like every other `resolveJournalContext` call site.
@@ -621,6 +663,59 @@ async function runGateCommand(args: string[], io: CliIO): Promise<number> {
 	return 1;
 }
 
+/**
+ * GATE 8 loop-back (Fase 7): the composition root for the four model/credential commands. Kept here,
+ * beside the dispatcher, for the same reason `runGateCommand` builds its own `GateStateStoreView`
+ * here -- this IS the place where abstractions get wired to implementations (ADR 0008 §16's own
+ * "wire implementations via a dependency-injection container at the composition root").
+ *
+ * `models`/`models why` are SYNCHRONOUS by contract (§16), so the async work (building the
+ * `ModelRuntime` and the `ResolutionContext` snapshot) all happens here, at the border, before either
+ * is called -- D3's "I/O nas bordas, política no meio", end to end.
+ */
+async function runModelCommand(rest: string[], io: CliIO): Promise<number> {
+	const [command, ...args] = rest;
+	const modelRuntime = await (io.createModelRuntime ?? defaultCreateModelRuntime)();
+
+	if (command === "auth") {
+		return await runAuthStatus({ io, modelRuntime });
+	}
+
+	if (command === "login" || command === "logout") {
+		const credentials = await (io.createCredentialStore ?? (async () => defaultCreateCredentialStore()))();
+		if (command === "logout") {
+			const provider = args[0];
+			if (!provider) {
+				io.stderr.write("conductor logout: a provider is required. Usage: conductor logout <provider>\n");
+				return 1;
+			}
+			return await runLogout({ provider, io, credentials, modelRuntime });
+		}
+		// FR-2: no provider argument is NOT an error -- `runLogin` lists the known providers instead.
+		const provider = args[0];
+		return await runLogin({ ...(provider ? { provider } : {}), io, credentials, modelRuntime });
+	}
+
+	const ctx = await buildCliResolutionContext({ workspaceRoot: io.cwd, modelRuntime });
+
+	if (args[0] === "why") {
+		const raw = args[1];
+		// Edge case 8 is `runModelsWhy`'s own responsibility (it names the valid range) -- a
+		// non-numeric argument, however, never reaches it as a number at all, so it is refused here.
+		const gate = Number(raw);
+		if (raw === undefined || !Number.isFinite(gate)) {
+			io.stderr.write(`conductor models why: expected a gate number 1-${TOTAL_FLOW_GATES}, got "${raw ?? ""}".\n`);
+			return 1;
+		}
+		return runModelsWhy({ io, ctx, gate });
+	}
+	if (args.length > 0) {
+		io.stderr.write(`conductor models: unknown subcommand "${args[0]}". Usage: models | models why <N>\n`);
+		return 1;
+	}
+	return runModelsList({ io, ctx });
+}
+
 export async function runCli(argv: string[], io: CliIO): Promise<number> {
 	const [command, ...rest] = argv;
 
@@ -642,6 +737,14 @@ export async function runCli(argv: string[], io: CliIO): Promise<number> {
 				return await runLibraryCommand(rest, io);
 			case "journal":
 				return await runJournalCommand(rest, io);
+			// Fase 7 (Gate 8 loop-back): os 5 entregáveis literais da fase, agora alcançáveis pelo
+			// binário real. `runModelCommand` recebe o verbo de volta como primeiro elemento para
+			// manter um único composition root (um `ModelRuntime` construído uma vez, por comando).
+			case "login":
+			case "logout":
+			case "auth":
+			case "models":
+				return await runModelCommand([command, ...rest], io);
 			case "chat":
 				// `io.homeDir` (CliIO's own test-seam doc comment): forwarded to ChatOptions.homeDir so
 				// BOTH real dispatch entry points (`runCli(["chat"...])` and `runChat(...)` called

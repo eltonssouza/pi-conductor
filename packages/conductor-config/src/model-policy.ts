@@ -430,3 +430,39 @@ export function parseModelPolicy(raw: unknown): ParseModelPolicyResult {
 
 	return { ok: true, policy, diagnostics };
 }
+
+/**
+ * The three states a project's model policy can be in (ADR 0008 §8.2's own trichotomy, restated as
+ * the three rows of §21's table). Modelled as a VALUE, never as "undefined vs. exception": absence is
+ * a legitimate, expected state (it is what every project is in today) and must be readable as such,
+ * while "present but unreadable" must never be able to collapse into it (R49(iii)).
+ */
+export type ResolveProjectModelPolicyResult =
+	| { kind: "absent" }
+	| { kind: "ok"; policy: ModelPolicy; diagnostics: readonly ModelPolicyDiagnostic[] }
+	| { kind: "unreadable"; reason: string };
+
+/**
+ * FR-11's missing half: reads the `modelPolicy` section of an already-loaded `.conductor/config.json`
+ * and runs it through `parseModelPolicy` (D6/R54 -- untrusted, repo-supplied input). `readConfig`'s
+ * own structural validator deliberately only checked that the key is an object, so this is where a
+ * policy actually becomes trustworthy enough to route a gate with.
+ *
+ * The three outcomes map 1:1 onto ADR §21's table:
+ *   - `absent`   -> D11 compatibility mode (the flat `provider.model` binds every gate);
+ *   - `ok`       -> the normal cascade (D3/§5), with `diagnostics` naming every place a TOFU pin is
+ *                   still required (the caller decides what to do with them; they are never dropped);
+ *   - `unreadable` -> `policy-unreadable`, NEVER compatibility mode -- a corrupted restrictive policy
+ *                   must not read as "no policy" (§8.2).
+ *
+ * Note the deliberate asymmetry with `bindings: []`: a policy that parses cleanly but declares no
+ * binding is `ok`, not `absent`. §21's table groups the two for the RESOLUTION's purposes (both enter
+ * compatibility mode), but only the resolution layer may make that equivalence -- flattening it here
+ * would throw away the fact that a policy exists, and with it its `gateRoles`/`egress` sections.
+ */
+export function resolveProjectModelPolicy(config: { modelPolicy?: unknown }): ResolveProjectModelPolicyResult {
+	if (config.modelPolicy === undefined) return { kind: "absent" };
+	const parsed = parseModelPolicy(config.modelPolicy);
+	if (!parsed.ok) return { kind: "unreadable", reason: parsed.reason };
+	return { kind: "ok", policy: parsed.policy, diagnostics: parsed.diagnostics };
+}

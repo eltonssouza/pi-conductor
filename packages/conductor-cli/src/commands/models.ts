@@ -7,23 +7,27 @@
  * -- all I/O (policy/catalog/credential/availability) already happened at the border, building the
  * `ResolutionContext` snapshot this file only ever reads (D3's "I/O nas bordas, política no meio").
  *
- * **Documented Gate 6 judgment call (the test file's own "IMPORTANT AMBIGUITY" note,
- * `test/commands/models.test.ts`):** `@conductor/providers` -- the sibling package that owns
- * `ResolutionContext`'s real internal shape and the `resolveModelForGate` function that would compute
- * a `ModelResolution` per gate -- is being built concurrently by a different Fase-7 stream and has no
- * real exports yet. A hard, value-level import of `resolveModelForGate` here would make this whole
- * file (and therefore every test in it, including the gate-out-of-range check that does not even
- * touch `ctx`) fail to load until that sibling stream lands. Per that test file's own framing ("the
- * exact mechanism... may need a small Gate 6 (or dedicated loop-back) adjustment once
- * `ResolutionContext`'s real fields land"), this implementation instead reads a narrow, defensively
- * typed `resolutions: ReadonlyMap<number, ModelResolution>` view off of `ctx` -- exactly the shape the
- * test fixtures already provide -- via `import type` only (erased at runtime, safe regardless of
- * whether the sibling package resolves). This is a DELIBERATE, DOCUMENTED placeholder for the real
- * per-gate `resolveModelForGate(request, ctx)` call the ADR's architecture actually wants (§5, D3);
- * flagged in this stream's own report as a reconciliation item once `@conductor/providers` lands.
+ * **GATE 8 (validação FR-a-FR) loop-back para o Gate 6 — a reconciliação que o Gate 6 declarou
+ * pendente e nunca fez.** O Gate 6 escreveu este arquivo enquanto `@conductor/providers` (o pacote
+ * irmão que possui `ResolutionContext` e `resolveModelForGate`) ainda estava sendo construído em
+ * paralelo, e por isso leu um placeholder: um campo `resolutions: ReadonlyMap<number, ModelResolution>`
+ * projetado sobre `ctx` via cast, com o cabeçalho declarando "um item de reconciliação assim que
+ * `@conductor/providers` aterrissar". **`@conductor/providers` aterrissou no MESMO commit** (Gate 6,
+ * `cf80bdb1b`) e a reconciliação não aconteceu: o `ResolutionContext` real
+ * (`resolution-context.ts`'s `buildResolutionContext`) devolve `{gateModelRoles, bindingsByRole,
+ * catalog, untrustedBindings}` — **nunca um campo `resolutions`**. Consequência medida no Gate 8:
+ * mesmo com um contexto real e correto, TODOS os 14 gates renderizavam "no resolution available" e
+ * `models why` sempre devolvia 1 — FR-12/FR-13 insatisfeitas por código, não por teste.
+ *
+ * A correção é a chamada que a arquitetura do ADR sempre quis (§5/D3): `resolveModelForGate(request,
+ * ctx)`, por gate, com `purpose: "report"` (§16 `ResolveModelRequest.purpose`) — a função é PURA e
+ * NUNCA lança (R49(i)), então chamá-la 14× num comando de relatório não faz I/O nenhum e não pode
+ * derrubar o comando. O import passa a ser de VALOR (não mais `import type`), o que é seguro e
+ * correto: `@conductor/providers` já é `dependency` real de `@conductor/cli` (`package.json`).
  */
 
 import type { ModelResolution, ResolutionContext, ResolutionRefusal, ResolutionStep } from "@conductor/providers";
+import { resolveModelForGate } from "@conductor/providers";
 import { sanitizeForTerminal, TOTAL_FLOW_GATES } from "@conductor/runtime";
 
 /** See `login.ts`'s own header note on this local, duck-typed `CliIO` surface. */
@@ -43,14 +47,11 @@ export interface RunModelsWhyOptions {
 	gate: number;
 }
 
-/** See this file's own header note: a narrow, structural view of `ctx` this command reads from,
- * never a claim about `ResolutionContext`'s real shape. */
-interface ResolutionsView {
-	resolutions?: ReadonlyMap<number, ModelResolution>;
-}
-
-function resolutionFor(ctx: ResolutionContext, gate: number): ModelResolution | undefined {
-	return (ctx as unknown as ResolutionsView).resolutions?.get(gate);
+/** The real pipeline (ADR §5/D3), per gate. `purpose: "report"` is §16's own value for exactly this
+ * caller: a visibility command, never a work-authorization point (those are P1/P2/P3, D4 §6.1).
+ * `resolveModelForGate` is pure and never throws (R49(i)) -- there is nothing here to guard. */
+function resolutionFor(ctx: ResolutionContext, gate: number): ModelResolution {
+	return resolveModelForGate({ gate, purpose: "report" }, ctx);
 }
 
 /** Sanitizes every string reachable from `value` (secure-default 66 / S3) -- applied universally
@@ -133,29 +134,71 @@ function formatRefusal(refusal: ResolutionRefusal): string {
 	return details ? `${kind} (${details})` : String(kind);
 }
 
+/**
+ * D11/§21: did this gate resolve through the UNIVERSAL FALLBACK (the session's flat `provider.model`,
+ * because the project declares no `ModelBinding` at all) rather than through a declared binding? Read
+ * off the trace's own `bindings` step -- `declaredIn: "builtin-default"` is exactly the marker
+ * `buildResolutionContext` stamps on the synthetic candidate, so this needs no second source of truth.
+ */
+function resolvedViaUniversalFallback(resolution: ModelResolution): boolean {
+	const bindings = resolution.trace.steps.find(
+		(step): step is Extract<ResolutionStep, { stage: "bindings" }> => step.stage === "bindings",
+	);
+	// `?? false`: a resolution with no `bindings` step at all is NOT a fallback resolution -- absence of
+	// evidence must never read as evidence here, or a future refusal shape with a truncated trace would
+	// silently start claiming compatibility mode.
+	return bindings?.candidates.every((c) => c.declaredIn === "builtin-default") ?? false;
+}
+
+/** Whether every provider this resolution touched actually has a credential configured. In
+ * compatibility mode the credential is deliberately NOT a filter (§21: opening a gate never called a
+ * model), so this is the only place the fact still reaches the user -- reporting a model as resolved
+ * while silently swallowing "you have no credential for it" would delete exactly the information the
+ * caller needs (Managing Software Complexity §3.12, §21's own grounding). */
+function hasCredential(resolution: ModelResolution): boolean {
+	const credential = resolution.trace.steps.find(
+		(step): step is Extract<ResolutionStep, { stage: "credential" }> => step.stage === "credential",
+	);
+	return (
+		credential !== undefined && credential.perProvider.length > 0 && credential.perProvider.every((e) => e.configured)
+	);
+}
+
 /** FR-12: a 14-gate table; edge case 1 (zero providers configured anywhere) gets an explicit
  * `conductor login` pointer, never a silently blank/empty table. */
 export function runModelsList(options: RunModelsListOptions): number {
 	const { io, ctx } = options;
 	const rows: string[] = [];
 	let anyResolved = false;
+	let anyCredentialed = false;
+	let allResolvedViaFallback = true;
 
 	for (let gate = 1; gate <= TOTAL_FLOW_GATES; gate++) {
 		const resolution = resolutionFor(ctx, gate);
 		const label = `gate ${String(gate).padStart(2, "0")}`;
-		if (resolution?.resolved) {
+		if (resolution.resolved) {
 			anyResolved = true;
+			if (hasCredential(resolution)) anyCredentialed = true;
+			if (!resolvedViaUniversalFallback(resolution)) allResolvedViaFallback = false;
 			rows.push(`${label}: ${s(resolution.ref.provider)}/${s(resolution.ref.modelId)}`);
-		} else if (resolution) {
-			rows.push(`${label}: refused -- ${formatRefusal(resolution.refusal)}`);
 		} else {
-			rows.push(`${label}: no resolution available -- run \`conductor login\` and configure a model policy`);
+			allResolvedViaFallback = false;
+			rows.push(`${label}: refused -- ${formatRefusal(resolution.refusal)}`);
 		}
 	}
 
-	if (!anyResolved) {
+	// Edge case 1 (zero providers configured anywhere) survives D11 intact: compatibility mode makes a
+	// gate RESOLVE without a credential, so "nothing resolved" is no longer the only way to be in that
+	// state -- "nothing resolved to a credentialed provider" is. Keying the pointer off the credential
+	// rather than off the resolution is what keeps the message honest in both modes.
+	if (!anyResolved || !anyCredentialed) {
 		io.stdout.write(
 			"No provider is configured yet for any gate. Run `conductor login <provider>` to authenticate a model provider, then `conductor models` again.\n\n",
+		);
+	}
+	if (anyResolved && allResolvedViaFallback) {
+		io.stdout.write(
+			"This project declares no `modelPolicy`, so every gate resolves to the session model from `provider.model` (ADR 0008 D11 compatibility mode). Add `modelPolicy.bindings` to .conductor/config.json to route gates per tier.\n\n",
 		);
 	}
 	io.stdout.write(`${rows.join("\n")}\n`);
@@ -175,11 +218,6 @@ export function runModelsWhy(options: RunModelsWhyOptions): number {
 	}
 
 	const resolution = resolutionFor(ctx, gate);
-	if (!resolution) {
-		io.stdout.write(`gate ${gate}: no resolution available yet -- run \`conductor models\` first.\n`);
-		return 1;
-	}
-
 	const lines = [`Resolution trace for gate ${gate}:`, ...resolution.trace.steps.map(formatResolutionStep)];
 
 	if (resolution.resolved) {

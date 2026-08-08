@@ -158,6 +158,19 @@ export interface ResolutionContext {
 	/** D6/§8.2: a policy that is PRESENT but unreadable/invalid -- set here by the async boundary
 	 * (`buildResolutionContext`) since the pure/sync `resolveModelForGate` cannot itself detect this. */
 	policyUnreadable?: string;
+	/**
+	 * D11 (§21): the session's flat model (Fase 1 `provider.model`) promoted to the UNIVERSAL implicit
+	 * binding, present ONLY when the project declares zero `ModelBinding`s (no `modelPolicy` section at
+	 * all, or one with `bindings: []`). Seeded by `buildResolutionContext`, never by a policy.
+	 *
+	 * `declaredIn` is always `"builtin-default"` and `rank` is `UNIVERSAL_FALLBACK_RANK` (derived from
+	 * the rank tables, never a literal) so it satisfies ANY requested floor -- there is no second model
+	 * to compare a tier against in this mode, and requiring a tier here would refuse every project that
+	 * exists today, which §8.2's own "política ausente ⇒ os defaults built-in valem" already forbade.
+	 * The instant ANY real binding exists this field is `undefined` again and the full cascade (D3/§5)
+	 * applies unchanged -- it is a compatibility floor, never a bypass.
+	 */
+	universalFallback?: ResolvedCandidate;
 }
 
 // ================= Availability cache (D7/R51) -- in-memory only, no disk state (D7) ===================
