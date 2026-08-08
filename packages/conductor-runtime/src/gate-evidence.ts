@@ -54,6 +54,44 @@
  * exactly as before; it is applying the Tier-1/Tier-2 split as it was already designed, to a kind
  * (`git-commit`) the original Gate 5/6 pass had not yet reconciled against it. See this function's own
  * doc comment below and `test/gate-evidence.test.ts`'s updated suite for the full before/after.
+ *
+ * FASE 6 NARROWING (ADR 0007 §4.2 D2/R40/T59, landed AFTER the Gate 8 loop-back above, and the reason
+ * `journal-entry` is deliberately EXCLUDED from the `runtime-derived` branch below even though it can
+ * resolve `provenance:"runtime-derived"` like `test-run` does): a `journal-entry` proves the runtime
+ * observed a WRITE — existence — never that a TEST actually ran — work. Accepting it alone would let
+ * `cdt journal add "did the work"` + `gate evidence --kind journal-entry` close a mandatory gate with
+ * zero real work behind it. This is guarded by THREE independent tests today:
+ * `test/gate-evidence-journal-entry-not-sole.test.ts` (this package, pure-function level),
+ * `@conductor/cli`'s `test/commands/gate-cli.acceptance.test.ts` ("R40/D2 non-regression", end-to-end via
+ * `runCli`), and `@conductor/cli`'s `test/commands/gate9-pentest.test.ts` (a dedicated Gate-9 PENTEST
+ * regression: a FORGED journal-entry still cannot close a mandatory gate). See this function's own doc
+ * comment below (the "5TH KIND" section) for why the 5th `EvidenceRef` kind added by ADR 0010
+ * ("delegation") extends this branch while `journal-entry` deliberately does not, and for the
+ * documented conflict between ADR 0010 §9/D7's own text and this Fase-6 decision.
+ *
+ * 5TH KIND (ADR 0010 "Wiring de delegação real de subagentes em runAuto" §9/D7, FR-5/FR-5a/FR-5b, Gate
+ * 3 addendum R64): `EvidenceRef` gains a `"delegation"` member — a `sessionId` the runtime itself
+ * observed spawning a REAL, disc-backed governed child session (tokens spent, files touched), never a
+ * caller's claim. Its `resolveEvidenceRef` case (below) mirrors `test-run`/`journal-entry` exactly:
+ * `ok:true, provenance:"runtime-derived"` iff the id is in a set the runtime itself populated
+ * (`ctx.runtimeRecordedDelegationSessionIds`), never from disk/checkpoint/`--ref` (GAP-A).
+ *
+ * `hasSufficientEvidenceForMandatoryGate`'s runtime-derived branch below accepts `delegation` alongside
+ * `test-run` — a genuinely observed delegation proves WORK (real tool calls, real files touched; see
+ * `DelegationEvidence`'s own doc comment in `tools/task.ts`), the same class of evidence a `test-run`
+ * is, not the "existence of a write" class a `journal-entry` is. This is a DELIBERATE, NARROWER reading
+ * of ADR 0010 §9/D7 than that ADR's own prose asks for: D7's text says to extend the branch to "all
+ * three runtime-derived kinds" (`test-run || journal-entry || delegation`), framing the current
+ * `journal-entry` exclusion as a mere "pre-existing asymmetry" left over from before the golden rule's
+ * own comment was written. Implementing that literally would REOPEN the exact vulnerability
+ * `gate9-pentest.test.ts`'s T59/R40/D2 regression test exists to keep closed (a forged or merely
+ * descriptive journal-entry closing a mandatory {3,5,7,8,9} gate with no real work behind it) and would
+ * break that test plus the two others named above — none of which ADR 0010's own text acknowledges or
+ * reconciles against. This Gate 5 pass therefore implements ONLY the `delegation` half of D7's
+ * extension (uncontroversial: a new kind, no prior invariant to conflict with) and leaves
+ * `journal-entry` excluded exactly as ADR 0007 §4.2 left it — flagged back to the architect/user for an
+ * explicit Gate 3/4 reconciliation (CLAUDE.md's own "iterative with Gate 3" rule) rather than silently
+ * implemented either way.
  */
 
 import { existsSync } from "node:fs";
@@ -63,7 +101,11 @@ export type EvidenceRef =
 	| { kind: "git-commit"; sha: string }
 	| { kind: "file"; path: string }
 	| { kind: "journal-entry"; id: string }
-	| { kind: "test-run"; id: string };
+	| { kind: "test-run"; id: string }
+	// 5th kind (ADR 0010 §9/D7, FR-5) — additive; the 4 above stay literal/unchanged. `role` is carried
+	// for observability (which lead role's delegation this evidence attests to) but is NOT part of the
+	// resolution check below (only `sessionId` membership in the runtime-observed set matters).
+	| { kind: "delegation"; sessionId: string; role: string };
 
 /**
  * R25 "golden rule" (T41 mitigation, portado de R14/`task.ts:DelegationEvidence`): a `test-run`/
@@ -98,6 +140,16 @@ export interface ResolveEvidenceRefContext {
 	 * entry ids this project's own diary already produces — a REAL source once wired, unlike
 	 * `runtimeRecordedTestRunIds` which has no real producer yet). */
 	runtimeRecordedJournalEntryIds: ReadonlySet<string>;
+	/** ADR 0010 §9/D7/FR-5a (Gate 3 addendum R64/GAP-A): ids of a governed child session `runAuto` (or
+	 * any other caller) itself observed `createGovernedChildSessionSpawner` spawn successfully — SAME
+	 * contract as the two sets above (a caller with no real spawn to report MUST pass an honestly-empty
+	 * set). By construction, this set has no disk-backed producer anywhere in this package: it is
+	 * populated ONLY by a caller's own in-process observation of a completed spawn, NEVER by scanning
+	 * `.conductor-agent/sessions/tasks/` (or any other directory) to "recover" a `sessionId` from a
+	 * prior process invocation — see `packages/conductor-cli/src/commands/auto.ts`'s own `runGateDelegation`
+	 * doc comment and `test/commands/auto-delegation-evidence-in-process-only.test.ts` (the static-scan
+	 * regression guard for this exact invariant). */
+	runtimeRecordedDelegationSessionIds: ReadonlySet<string>;
 }
 
 export type ResolveEvidenceRefResult = { ok: true; provenance: EvidenceProvenance } | { ok: false; reason: string };
@@ -148,6 +200,17 @@ export function resolveEvidenceRef(ref: EvidenceRef, ctx: ResolveEvidenceRefCont
 				return ctx.runtimeRecordedJournalEntryIds.has(ref.id)
 					? { ok: true, provenance: "runtime-derived" }
 					: { ok: false, reason: `journal-entry evidence ref was never recorded by the runtime: "${ref.id}"` };
+
+			case "delegation":
+				// ADR 0010 §9/D7/FR-5a: SAME pattern as test-run/journal-entry above -- membership in a
+				// set only the runtime's own in-process observation of a completed spawn populates
+				// (GAP-A: never disk/checkpoint/--ref).
+				return ctx.runtimeRecordedDelegationSessionIds.has(ref.sessionId)
+					? { ok: true, provenance: "runtime-derived" }
+					: {
+							ok: false,
+							reason: `delegation evidence ref was never recorded by the runtime: "${ref.sessionId}"`,
+						};
 
 			default: {
 				// Exhaustiveness guard: a future EvidenceRef variant that forgets a case here is a compile
@@ -206,6 +269,18 @@ export interface EvidenceProvenanceInfo {
  * one bar.
  */
 export function hasSufficientEvidenceForMandatoryGate(evidence: readonly EvidenceProvenanceInfo[]): boolean {
-	if (evidence.some((item) => item.provenance === "runtime-derived" && item.ref.kind === "test-run")) return true;
+	// ADR 0010 §9/D7 (5th kind): `delegation` joins `test-run` here -- a genuinely runtime-observed
+	// delegation proves WORK (real tool calls / files touched), the same class of proof a test-run is.
+	// `journal-entry` deliberately does NOT join this branch -- see this file's own header ("FASE 6
+	// NARROWING" / "5TH KIND") for why ADR 0010 §9/D7's own text asks for journal-entry too, and why
+	// this Gate 5 pass does not implement that half of it.
+	if (
+		evidence.some(
+			(item) =>
+				item.provenance === "runtime-derived" && (item.ref.kind === "test-run" || item.ref.kind === "delegation"),
+		)
+	) {
+		return true;
+	}
 	return evidence.some((item) => item.provenance === "author-declared" && item.ref.kind === "git-commit");
 }

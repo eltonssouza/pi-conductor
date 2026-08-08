@@ -62,8 +62,17 @@ const DEFAULT_MANDATORY_GATES: ReadonlySet<number> = new Set([3, 5, 7, 8, 9]);
  * consulted ONLY to enrich the wording for the two refusal kinds where the never-collapse floor is
  * genuinely non-relaxable (R48/§6.3: "nos 5 obrigatórios, o piso de tier não é relaxável nem com
  * consentimento") — it never changes WHETHER a refusal happened, only how it reads.
+ *
+ * EXPORTED (N2, ADR 0010 "Wiring de delegação real de subagentes em runAuto" §5/D3, additive, ZERO
+ * behavior change): this function used to be private to this module. FR-2b of that demand's spec
+ * requires `runAuto`'s own model-precondition refusal (a SEPARATE call, `purpose:"delegation"`,
+ * resolved DIRECTLY against the same `ModelResolutionPort` rather than through
+ * `evaluateModelPrecondition`, which discards `resolution.model`) to reuse this EXACT formatting —
+ * "describeRefusal-shaped, never a second formatting function" (spec FR-2b's own words). Making it
+ * `export` is the only change here: the function's body, behavior, and every existing call site
+ * (`evaluateModelPrecondition` below) are untouched.
  */
-function describeRefusal(refusal: ResolutionRefusal, mandatoryGates: ReadonlySet<number>): string {
+export function describeRefusal(refusal: ResolutionRefusal, mandatoryGates: ReadonlySet<number>): string {
 	const mandatoryNote = (gate: number) =>
 		mandatoryGates.has(gate) ? " (mandatory gate — the tier floor is not relaxable, even with consent)" : "";
 	switch (refusal.kind) {

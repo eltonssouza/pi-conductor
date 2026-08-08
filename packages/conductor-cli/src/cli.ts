@@ -455,6 +455,12 @@ async function runGateCommand(args: string[], io: CliIO): Promise<number> {
 		gitCommitExists: gitCommitExistsSync,
 		runtimeRecordedTestRunIds: new Set(),
 		runtimeRecordedJournalEntryIds: readRecordedJournalEntryIds(journalReader),
+		// ADR 0010 §9/D7/GAP-A: honestly empty here -- this CLI composition root has no in-process
+		// delegation spawn to observe (that seam is `commands/auto.ts`'s own `runGateDelegation`,
+		// Gate 6 scope for that demand); `gate evidence --kind delegation` run manually from this CLI
+		// path can therefore never resolve, which is the correct fail-closed behavior (GAP-A: never
+		// reconstructed from disk/checkpoint here either).
+		runtimeRecordedDelegationSessionIds: new Set(),
 	};
 
 	/**

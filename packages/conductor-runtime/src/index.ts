@@ -83,6 +83,7 @@ export {
 	TOTAL_FLOW_GATES,
 } from "./gate-state-store.ts";
 export {
+	describeRefusal,
 	evaluateModelPrecondition,
 	type ModelPreconditionVerdict,
 	type ModelResolutionPort,
@@ -146,11 +147,14 @@ export {
 export {
 	type ConductorRoleView,
 	type CreateTaskToolDependencies,
+	createGovernedChildSessionSpawner,
 	createTaskTool,
 	DEFAULT_MAX_DELEGATION_DEPTH,
 	type DelegationEvidence,
 	type ModelRoleView,
 	type RoleRegistryView,
+	type SpawnChildSessionInput,
+	type SpawnChildSessionResult,
 	type TaskToolParams,
 	type TaskToolResult,
 } from "./tools/task.ts";
