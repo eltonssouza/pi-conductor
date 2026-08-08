@@ -40,6 +40,9 @@ function evidenceContext(overrides: Partial<ResolveEvidenceRefContext> = {}): Re
 		gitCommitExists: () => false,
 		runtimeRecordedTestRunIds: new Set(),
 		runtimeRecordedJournalEntryIds: new Set(),
+		// ADR 0010 §9/D7: this suite's subject is runGateEvidence's own wiring, not delegation evidence
+		// -- an honestly-empty set, overridable per-test like the two sets above.
+		runtimeRecordedDelegationSessionIds: new Set(),
 		...overrides,
 	};
 }

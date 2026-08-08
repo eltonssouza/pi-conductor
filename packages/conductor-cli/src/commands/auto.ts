@@ -48,8 +48,21 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { MANDATORY_GATES } from "@conductor/config";
-import { createSharedBudget, TOTAL_FLOW_GATES } from "@conductor/runtime";
+import {
+	type AuditTrailWriter,
+	type ConductorRoleView,
+	createSharedBudget,
+	type EffectivePolicyInput,
+	type EvidenceRef,
+	type ModelResolutionPort,
+	type RoleRegistryView,
+	type SharedBudget,
+	type SpawnChildSessionInput,
+	TOTAL_FLOW_GATES,
+} from "@conductor/runtime";
 import { findSecretSpans, type SecretSpan } from "@conductor/secrets";
+import type { Api, Model } from "@earendil-works/pi-ai";
+import type { SessionManager } from "@earendil-works/pi-coding-agent";
 import { DEFAULT_GIT_STATUS_TIMEOUT_MS } from "../git-status.ts";
 import { resolveConfirmChannel, type TtyStreams } from "../tty-confirm.ts";
 import { type GateStatusSnapshot, runGateApprove, runGateCalibrate, runGateStart } from "./gate.ts";
@@ -731,3 +744,127 @@ export async function runAuto(options: RunAutoOptions): Promise<number> {
  * to cooldown/backoff/TTL) -- never treated as a discovered truth.
  */
 export const DEFAULT_AUTO_RUN_TOKEN_BUDGET = 2_000_000;
+
+// =================================================================================================
+// GATE 5 (feature/auto-subagent-delegation, ADR 0010 "Wiring de delegação real de subagentes em
+// runAuto") -- everything below this line is NEW to this demand, added on top of the already-real
+// (Fase 8, Gate 6) `runAuto` above. Every FUNCTION below is an unconditional `throw new Error("not
+// implemented")` stub -- the SAME precedent this file's own header already documents for this file's
+// original Gate 5 pass ("every exported run* function... started life as an unconditional throw") and
+// `@conductor/runtime`'s `gate-evidence.ts`/`tools/task.ts` document for theirs. This section exists so
+// `test/commands/auto-delegation-*.test.ts` has real, ADR-0010-locked signatures to import and can fail
+// RED for the right reason (missing delegation-wiring behavior, never a missing-export error). Gate 6
+// fills the bodies in for real, wiring `runGateDelegation` into step (c) of `runAuto`'s own loop above
+// (auto.ts:658-659's own comment) -- these stubs are NOT called from that loop yet.
+//
+// The TYPES below are NOT a sketch -- `GateDelegationOptions`/`GateDelegationOutcome`/
+// `buildDelegationSpawnInput`/`runGateDelegation`'s own signature mirror ADR 0010 §3.2/§7/§14's locked
+// appendix contract; do not change these shapes without a new ADR.
+// =================================================================================================
+
+/**
+ * ADR 0010 §9/D7: the 5th `EvidenceRef` kind's own shape, narrowed for this file's own
+ * `attachDelegationEvidence` collaborator below -- never redeclared, always derived from
+ * `@conductor/runtime`'s own single-source-of-truth union (`gate-evidence.ts`).
+ */
+export type DelegationEvidenceRef = Extract<EvidenceRef, { kind: "delegation" }>;
+
+/**
+ * ADR 0010 §3.2 -- `runGateDelegation`'s own collaborators, ALL already-constructed by the caller
+ * (never built inside `runGateDelegation` itself -- the same "módulo profundo, interface estreita"
+ * discipline `runAuto`'s own `store`/`confirm`/`budget` already follow, ADR 0010 §3.2's own doc
+ * comment). `modelResolutionPort`/`sharedBudget` are the SAME instances `runAuto` already built for
+ * the gate precondition/the run's own budget above -- never a second port, never a second budget
+ * (H-Fase8, ratified by ADR 0010 §2).
+ */
+export interface GateDelegationOptions {
+	gate: number;
+	io: CliIO;
+	roleRegistry: RoleRegistryView;
+	modelResolutionPort: ModelResolutionPort;
+	sharedBudget: SharedBudget;
+	effectivePolicyInput: EffectivePolicyInput;
+	auditTrailWriter: AuditTrailWriter;
+	/** D7/GAP-A: adds to the in-process-only `Set` this file's own future `runAuto` wiring owns --
+	 * NEVER a disk-backed writer (see `@conductor/runtime`'s `gate-evidence.ts`'s own doc comment on
+	 * `runtimeRecordedDelegationSessionIds` for the full GAP-A rationale). */
+	recordDelegationSessionId: (sessionId: string) => void;
+	/** D7 -- `runGateEvidence`-bound, with the SAME `evidenceContext` shape `runAuto`'s own future
+	 * wiring extends with the 5th field. */
+	attachDelegationEvidence: (gate: number, ref: DelegationEvidenceRef) => void;
+}
+
+/**
+ * ADR §3.2/D1/D9 -- a typed RESULT, never an exception a caller can forget to handle (the SAME
+ * "Writing Maintainable Code §4.12" discipline this file's own `RiskClassification` above already
+ * cites). `{kind:"delegated"}`'s own `contextExceeded` is checked by the CALLER at the gate boundary
+ * (ADR §3.1 step (h)), never mid-gate (D8).
+ */
+export type GateDelegationOutcome =
+	| { kind: "delegated"; contextExceeded: boolean }
+	| { kind: "stop"; reason: RunStopReason; exitCode: number; detail: string };
+
+/**
+ * D8 (ADR §10, closes ADR 0009 §20) -- the context-limit threshold fraction, produced for the FIRST
+ * time by this demand. A declared default, never a discovered truth -- overridable at Gate 6/11 (the
+ * SAME "default declarado, sintonizável depois" discipline `DEFAULT_AUTO_RUN_TOKEN_BUDGET` above
+ * already follows). Compared against `Model.contextWindow` PER-CALL -- never against
+ * `sharedBudget.remaining()` (BR-6, a fundamentally different, RUN-accumulated measurement; see ADR
+ * 0009 §20 and ADR 0010 §10/D8 for the full rejection of that conflation).
+ */
+export const CONTEXT_LIMIT_FRACTION = 0.9;
+
+/**
+ * D5/GAP-D (ADR §7, Gate 3 addendum T82/R63) -- the ONE constructor of `SpawnChildSessionInput` in
+ * `runAuto`. Makes the 4 security invariants (`model`/`yesFlagActive`/`effectivePolicy`/
+ * `auditTrailWriter`) IMPOSSIBLE to omit or loosen through this function's own parameter list:
+ * `yesFlagActive` is HARDCODED `false` (never a parameter a caller could pass `true` for --
+ * `runAuto` is headless by construction, D3 layer 1, ADR 0009), `depth` is HARDCODED `1` (`runAuto`
+ * only ever bypasses the root->depth-1 hop, R66/T85), `additionalProtectedPaths` is HARDCODED `[]`,
+ * and `model`/`effectivePolicy`/`auditTrailWriter` are all REQUIRED (never optional, never
+ * defaulted) -- there is no code path through this function's own parameter list that could produce
+ * a permissive value for any of the 4 (Managing Software Complexity §3.1/§3.10: information hiding,
+ * the 4 security decisions hidden in a module a caller cannot leak a wrong value through).
+ *
+ * GATE 5: unconditional throw -- see this section's own header. Written against ADR §14's exact
+ * parameter shape so Gate 6's implementation is compile-checked against this signature, not invented
+ * at Gate 6 time.
+ */
+export function buildDelegationSpawnInput(_args: {
+	role: ConductorRoleView;
+	prompt: string;
+	model: Model<Api>;
+	workspaceRoot: string;
+	effectivePolicyInput: EffectivePolicyInput;
+	auditTrailWriter: AuditTrailWriter;
+	sessionManager: SessionManager;
+}): SpawnChildSessionInput {
+	throw new Error("not implemented");
+}
+
+/**
+ * D1 (ADR §3) -- the internal function Gate 6 wires into step (c) of `runAuto`'s own loop above (see
+ * that function's own header comment, "(c) delegate substantive work to role subagents"). Composes,
+ * in this order (ADR §2/§4-§11): `BUILTIN_GATE_ROLES[gate][0]` (D2/FR-1) resolved through
+ * `options.roleRegistry.get` -- refusing fail-closed when the role is absent OR resolves with
+ * `tools:[]` (D2/N1/GAP-2: a tools-empty lead role cannot produce "delegação real" as this demand's
+ * own glossary defines it -- a monologue with no tool calls is never recorded as evidence);
+ * `options.modelResolutionPort.resolveForGate({gate, purpose:"delegation", persona})` (D3/FR-2,
+ * called DIRECTLY, never through `evaluateModelPrecondition`, which discards `.model`); the fixed
+ * `GATE_DELEGATION_TEMPLATES[gate]` template (D4/FR-3, `auto-delegation-templates.ts`) plus neutral
+ * references; `buildDelegationSpawnInput` above (D5/FR-4/GAP-D); and
+ * `createGovernedChildSessionSpawner(options.sharedBudget)` (D6/FR-4 -- never `runTask`, never a
+ * second `createAgentSession`, never a second `SharedBudget`, H-Fase8/ADR 0010 §2). Every failure
+ * (role refusal, model refusal, budget exhaustion, a rejected/thrown spawn) degrades through a
+ * `{kind:"stop"}` outcome (D9/FR-7) -- NEVER an uncaught exception the caller's loop could crash on.
+ * A successful delegation calls `options.recordDelegationSessionId` then
+ * `options.attachDelegationEvidence` with a genuinely runtime-derived `{kind:"delegation"}` ref
+ * (D7/FR-5) and reports whether the per-call context window was exceeded (D8/FR-6) -- checked by the
+ * caller at the gate boundary, never mid-gate.
+ *
+ * GATE 5: unconditional throw -- NOT wired into `runAuto`'s loop yet (Gate 6's job). This stub exists
+ * so `test/commands/auto-delegation-*.test.ts` has a real, ADR-0010-locked signature to import.
+ */
+export async function runGateDelegation(_options: GateDelegationOptions): Promise<GateDelegationOutcome> {
+	throw new Error("not implemented");
+}

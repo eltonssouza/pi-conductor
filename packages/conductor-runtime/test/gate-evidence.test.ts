@@ -37,6 +37,9 @@ function baseCtx(overrides: Partial<ResolveEvidenceRefContext> = {}): ResolveEvi
 		gitCommitExists: () => false,
 		runtimeRecordedTestRunIds: new Set(),
 		runtimeRecordedJournalEntryIds: new Set(),
+		// ADR 0010 §9/D7 (5th EvidenceRef kind) -- this file's own subject is the 4 pre-existing kinds;
+		// the delegation kind gets its own dedicated suite, gate-evidence-delegation.test.ts.
+		runtimeRecordedDelegationSessionIds: new Set(),
 		...overrides,
 	};
 }
