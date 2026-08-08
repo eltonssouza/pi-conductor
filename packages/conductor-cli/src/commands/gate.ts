@@ -28,6 +28,21 @@
  * `--ref` MUST actually resolve (Tier-1: a real, abrível git commit / file / runtime-recorded
  * test-run / journal-entry) before this function ever attaches it to persisted `GateState` — fail-
  * closed, and the RESOLVED provenance (never a caller-declared guess) is what gets persisted.
+ *
+ * FASE 8 EXTENSION (GATE 5, test-first — docs/adr/0009-fase8-autonomous-mode.md §14/§16, the ONLY
+ * two touches to inherited code this fase declares): `GateStateStoreView` gains a SEVENTH method,
+ * `approveAuto` — N1, ADR §1.1: `@conductor/runtime`'s `mintAutoApproval` (`method:"auto"`) already
+ * exists and is already tested, but has NEVER had a call site in this package — `approve()` above
+ * calls only `mintHumanApproval`. `conductor auto`'s non-mandatory-gate auto-approval is the FIRST
+ * caller of that primitive, composing the SAME `store.mutate` this interface's other six methods
+ * already use (never a second mutator — the H-Fase8 hypothesis this whole fase ratifies). GUARDED by
+ * `MANDATORY_GATES`: every real implementation of `approveAuto` MUST refuse a `gate ∈ MANDATORY_GATES`
+ * (the caller falls through to `needs-human`, never obtains a `method:"auto"` for one by a second
+ * route) — never a caller-side check alone. This Gate 5 adds ONLY the interface method and the
+ * `InteractivityWitness` type below; this file's other six method SIGNATURES are UNCHANGED, and the
+ * concrete adapters (`./gate-store.ts`'s `createPersistedGateStateStore`, `test/support/
+ * fake-gate-store.ts`'s fake) both still throw "not implemented" for `approveAuto` until Gate 6 wires
+ * the real guard — see `test/commands/gate-approve-auto-mandatory-guard.test.ts`.
  */
 
 import {
@@ -116,7 +131,34 @@ export interface GateStateStoreView {
 	 * confirm-channel discipline as `approve` (R22/R24: a calibration decision carries who/how decided,
 	 * never ambiguous when read back — ADR 0005 §5). */
 	calibrate(demandId: string, collapsedGates: number[], method: GateApprovalMethod): GateStatusSnapshot;
+
+	/**
+	 * FASE 8 / N1 (docs/adr/0009-fase8-autonomous-mode.md §1.1/§14): the first call site of
+	 * `@conductor/runtime`'s `mintAutoApproval` — mints `Approval{method:"auto"}` for a NON-mandatory
+	 * gate that `conductor auto` decided to auto-approve, composing the same `store.mutate` every other
+	 * method on this interface already uses. MUST refuse (never mint) for any `gate ∈ MANDATORY_GATES`
+	 * — a mandatory gate is never auto-cunhado by any real implementation of this method, independent
+	 * of whatever the caller already checked. GATE 5 (test-first, this fase): every implementation —
+	 * the real adapter (`./gate-store.ts`) and the fake (`test/support/fake-gate-store.ts`) alike —
+	 * throws unconditionally until Gate 6 wires the guard for real.
+	 */
+	approveAuto(demandId: string, gate: number): GateStatusSnapshot;
 }
+
+/**
+ * FASE 8 / D3 layer 2 (docs/adr/0009-fase8-autonomous-mode.md §5.3/§16, Gate 3 T75/R56): the
+ * independent interactivity witness the concrete `approve()` implementation (`./gate-store.ts`, Gate 6
+ * scope — NOT wired into this file's `approve()` signature by this Gate 5, see this file's header)
+ * must cross against `confirmResult` before ever minting `method:"human"` — production default
+ * `() => Boolean(process.stdin.isTTY && process.stdout.isTTY)`, reading the REAL process TTY state, a
+ * code path deliberately distinct from `io.tty`/`resolveConfirmChannel` (D3 layer 1, the
+ * channel-selection seam `./tty-confirm.ts` already owns). The binding rule (ADR §5.3):
+ * `confirmResult === true && isInteractive() === false` must NEVER mint — the same `needs-human`
+ * branch `mintHumanApproval` returning `null` already produces for `confirmResult !== true`. Exported
+ * here — a pure `() => boolean` shape, no behavior — so Gate 6's `gate-store.ts` change and this
+ * fase's own tests share one canonical type instead of each re-declaring it ad hoc.
+ */
+export type InteractivityWitness = () => boolean;
 
 export interface GateCommandOptions {
 	cwd: string;

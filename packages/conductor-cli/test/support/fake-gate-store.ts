@@ -18,6 +18,12 @@
  * constant, `builtin-roles-data.ts` — ADR 0005 §4/R23/BR-10, `{3,5,7,8,9}`), now re-exported from that
  * package's `src/index.ts` barrel — the single source of truth this fake mirrors rather than
  * hardcodes, so it can never silently drift from the real floor.
+ *
+ * FASE 8 GATE 5 (docs/adr/0009-fase8-autonomous-mode.md §14/§16, N1): `approveAuto` below is an
+ * unconditional Gate-5 throw, matching `../../src/commands/gate.ts`'s own `GateStateStoreView`
+ * extension — this fake stays a stub for that one method until Gate 6 wires its real
+ * `MANDATORY_GATES`-guarded behavior (see `test/commands/gate-approve-auto-mandatory-guard.test.ts`),
+ * even though this file's other six methods below are already a genuinely working fake.
  */
 
 import { MANDATORY_GATES } from "@conductor/config";
@@ -168,6 +174,14 @@ export function createFakeGateStore(options: { branch?: string } = {}): FakeGate
 
 		getRaw(demandId) {
 			return demands.get(demandId);
+		},
+
+		approveAuto(_demandId, _gate) {
+			// Fase 8 / N1, GATE 5: unconditional throw (plain Error, matching this whole codebase's
+			// Gate-5 stub convention -- NOT a GateCommandError domain refusal) -- see this file's header.
+			// Gate 6 replaces this with a real MANDATORY_GATES-guarded fake mirroring gate-store.ts's own
+			// concrete behavior.
+			throw new Error("not implemented");
 		},
 	};
 }

@@ -398,6 +398,18 @@ export function createPersistedGateStateStore(options: PersistedGateStateStoreOp
 			if (!result.ok) throw new GateCommandError(`cannot register calibration: ${describeStoreError(result.error)}`);
 			return projectSnapshot(result.value.next);
 		},
+
+		// FASE 8 / N1, GATE 5 (docs/adr/0009-fase8-autonomous-mode.md §1.1/§14): an unconditional stub,
+		// same discipline as `test/support/fake-gate-store.ts`'s own. This ONE line exists only because
+		// `GateStateStoreView` (commands/gate.ts) grew a 7th, non-optional method this fase -- without a
+		// stub here, `createPersistedGateStateStore`'s return value stops structurally satisfying the
+		// interface and the whole package fails to typecheck (confirmed live via `tsgo --noEmit`), which
+		// is a worse Gate-5 failure mode than a throwing stub (a missing-type error, not a RED test for
+		// missing behavior). Gate 6 replaces this with the real MANDATORY_GATES-guarded implementation
+		// (compose store.mutate + @conductor/runtime's mintAutoApproval, mirroring every method above).
+		approveAuto(_demandId, _gate) {
+			throw new GateCommandError("not implemented");
+		},
 	};
 }
 
