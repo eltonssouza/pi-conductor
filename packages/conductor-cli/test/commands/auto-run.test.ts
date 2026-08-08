@@ -74,6 +74,14 @@ describe("runAuto --continue — FR-7/BR-5/R59: the run checkpoint is a hint, al
 		// Gate 5 is mandatory; the only mandatory gate below it is 3 (MANDATORY_GATES = {3,5,7,8,9}), so
 		// gate 3 must be genuinely approved first before gate 5 can even be start()-ed.
 		store.start("demand-1", 3);
+		// A mandatory gate's approve() refuses without sufficient evidence (R25/BR-6, gate-evidence.ts).
+		// attachEvidence itself trusts the caller -- resolution happens one layer up in the CLI's
+		// runGateEvidence, which this test bypasses -- so a git-commit/author-declared item is enough to
+		// satisfy hasSufficientEvidenceForMandatoryGate's interim git-commit branch.
+		store.attachEvidence("demand-1", 3, {
+			ref: { kind: "git-commit", sha: "0000000000000000000000000000000000000000" },
+			provenance: "author-declared",
+		});
 		store.approve("demand-1", 3, true, { source: "test" });
 		store.start("demand-1", 5); // gate 5 deliberately left in-progress, never approved
 

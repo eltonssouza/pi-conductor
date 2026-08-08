@@ -55,6 +55,7 @@ import {
 	type GateStateStore,
 	hasSufficientEvidenceForMandatoryGate,
 	type ModelResolutionPort,
+	mintAutoApproval,
 	mintHumanApproval,
 } from "@conductor/runtime";
 import { DEFAULT_GIT_STATUS_TIMEOUT_MS, getGitStatus, resolveTimeoutMs } from "../git-status.ts";
@@ -399,16 +400,50 @@ export function createPersistedGateStateStore(options: PersistedGateStateStoreOp
 			return projectSnapshot(result.value.next);
 		},
 
-		// FASE 8 / N1, GATE 5 (docs/adr/0009-fase8-autonomous-mode.md §1.1/§14): an unconditional stub,
-		// same discipline as `test/support/fake-gate-store.ts`'s own. This ONE line exists only because
-		// `GateStateStoreView` (commands/gate.ts) grew a 7th, non-optional method this fase -- without a
-		// stub here, `createPersistedGateStateStore`'s return value stops structurally satisfying the
-		// interface and the whole package fails to typecheck (confirmed live via `tsgo --noEmit`), which
-		// is a worse Gate-5 failure mode than a throwing stub (a missing-type error, not a RED test for
-		// missing behavior). Gate 6 replaces this with the real MANDATORY_GATES-guarded implementation
-		// (compose store.mutate + @conductor/runtime's mintAutoApproval, mirroring every method above).
-		approveAuto(_demandId, _gate) {
-			throw new GateCommandError("not implemented");
+		// FASE 8 / N1 (docs/adr/0009-fase8-autonomous-mode.md §1.1/§14, Gate 6 wiring closure): the FIRST
+		// call site of @conductor/runtime's mintAutoApproval, composing the SAME store.mutate every other
+		// method on this interface already uses (never a second mutator). GUARDED by MANDATORY_GATES,
+		// checked BEFORE any store I/O at all -- a mandatory gate refuses unconditionally, independent of
+		// whether it was ever started (gate-approve-auto-mandatory-guard.test.ts's it.each calls this with
+		// no prior store.start() at all, so the refusal must not depend on gate/demand state).
+		approveAuto(demandId, gate) {
+			if (MANDATORY_GATES.has(gate)) {
+				throw new GateCommandError(
+					`cannot auto-approve gate ${gate}: it is a mandatory gate (N1/R55) -- a mandatory gate is never auto-cunhado, only a genuine human sign-off (\`conductor gate approve\`) can close it`,
+				);
+			}
+			const store = storeFor(options, demandId);
+			readOrBootstrap(store);
+			const result = store.mutate((current) => {
+				const record = current.gates[gate];
+				if (!record || record.status === "not-started" || record.status === "rejected") {
+					throw new GateCommandError(`cannot auto-approve gate ${gate}: it was never started (or is rejected)`);
+				}
+				// Mirrors approve()'s own idempotency guard: re-approving an already-approved gate reaffirms
+				// the existing state, never mints a second, redundant Approval.
+				if (record.status === "approved") {
+					return current;
+				}
+				// N1: the ONE producer of method:"auto" for this call site -- mintAutoApproval itself can
+				// never return a method:"human" value under any input (BR-7), so this mint can never be
+				// confused with a genuine human sign-off however it is later read back.
+				const approval = mintAutoApproval({ gate, demandId, branch: current.branch, source: "conductor-auto" });
+				return {
+					...current,
+					gates: {
+						...current.gates,
+						[gate]: {
+							...record,
+							status: "approved",
+							completedAt: new Date().toISOString(),
+							approvals: [...record.approvals, approval],
+						},
+					},
+				};
+			});
+			if (!result.ok)
+				throw new GateCommandError(`cannot auto-approve gate ${gate}: ${describeStoreError(result.error)}`);
+			return projectSnapshot(result.value.next);
 		},
 	};
 }

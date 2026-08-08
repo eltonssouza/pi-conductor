@@ -176,12 +176,27 @@ export function createFakeGateStore(options: { branch?: string } = {}): FakeGate
 			return demands.get(demandId);
 		},
 
-		approveAuto(_demandId, _gate) {
-			// Fase 8 / N1, GATE 5: unconditional throw (plain Error, matching this whole codebase's
-			// Gate-5 stub convention -- NOT a GateCommandError domain refusal) -- see this file's header.
-			// Gate 6 replaces this with a real MANDATORY_GATES-guarded fake mirroring gate-store.ts's own
-			// concrete behavior.
-			throw new Error("not implemented");
+		approveAuto(demandId, gate) {
+			// Fase 8 / N1, GATE 6: mirrors createPersistedGateStateStore's own approveAuto -- the
+			// MANDATORY_GATES guard is checked FIRST, before any demand/gate state is even touched (the
+			// it.each in gate-approve-auto-mandatory-guard.test.ts never calls start() first).
+			if (MANDATORY_GATES.has(gate)) {
+				throw new GateCommandError(
+					`cannot auto-approve gate ${gate}: it is a mandatory gate (N1/R55) -- a mandatory gate is never auto-cunhado, only a genuine human sign-off can close it`,
+				);
+			}
+			const demand = ensureDemand(demandId);
+			const record = demand.gates.get(gate);
+			if (!record || record.status === "not-started" || record.status === "rejected") {
+				throw new GateCommandError(`cannot auto-approve gate ${gate}: it was never started (or is rejected)`);
+			}
+			if (record.status === "approved") {
+				return snapshot(demandId);
+			}
+			record.status = "approved";
+			record.completedAt = new Date().toISOString();
+			record.approvalsCount += 1;
+			return snapshot(demandId);
 		},
 	};
 }

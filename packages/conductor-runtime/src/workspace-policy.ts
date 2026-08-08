@@ -197,6 +197,13 @@ export function defaultProtectedPaths(workspaceRoot?: string): string[] {
 			// mutate a GateState is through the `gate *` commands (which route through
 			// mutateGateState/GateStateStore, R22/R27), never a direct write/edit/bash on the file.
 			join(workspaceRoot, ".conductor", "gates"),
+			// Fase 8 (ADR 0009-fase8-autonomous-mode.md §4/D2/§14, gate3-addendum-fase8.md T78/R59/secure-
+			// default 72): the `conductor auto` run checkpoint (`.conductor/auto/<slug>.continue.json`) is
+			// orchestration governance state of the SAME family as `.conductor/gates/` above -- defense in
+			// depth alongside BR-5/R59's own "every checkpoint field is hint-only, always re-derived from
+			// the real GateState" discipline: even if a future `--continue` edit forgets that discipline, a
+			// subagent under prompt injection must still be unable to WRITE the checkpoint file at all.
+			join(workspaceRoot, ".conductor", "auto"),
 			// D10/S2 (Fase 7, secure-default 65) -- see this function's own doc comment above.
 			join(workspaceRoot, ".conductor-agent"),
 		);
