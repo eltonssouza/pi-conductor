@@ -47,51 +47,54 @@
 import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { MANDATORY_GATES } from "@conductor/config";
+import { BUILTIN_GATE_ROLES, MANDATORY_GATES } from "@conductor/config";
+import { openJournalReader, readRecordedJournalEntryIds } from "@conductor/diary";
 import {
 	type AuditTrailWriter,
 	type ConductorRoleView,
+	createAuditTrailWriter,
+	createGovernedChildSessionSpawner,
 	createSharedBudget,
+	describeRefusal,
 	type EffectivePolicyInput,
 	type EvidenceRef,
 	type ModelResolutionPort,
+	type ResolveEvidenceRefContext,
 	type RoleRegistryView,
 	type SharedBudget,
 	type SpawnChildSessionInput,
+	type SpawnChildSessionResult,
 	TOTAL_FLOW_GATES,
 } from "@conductor/runtime";
 import { findSecretSpans, type SecretSpan } from "@conductor/secrets";
 import type { Api, Model } from "@earendil-works/pi-ai";
-import type { SessionManager } from "@earendil-works/pi-coding-agent";
-import { DEFAULT_GIT_STATUS_TIMEOUT_MS } from "../git-status.ts";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { DEFAULT_GIT_STATUS_TIMEOUT_MS, gitCommitExistsSync } from "../git-status.ts";
 import { resolveConfirmChannel, type TtyStreams } from "../tty-confirm.ts";
-import { type GateStatusSnapshot, runGateApprove, runGateCalibrate, runGateStart } from "./gate.ts";
+import { GATE_DELEGATION_TEMPLATES } from "./auto-delegation-templates.ts";
+import { resolveEffectivePolicy } from "./chat/policy-resolution.ts";
+import { loadRealRoleRegistryAndSkills, toTaskRoleRegistryView } from "./chat/role-resolution.ts";
+import { type GateStatusSnapshot, runGateApprove, runGateCalibrate, runGateEvidence, runGateStart } from "./gate.ts";
 import { createPersistedGateStateStore, defaultInteractivityWitness, resolveGateGitContext } from "./gate-store.ts";
+import { resolveJournalContext } from "./journal.ts";
 import { createGateModelResolutionPort, defaultCreateModelRuntime } from "./model-context.ts";
 
 /** The 4 exhaustive stop conditions (D6, FR-13/14/15/16, BR-9). NEVER a value in `GateStatus` (the
  * enum ADR 0005 already locked) -- same precedent ADR 0008 D4 set for `conductor auto`'s own
  * predecessor orchestration events: every new orchestration event lives OUTSIDE the locked enum.
  *
- * **`"context-limit"` (Gate 8 loop-back, finding 3 -- disclosed, not silently implemented): this literal
- * is STRUCTURALLY UNREACHABLE by `runAuto` today, for the same root cause `runAuto`'s own header already
- * discloses for step (c) (subagent delegation).** FR-13 requires the run to checkpoint+stop when
- * "context usage crosses ~90% of the model window" -- but `RunAutoOptions`/`CliIO` (ADR §16, reproduced
- * verbatim by this file's own header) carry no live session/context-window handle at all, only
- * `cwd`/`stdout`/`stderr`/`tty`. There is nothing inside this file that could observe "context usage" to
- * compare against 90% of anything -- `SharedBudget` tracks a TOKEN BUDGET across the run (a resource
- * ceiling, FR-11/12), never a single subagent session's own context-window fill, which is a fundamentally
- * different measurement this orchestrator has no seam to read until it actually delegates to a subagent
- * session (the same missing wiring named in `runAuto`'s own header for step (c)). A token-count PROXY
- * from `SharedBudget` usage was considered and rejected: `SharedBudget`'s ceiling is this file's own
- * `--budget`/`DEFAULT_AUTO_RUN_TOKEN_BUDGET` (a RUN-level cap, spanning every gate and every subagent
- * call for the whole run), not any single model's context WINDOW (a per-call limit, e.g. 200k tokens for
- * one turn) -- conflating the two would silently redefine what "~90%" means (FR-13's own words), trading
- * an honest gap for a plausible-looking but semantically wrong number. This type still declares the
- * literal (the union stays the 4-member contract ADR §16 locked -- BR-9's "exhaustive" guarantee does not
- * change), but no code path in this file ever produces it; see ADR 0009 §20 (Gate 8 loop-back) for the
- * full disclosure and the follow-up this defers to (the same subagent/session wiring step (c) already
- * names). */
+ * **`"context-limit"` -- CLOSED by `feature/auto-subagent-delegation` (ADR 0010 §10/D8).** FR-13
+ * requires the run to checkpoint+stop when "context usage crosses ~90% of the model window";
+ * `runGateDelegation` (below) now produces exactly that signal, measured PER-CALL against the
+ * delegation child's own resolved `Model.contextWindow` (`result.tokenUsage.total >=
+ * CONTEXT_LIMIT_FRACTION * model.contextWindow`) -- NEVER against `SharedBudget`'s own run-accumulated
+ * ceiling (FR-11/12 is a fundamentally different measurement, deliberately never conflated with this
+ * one; see `CONTEXT_LIMIT_FRACTION`'s own doc comment and ADR 0009 §20 for the full rejection of that
+ * conflation). `runAuto`'s own loop checks it at the gate boundary (step h, after the push), never
+ * mid-gate. It remains gated behind the same GAP-2 tools-empty refusal as the rest of delegation step
+ * (c) (a delegation that never spawns can never cross a context window), so it stays dormant against
+ * today's real, empty-tools role catalog -- but the code path itself now genuinely exists and is
+ * exercised end-to-end by `test/commands/auto-run-delegation-integration.test.ts` with a fixture role. */
 export type RunStopReason = "context-limit" | "needs-human" | "budget-exceeded" | "landed";
 
 /**
@@ -265,6 +268,29 @@ export interface CliIO {
 	stdout: { write(chunk: string): void };
 	stderr: { write(chunk: string): void };
 	tty?: TtyStreams;
+	/**
+	 * `feature/auto-subagent-delegation` (ADR 0010): a TEST SEAM ONLY, in the exact optional/
+	 * backward-compatible shape `cli.ts`'s own real `CliIO.isInteractive`/`createModelRuntime` already
+	 * establish (Working with Legacy Code §2.3/§2.10, "object seam: depend on an interface so a test can
+	 * supply a fixture... put I/O behind seams routinely" -- `cdt library`, this session, top 0.667).
+	 * Production (`bin/conductor.js`) never sets this, so `runGateDelegation`'s own step (c) always
+	 * resolves the REAL, file-backed 37-role catalog (`loadRealRoleRegistryAndSkills`) -- which today
+	 * means every lead role resolves with `tools:[]` (GAP-2/N1) and delegation refuses fail-closed, the
+	 * documented, disclosed production reality (see `runAuto`'s own header). Without this seam, NO test
+	 * could ever drive a genuine delegation success/`"context-limit"` path THROUGH `runAuto` itself --
+	 * only through `runGateDelegation` directly (`auto-delegation.test.ts`), which proves the function's
+	 * own logic but never the loop-level wiring this demand's own task exists to prove.
+	 */
+	roleRegistry?: RoleRegistryView;
+	/**
+	 * `feature/auto-subagent-delegation` (ADR 0010): a TEST SEAM ONLY, same rationale/shape as
+	 * `roleRegistry` above. Production never sets it, so both the gate-open precondition (step b) and
+	 * the delegation's own `purpose:"delegation"` resolution (step c) always resolve the REAL, real
+	 * per-machine `ModelResolutionPort` (`createGateModelResolutionPort`) -- the SAME single port both
+	 * call sites already share by construction (D3: "nunca uma segunda seleção"), untouched by this seam
+	 * existing.
+	 */
+	modelResolutionPort?: ModelResolutionPort;
 }
 
 /**
@@ -525,29 +551,38 @@ function stopRun(io: CliIO, slug: string, snapshot: GateStatusSnapshot, gate: nu
  * never a second mutator of `GateState` and never a second sign-off path (H-Fase8, the falsifiable
  * hypothesis this whole ADR ratifies).
  *
- * Gate 6 scope note (disclosed, not silently resolved): step (c) of ADR §3.2's loop -- "delegar
- * trabalho aos subagentes de papel (Task)" -- has NO reachable call site from this function's own
- * signature. `RunAutoOptions`/`CliIO` (ADR §16, reproduced verbatim, no fields added by this Gate 6)
- * carry no Task-tool/session handle at all -- only `cwd`/`stdout`/`stderr`/`tty`. This Gate 6 does not
- * invent one (the ADR's own header flags the collaborator-injection shape for subagent delegation as an
- * open question this Gate 5 explicitly declined to guess).
+ * `feature/auto-subagent-delegation` (ADR 0010) closure: step (c) of ADR §3.2's loop -- "delegar
+ * trabalho aos subagentes de papel (Task)" -- is now a real call to `runGateDelegation` (this file's
+ * own implementation, below), inserted exactly where ADR 0010 §3.1 specifies: between (b) `runGateStart`
+ * and (d) the secret-scan. `roleRegistry`/`effectivePolicyInput`/`auditTrailWriter`/`evidenceContext`
+ * are built ONCE above, mirroring `cli.ts`'s own composition root; `delegationSessionIds` is the
+ * in-process-only `Set` D7/GAP-A requires.
  *
- * **Gate 8 loop-back, finding 1 (corrects this paragraph's own prior claim):** a non-mandatory gate is
- * NOT auto-approved without evidence -- `approveAuto`/N1's real implementation (`gate-store.ts`) now
- * refuses (throws) when a gate's attached evidence is empty, and this function's own catch at step (f)
- * converts that refusal into the same `needs-human` stop a mandatory gate's headless confirm already
- * produces. Concretely, until step (c) above actually exists: EVERY gate this function opens -- mandatory
- * or not -- stops as `needs-human` at its own approval step, because no evidence is ever attached without
- * a subagent to attach it. This is intentional and honest, not a regression: the alternative (the prior
- * behavior) silently recorded `method:"auto"` completions for gates that received zero real work, which
- * is precisely the hollow-completion defect Gate 8 found. A future phase that threads a session/Task
- * handle through `CliIO` (filling step (c) in, which would also let subagents call `runGateEvidence`)
- * is what makes non-mandatory auto-approval possible again -- this function does not fake that step in
- * the meantime.
+ * **Gate 8 loop-back, finding 1 (corrects this paragraph's own prior claim) -- now superseded by ADR
+ * 0010's own N1/D2 finding, a DISCLOSED, DELIBERATE BEHAVIOR CHANGE from this file's prior (Fase 8)
+ * revision:** a non-mandatory gate is still never auto-approved without evidence (`approveAuto`'s
+ * `gate-store.ts` guard, unchanged), but the run no longer even REACHES that approval step to prove it.
+ * Every built-in role today resolves with `tools:[]` (GAP-2, Fase 3 -- confirmed live by
+ * `auto-delegation.test.ts`'s own N1 test), so `runGateDelegation` refuses fail-closed at step (c),
+ * BEFORE (d) secret-scan/(e) commit/(f) approve ever run -- the stop still surfaces as `needs-human` via
+ * the SAME `stopRun` machinery, but the reason is now "the lead role has no tools to do real work with"
+ * (D2/N1), not "evidence was empty when approval was attempted" (the OLD Fase-8-era reason). Concretely:
+ * EVERY gate this function opens still stops as `needs-human` -- mandatory or not -- but the stop point
+ * moved from step (f) to step (c). This is intentional and honest, the same "wired but structurally
+ * inert until GAP-2 closes" pattern ADR 0009 §20 already established for `"context-limit"`: the
+ * alternative (spawning a tools-empty child and recording its monologue as `{kind:"delegation"}`
+ * evidence) would be a MORE subtle hollow-completion than the one Gate 8 found, because the child would
+ * genuinely spend tokens and have a disc-backed transcript while having read and touched nothing. The
+ * day GAP-2 wires real per-role tool ceilings, this exact code path starts producing genuine delegated
+ * work with zero further changes here.
  *
- * **Gate 8 loop-back, finding 3 (also disclosed, not silently implemented):** `RunStopReason`'s own
- * `"context-limit"` member (FR-13) is likewise structurally unreachable by this function today, for the
- * SAME root cause -- see that type's own doc comment and ADR 0009 §20 for the full disclosure.
+ * **Gate 8 loop-back, finding 3 -- CLOSED by ADR 0010/D8:** `RunStopReason`'s own `"context-limit"`
+ * member (FR-13) is now genuinely reachable, produced at step (h) below (after the push, at the gate
+ * boundary, never mid-gate) whenever a successful delegation's own per-call token usage crosses
+ * `CONTEXT_LIMIT_FRACTION` of its resolved model's context window. It remains gated behind the SAME
+ * GAP-2 tools-empty refusal as the rest of step (c) today (a delegation that never spawns can never
+ * cross a context window), so in practice it stays dormant until GAP-2 closes -- but the code path
+ * itself, unlike before this demand, genuinely exists and is exercised by fixture-role tests.
  *
  * Also disclosed: FR-6 (every classification is a registered, auditable `Decision`) is NOT written to
  * the diary from inside this function. `RunAutoOptions`/`CliIO` provide no `homeDir` test seam (unlike
@@ -594,14 +629,17 @@ export async function runAuto(options: RunAutoOptions): Promise<number> {
 	const budget = createSharedBudget(resolveBudgetLimit(options.budgetTokens));
 	const gitContext = await resolveGateGitContext(io.cwd);
 	// FR-20/21: the SAME model-precondition port `conductor gate start` already uses -- no second
-	// selection path. Built here (no `io.homeDir`/`io.createModelRuntime` seam exists on this file's own
-	// `CliIO`, per its own header) so this call reads real per-machine credential/catalog state exactly
-	// like `cli.ts`'s `case "gate"` composition root already does; `createGateModelResolutionPort` never
-	// throws -- a broken model runtime degrades to a refusing port, never an absent one.
-	const modelResolutionPort = await createGateModelResolutionPort({
-		workspaceRoot: io.cwd,
-		createModelRuntime: defaultCreateModelRuntime,
-	});
+	// selection path. `io.modelResolutionPort` is a TEST SEAM ONLY (`CliIO`'s own doc comment,
+	// ADR 0010) -- production never sets it, so this always builds fresh here, reading real per-machine
+	// credential/catalog state exactly like `cli.ts`'s `case "gate"` composition root already does;
+	// `createGateModelResolutionPort` never throws -- a broken model runtime degrades to a refusing
+	// port, never an absent one.
+	const modelResolutionPort =
+		io.modelResolutionPort ??
+		(await createGateModelResolutionPort({
+			workspaceRoot: io.cwd,
+			createModelRuntime: defaultCreateModelRuntime,
+		}));
 	const store = createPersistedGateStateStore({
 		gatesDir: join(io.cwd, ".conductor", "gates"),
 		repoId: gitContext.repoId,
@@ -616,6 +654,42 @@ export async function runAuto(options: RunAutoOptions): Promise<number> {
 	// D3 layer 1: the SAME sink every other headless caller uses -- this function never constructs a
 	// `ConfirmChannel` of its own (R56/T75).
 	const confirm = resolveConfirmChannel(io.tty);
+
+	// ADR 0010 §3.2/D1: the delegation collaborators, built ONCE here (outside the per-gate loop) --
+	// the SAME "already-constructed, never built inside the callee" discipline `store`/`confirm`/
+	// `budget` above already follow. `roleRegistry`/`effectivePolicyInput`/`auditTrailWriter` are the
+	// SAME real, file-backed collaborators `chat.ts`'s own composition root builds (never a second,
+	// parallel construction of any of them -- H-Fase8/ADR 0010 §2). `io.roleRegistry` is a TEST SEAM
+	// ONLY (`CliIO`'s own doc comment) -- production never sets it, so this always resolves the REAL
+	// 37-role catalog.
+	const roleRegistry =
+		io.roleRegistry ?? toTaskRoleRegistryView(loadRealRoleRegistryAndSkills({ cwd: io.cwd }).registry);
+	const effectivePolicyInput = resolveEffectivePolicy(io.cwd);
+	const auditTrailWriter = createAuditTrailWriter(join(io.cwd, ".conductor", "audit.jsonl"));
+	// D7/GAP-A (ADR 0010 §9): a `Set` mutable ONLY in this process's memory, with NO disk reader --
+	// never reconstructed from the child SessionManager's own on-disk task-session directory, a
+	// checkpoint, or a `--continue` hint (see `gate-evidence.ts`'s own doc comment on
+	// `runtimeRecordedDelegationSessionIds` for the full rationale, and
+	// `auto-delegation-evidence-in-process-only.test.ts` for the static regression guard: that
+	// directory is writable by a hostile clone before a resume, so even NAMING its path in this file's
+	// own source text is treated as a smell worth failing a test over).
+	const delegationSessionIds = new Set<string>();
+	// D7: `evidenceContext` mirrors `cli.ts`'s own `runGateCommand` construction (repoRoot/workspaceRoot
+	// = io.cwd; real `gitCommitExists`; `runtimeRecordedTestRunIds` honestly empty -- no durable
+	// test-run ledger exists yet, out of this demand's scope; `runtimeRecordedJournalEntryIds` from the
+	// SAME real diary read `cli.ts`'s `gate evidence` already performs), plus the 5th field this demand
+	// adds. `resolveJournalContext`/`openJournalReader`/`readRecordedJournalEntryIds` are fail-closed by
+	// contract (R44/T63) -- a project with no diary yet degrades to an empty Set, never throws.
+	const { entriesPath, projectId } = resolveJournalContext(io.cwd);
+	const journalReader = openJournalReader(entriesPath, projectId);
+	const evidenceContext: ResolveEvidenceRefContext = {
+		repoRoot: io.cwd,
+		workspaceRoot: io.cwd,
+		gitCommitExists: gitCommitExistsSync,
+		runtimeRecordedTestRunIds: new Set(),
+		runtimeRecordedJournalEntryIds: readRecordedJournalEntryIds(journalReader),
+		runtimeRecordedDelegationSessionIds: delegationSessionIds,
+	};
 
 	// BR-5/R59/FR-7/FR-8: the checkpoint is read ONLY to report a mismatch -- the resume point below is
 	// ALWAYS derived from the real, persisted GateState, never from this hint.
@@ -668,8 +742,45 @@ export async function runAuto(options: RunAutoOptions): Promise<number> {
 			return EXIT_STOPPED;
 		}
 
-		// (c) delegate substantive work to role subagents -- see this function's own header (disclosed
-		// gap: not reachable from this signature at this Gate 6).
+		// (c) ADR 0010 §3.1/D1: delegate substantive work to the gate's lead role subagent -- composes
+		// `runGateDelegation` (this file's own implementation above), never a second orchestration path.
+		// Every failure (role refusal/tools-empty, model refusal, budget exhaustion, a thrown spawn)
+		// already degrades to `{kind:"stop"}` inside `runGateDelegation` itself (D9) -- this call site
+		// only has to route that outcome through the SAME `stopRun` machinery every other step in this
+		// loop already uses, never a new stop path, never an uncaught exception.
+		const delegation = await runGateDelegation({
+			gate,
+			io,
+			roleRegistry,
+			modelResolutionPort,
+			sharedBudget: budget,
+			effectivePolicyInput,
+			auditTrailWriter,
+			recordDelegationSessionId: (sessionId) => {
+				delegationSessionIds.add(sessionId);
+			},
+			attachDelegationEvidence: (evidenceGate, ref) => {
+				// D7: the SAME `runGateEvidence` -> `resolveEvidenceRef` path `conductor gate evidence`
+				// uses -- `provenance` here is a placeholder ONLY (mirrors `cli.ts`'s own `gate evidence`
+				// composition root): `runGateEvidence` never trusts it, `resolveEvidenceRef` determines
+				// the REAL provenance against `evidenceContext`, fail-closed if the ref does not resolve.
+				// A thrown `GateCommandError` here is caught by `runGateDelegation`'s own outer try/catch
+				// (D9's final backstop), never escapes to this loop uncaught.
+				runGateEvidence({
+					cwd: io.cwd,
+					demandId,
+					store,
+					gate: evidenceGate,
+					attachment: { ref, provenance: "author-declared" },
+					evidenceContext,
+				});
+			},
+		});
+		if (delegation.kind === "stop") {
+			io.stderr.write(`conductor auto: gate ${gate} delegation stopped: ${delegation.detail}\n`);
+			stopRun(io, demandId, store.status(demandId), gate, delegation.reason);
+			return delegation.exitCode;
+		}
 
 		// (d) D5/R58: secret-scan the staged diff before any push -- fail-closed if the diff itself
 		// cannot be read (never "push, then fix").
@@ -722,6 +833,23 @@ export async function runAuto(options: RunAutoOptions): Promise<number> {
 
 		// (g) push -- best-effort; the secret-scan at (d) already gated whether pushing was safe.
 		pushBranch(io.cwd, snapshot.branch);
+
+		// (h) D8 (ADR 0010 §3.1/§10, closes ADR 0009 §20): the context-limit signal is checked at the
+		// GATE BOUNDARY, never mid-gate -- `contextExceeded` measures the delegation child's OWN
+		// per-call token usage against its resolved model's context window, never the run's own shared
+		// budget (see `CONTEXT_LIMIT_FRACTION`'s own doc comment). A crossing here means this process
+		// should stop and hand off to a fresh `--continue` invocation -- the SAME graceful-stop
+		// machinery every other condition in this loop already uses (D9), never a crash and never
+		// silently starting the next gate against a session that may not have room left to read it.
+		// `RunStopReason` has no dedicated exit code of its own for `"context-limit"` (ADR 0010's own
+		// appendix leaves this to Gate 6) -- EXIT_STOPPED is used, the same graceful, non-budget,
+		// non-landed code `needs-human` already uses; the library returned only weak/off-target
+		// coverage for this specific micro-decision (`cdt library`, top ~0.59), so this is grounded in
+		// the codebase's own established convention (D9's table) rather than a forced citation.
+		if (delegation.contextExceeded) {
+			stopRun(io, demandId, store.status(demandId), gate, "context-limit");
+			return EXIT_STOPPED;
+		}
 	}
 
 	// 5. every applicable gate approved -> land for real (Gate 8 loop-back, finding 4: never a bare
@@ -746,16 +874,25 @@ export async function runAuto(options: RunAutoOptions): Promise<number> {
 export const DEFAULT_AUTO_RUN_TOKEN_BUDGET = 2_000_000;
 
 // =================================================================================================
-// GATE 5 (feature/auto-subagent-delegation, ADR 0010 "Wiring de delegação real de subagentes em
-// runAuto") -- everything below this line is NEW to this demand, added on top of the already-real
-// (Fase 8, Gate 6) `runAuto` above. Every FUNCTION below is an unconditional `throw new Error("not
-// implemented")` stub -- the SAME precedent this file's own header already documents for this file's
-// original Gate 5 pass ("every exported run* function... started life as an unconditional throw") and
-// `@conductor/runtime`'s `gate-evidence.ts`/`tools/task.ts` document for theirs. This section exists so
-// `test/commands/auto-delegation-*.test.ts` has real, ADR-0010-locked signatures to import and can fail
-// RED for the right reason (missing delegation-wiring behavior, never a missing-export error). Gate 6
-// fills the bodies in for real, wiring `runGateDelegation` into step (c) of `runAuto`'s own loop above
-// (auto.ts:658-659's own comment) -- these stubs are NOT called from that loop yet.
+// (feature/auto-subagent-delegation, ADR 0010 "Wiring de delegação real de subagentes em runAuto") --
+// everything below this line is NEW to this demand, added on top of the already-real (Fase 8, Gate 6)
+// `runAuto` above. GATE 5 shipped every FUNCTION below as an unconditional `throw new Error("not
+// implemented")` stub (the SAME precedent this file's own header already documents for this file's
+// original Gate 5 pass) so `test/commands/auto-delegation*.test.ts` had real, ADR-0010-locked
+// signatures to import and could fail RED for the right reason (missing delegation-wiring behavior,
+// never a missing-export error).
+//
+// GATE 6: `buildDelegationSpawnInput`/`runGateDelegation` are implemented for real below, against the
+// exact contract Gate 5 pinned. `runGateDelegation` IS wired into `runAuto`'s own loop above, exactly at
+// ADR 0010 §3.1's insertion point (between step (b) `runGateStart` and step (d) the secret-scan) --
+// `test/commands/auto-delegation*.test.ts` still exercise `runGateDelegation` directly (unit-level, a
+// fixture role/registry with tools), and `test/commands/auto-run-delegation-integration.test.ts`
+// exercises the wiring end-to-end THROUGH `runAuto` itself (both the real, empty-tools role catalog's
+// fail-closed refusal and a fixture-role genuine-delegation/context-limit path). `test/commands/
+// auto-run.test.ts` (Fase 8's own suite) was re-run and required NO changes: every assertion in that
+// file already tolerated the stop point moving from step (f) to step (c) (see `runAuto`'s own header for
+// the disclosed, deliberate behavior-change reasoning) because none of it asserted anything about WHERE
+// in the loop the stop happened, only THAT it happened and with which reason/exit code.
 //
 // The TYPES below are NOT a sketch -- `GateDelegationOptions`/`GateDelegationOutcome`/
 // `buildDelegationSpawnInput`/`runGateDelegation`'s own signature mirror ADR 0010 §3.2/§7/§14's locked
@@ -826,11 +963,11 @@ export const CONTEXT_LIMIT_FRACTION = 0.9;
  * a permissive value for any of the 4 (Managing Software Complexity §3.1/§3.10: information hiding,
  * the 4 security decisions hidden in a module a caller cannot leak a wrong value through).
  *
- * GATE 5: unconditional throw -- see this section's own header. Written against ADR §14's exact
- * parameter shape so Gate 6's implementation is compile-checked against this signature, not invented
- * at Gate 6 time.
+ * GATE 6: implemented for real below, against ADR §14's exact parameter shape (Gate 5 pinned the
+ * signature; this Gate 6 pass fills the body in, compile-checked against it rather than inventing a
+ * shape at Gate 6 time).
  */
-export function buildDelegationSpawnInput(_args: {
+export function buildDelegationSpawnInput(args: {
 	role: ConductorRoleView;
 	prompt: string;
 	model: Model<Api>;
@@ -839,7 +976,21 @@ export function buildDelegationSpawnInput(_args: {
 	auditTrailWriter: AuditTrailWriter;
 	sessionManager: SessionManager;
 }): SpawnChildSessionInput {
-	throw new Error("not implemented");
+	return {
+		role: args.role,
+		prompt: args.prompt,
+		model: args.model,
+		workspaceRoot: args.workspaceRoot,
+		effectivePolicy: args.effectivePolicyInput,
+		auditTrailWriter: args.auditTrailWriter,
+		sessionManager: args.sessionManager,
+		// GAP-D/R63: the 4 security invariants are HARDCODED here -- never parameters this function's own
+		// signature could be made to accept a caller-supplied value for (see this function's own doc
+		// comment above and ADR 0010 §7/D5).
+		depth: 1,
+		additionalProtectedPaths: [],
+		yesFlagActive: false,
+	};
 }
 
 /**
@@ -862,9 +1013,161 @@ export function buildDelegationSpawnInput(_args: {
  * (D7/FR-5) and reports whether the per-call context window was exceeded (D8/FR-6) -- checked by the
  * caller at the gate boundary, never mid-gate.
  *
- * GATE 5: unconditional throw -- NOT wired into `runAuto`'s loop yet (Gate 6's job). This stub exists
- * so `test/commands/auto-delegation-*.test.ts` has a real, ADR-0010-locked signature to import.
+ * GATE 6: implemented for real below, AND wired into `runAuto`'s own loop (`feature/auto-subagent-
+ * delegation`, ADR 0010 §3.1's insertion point) -- see this section's own top header.
+ * `test/commands/auto-delegation.test.ts`/`auto-delegation-defensive-paths.test.ts` still exercise this
+ * function directly (unit-level); `test/commands/auto-run-delegation-integration.test.ts` proves the
+ * loop-level wiring end-to-end through `runAuto` itself.
  */
-export async function runGateDelegation(_options: GateDelegationOptions): Promise<GateDelegationOutcome> {
-	throw new Error("not implemented");
+/** D6 -- mirrors `tools/task.ts`'s own private `DEFAULT_TASK_TOKEN_ESTIMATE` (that constant is not
+ * exported; this is a separate, per-delegation reservation `runGateDelegation` makes, distinct from the
+ * loop's own top-of-gate `budget.reserve(4_000)` at `auto.ts`'s own call site above -- ADR 0010 §8/D6:
+ * "um SEGUNDO ponto de checagem distinto do reserve(4_000) do topo do loop"). Same declared-default
+ * discipline as `DEFAULT_AUTO_RUN_TOKEN_BUDGET` -- a conservative, reviewable number, not a discovered
+ * truth. */
+const DELEGATION_TOKEN_RESERVE_ESTIMATE = 4_000;
+
+const ZERO_DELEGATION_USAGE = { input: 0, output: 0, total: 0 };
+
+/** D9 -- every `runGateDelegation` failure returns this shape; never a throw the loop could crash on. */
+function delegationStop(reason: RunStopReason, exitCode: number, detail: string): GateDelegationOutcome {
+	return { kind: "stop", reason, exitCode, detail };
+}
+
+export async function runGateDelegation(options: GateDelegationOptions): Promise<GateDelegationOutcome> {
+	try {
+		// D2/N1/GAP-2: the deterministic lead role for this gate -- BUILTIN_GATE_ROLES[gate][0], indexed
+		// by the gate's own INTEGER (never by document text, T85/secure-default 78). Two fail-closed
+		// refusals, both naming the gate and the role: an unresolved role (scaffold incomplete), and a
+		// role that resolves with `tools:[]` (GAP-2 -- a tools-empty child can only ever produce a
+		// monologue, never "arquivos tocados", so its transcript is refused rather than recorded as
+		// delegation evidence -- see this file's own header for the full rationale).
+		const leadRoleSlug = BUILTIN_GATE_ROLES[options.gate]?.[0];
+		if (leadRoleSlug === undefined) {
+			return delegationStop(
+				"needs-human",
+				EXIT_STOPPED,
+				`gate ${options.gate}: no lead role is configured for this gate -- delegation refused`,
+			);
+		}
+		const role = options.roleRegistry.get(leadRoleSlug);
+		if (role === undefined) {
+			return delegationStop(
+				"needs-human",
+				EXIT_STOPPED,
+				`gate ${options.gate}: lead role "${leadRoleSlug}" does not resolve in the role registry -- delegation refused`,
+			);
+		}
+		if (role.tools.length === 0) {
+			return delegationStop(
+				"needs-human",
+				EXIT_STOPPED,
+				`gate ${options.gate}: lead role "${leadRoleSlug}" resolves with tools:[] (GAP-2 -- Fase 3's ` +
+					"per-role tool ceilings are not wired yet) -- refusing to record a tools-empty monologue as delegation evidence",
+			);
+		}
+
+		// D3/N2: the model resolved DIRECTLY by purpose:"delegation" (never through
+		// evaluateModelPrecondition, which discards `.model`) -- the SAME ModelResolutionPort the gate-open
+		// precondition already used to open this gate. A refusal here reuses `describeRefusal` (N2's own
+		// additive export) so the wording is never a second, drifting formatting.
+		const resolution = options.modelResolutionPort.resolveForGate({
+			gate: options.gate,
+			purpose: "delegation",
+			persona: { name: role.name, modelRole: role.modelRole },
+		});
+		if (!resolution.resolved) {
+			return delegationStop(
+				"needs-human",
+				EXIT_STOPPED,
+				`gate ${options.gate}: model resolution refused for lead role "${leadRoleSlug}" -- ` +
+					describeRefusal(resolution.refusal, MANDATORY_GATES),
+			);
+		}
+		const model = resolution.model;
+
+		// D4: the fixed, per-gate template -- never the demand string/diff (GATE_DELEGATION_TEMPLATES is
+		// real, author-written data; see auto-delegation-templates.ts). Neutral references (gate number,
+		// role slug) are appended, never interpolated raw content.
+		const template = GATE_DELEGATION_TEMPLATES[options.gate];
+		if (template === undefined) {
+			return delegationStop(
+				"needs-human",
+				EXIT_STOPPED,
+				`gate ${options.gate}: no delegation prompt template is configured -- delegation refused`,
+			);
+		}
+		const prompt = `${template.instruction}\n\nGate: ${options.gate}\nLead role: ${leadRoleSlug}`;
+
+		// D6/FR-4b: reserve BEFORE spawning, settle exactly once (success or failure) -- mirrors
+		// `runTask`'s own reserve/settle discipline, a SECOND checkpoint distinct from the loop's own
+		// top-of-gate `budget.reserve(4_000)`.
+		const reservation = options.sharedBudget.reserve(DELEGATION_TOKEN_RESERVE_ESTIMATE);
+		if (reservation === null) {
+			return delegationStop(
+				"budget-exceeded",
+				EXIT_BUDGET_EXCEEDED,
+				`gate ${options.gate}: shared token budget is exhausted (or unreadable) -- delegation denied before spawning`,
+			);
+		}
+
+		// R14/T42: a NEW, disc-backed, empty SessionManager for the child, constructed here (never
+		// inMemory()) -- same convention as `tools/task.ts`'s own `runTask`.
+		const sessionManager = SessionManager.create(
+			options.io.cwd,
+			join(options.io.cwd, ".conductor-agent", "sessions", "tasks"),
+		);
+
+		const spawnInput = buildDelegationSpawnInput({
+			role,
+			prompt,
+			model,
+			workspaceRoot: options.io.cwd,
+			effectivePolicyInput: options.effectivePolicyInput,
+			auditTrailWriter: options.auditTrailWriter,
+			sessionManager,
+		});
+
+		// D6: never `runTask`, never a second `createAgentSession`, never a second `SharedBudget` -- the
+		// ONE governed spawner, composed over the SAME `sharedBudget` instance the caller already built.
+		let result: SpawnChildSessionResult;
+		try {
+			result = await createGovernedChildSessionSpawner(options.sharedBudget)(spawnInput);
+		} catch (error) {
+			// D9/FR-7: credit the reservation back -- nothing was actually spent if the spawn never
+			// completed -- then degrade gracefully, never let the exception escape.
+			options.sharedBudget.settle(reservation, ZERO_DELEGATION_USAGE);
+			return delegationStop(
+				"needs-human",
+				EXIT_STOPPED,
+				`gate ${options.gate}: delegation to "${leadRoleSlug}" failed: ${describeError(error)}`,
+			);
+		}
+		options.sharedBudget.settle(reservation, result.tokenUsage);
+
+		// D7/GAP-A: record the session id THIS process itself observed spawning, then attach the 5th
+		// EvidenceRef kind -- never from disk/checkpoint/`--ref`.
+		options.recordDelegationSessionId(result.sessionId);
+		options.attachDelegationEvidence(options.gate, {
+			kind: "delegation",
+			sessionId: result.sessionId,
+			role: role.name,
+		});
+
+		// D8: context-limit measured PER-CALL against the resolved model's own contextWindow -- NEVER
+		// against `sharedBudget.remaining()` (a fundamentally different, run-accumulated measurement; see
+		// this file's own `CONTEXT_LIMIT_FRACTION` doc comment and ADR 0009 §20 / ADR 0010 §10).
+		const contextExceeded = result.tokenUsage.total >= CONTEXT_LIMIT_FRACTION * model.contextWindow;
+
+		return { kind: "delegated", contextExceeded };
+	} catch (error) {
+		// D9/FR-7 final backstop: every step above already degrades its own known failure modes, but this
+		// outer catch guarantees NO exception ever escapes runGateDelegation, whatever unanticipated thing
+		// threw.
+		return delegationStop(
+			"needs-human",
+			EXIT_STOPPED,
+			`gate ${options.gate}: delegation failed unexpectedly: ${describeError(error)}`,
+		);
+	}
 }
