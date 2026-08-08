@@ -53,12 +53,32 @@ import { findSecretSpans, type SecretSpan } from "@conductor/secrets";
 import { DEFAULT_GIT_STATUS_TIMEOUT_MS } from "../git-status.ts";
 import { resolveConfirmChannel, type TtyStreams } from "../tty-confirm.ts";
 import { type GateStatusSnapshot, runGateApprove, runGateCalibrate, runGateStart } from "./gate.ts";
-import { createPersistedGateStateStore, resolveGateGitContext } from "./gate-store.ts";
+import { createPersistedGateStateStore, defaultInteractivityWitness, resolveGateGitContext } from "./gate-store.ts";
 import { createGateModelResolutionPort, defaultCreateModelRuntime } from "./model-context.ts";
 
 /** The 4 exhaustive stop conditions (D6, FR-13/14/15/16, BR-9). NEVER a value in `GateStatus` (the
  * enum ADR 0005 already locked) -- same precedent ADR 0008 D4 set for `conductor auto`'s own
- * predecessor orchestration events: every new orchestration event lives OUTSIDE the locked enum. */
+ * predecessor orchestration events: every new orchestration event lives OUTSIDE the locked enum.
+ *
+ * **`"context-limit"` (Gate 8 loop-back, finding 3 -- disclosed, not silently implemented): this literal
+ * is STRUCTURALLY UNREACHABLE by `runAuto` today, for the same root cause `runAuto`'s own header already
+ * discloses for step (c) (subagent delegation).** FR-13 requires the run to checkpoint+stop when
+ * "context usage crosses ~90% of the model window" -- but `RunAutoOptions`/`CliIO` (ADR §16, reproduced
+ * verbatim by this file's own header) carry no live session/context-window handle at all, only
+ * `cwd`/`stdout`/`stderr`/`tty`. There is nothing inside this file that could observe "context usage" to
+ * compare against 90% of anything -- `SharedBudget` tracks a TOKEN BUDGET across the run (a resource
+ * ceiling, FR-11/12), never a single subagent session's own context-window fill, which is a fundamentally
+ * different measurement this orchestrator has no seam to read until it actually delegates to a subagent
+ * session (the same missing wiring named in `runAuto`'s own header for step (c)). A token-count PROXY
+ * from `SharedBudget` usage was considered and rejected: `SharedBudget`'s ceiling is this file's own
+ * `--budget`/`DEFAULT_AUTO_RUN_TOKEN_BUDGET` (a RUN-level cap, spanning every gate and every subagent
+ * call for the whole run), not any single model's context WINDOW (a per-call limit, e.g. 200k tokens for
+ * one turn) -- conflating the two would silently redefine what "~90%" means (FR-13's own words), trading
+ * an honest gap for a plausible-looking but semantically wrong number. This type still declares the
+ * literal (the union stays the 4-member contract ADR §16 locked -- BR-9's "exhaustive" guarantee does not
+ * change), but no code path in this file ever produces it; see ADR 0009 §20 (Gate 8 loop-back) for the
+ * full disclosure and the follow-up this defers to (the same subagent/session wiring step (c) already
+ * names). */
 export type RunStopReason = "context-limit" | "needs-human" | "budget-exceeded" | "landed";
 
 /**
@@ -257,9 +277,11 @@ export interface RunAutoOptions {
 // disciplines apply per call-site (see each function's own comment for which direction it degrades).
 // ---------------------------------------------------------------------------------------------
 
-const EXIT_LANDED = 0;
-const EXIT_STOPPED = 1;
-const EXIT_BUDGET_EXCEEDED = 2;
+/** Exported (Gate 8 loop-back) so tests can assert against the named constant instead of a magic number
+ * -- quality-baseline category 4 (no hardcoded assumption, including in the test suite itself). */
+export const EXIT_LANDED = 0;
+export const EXIT_STOPPED = 1;
+export const EXIT_BUDGET_EXCEEDED = 2;
 
 /** D8/FR-12: never "no cap" -- explicit `--budget`, then `CONDUCTOR_AUTO_TOKEN_BUDGET` (env,
  * quality-baseline category 4: no hardcoded assumption without an override), then the declared default. */
@@ -348,6 +370,88 @@ function pushBranch(cwd: string, branch: string): void {
 	safeGit(cwd, ["push", "-u", "origin", branch]);
 }
 
+/** Shells out to `gh` (GitHub CLI), the SAME tool `CLAUDE.md`'s own human-driven git protocol already
+ * names for landing a demand branch ("open a PR to develop when the remote requires review"). Mirrors
+ * `safeGit`'s own contract exactly: NEVER throws -- `null` on any failure (binary missing, unauthenticated,
+ * not a GitHub remote, network down, timeout) -- so `landOnDevelop` below can degrade honestly instead of
+ * assuming the tool exists. */
+function safeGh(cwd: string, args: string[]): string | null {
+	try {
+		return execFileSync("gh", args, {
+			cwd,
+			timeout: DEFAULT_GIT_STATUS_TIMEOUT_MS,
+			stdio: ["ignore", "pipe", "ignore"],
+		}).toString("utf8");
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Gate 8 loop-back, finding 4: FR-15 ("todos os gates aplicáveis aprovados... a branch recebe push e é
+ * aterrissada em develop (merge ou PR, conforme o remoto exigir), e o run termina com status landed") was
+ * previously satisfied by a bare `stdout.write` claiming "landed" with no git/gh operation behind it --
+ * this function is the real implementation. It follows this project's OWN established convention
+ * (`CLAUDE.md`'s git protocol: "push the demand branch and integrate it into develop: open a PR to
+ * develop when the remote requires review, otherwise merge and git push origin develop" -- and this
+ * project's own actual practice, recorded in its diary/memory, of landing every demand through a real PR,
+ * never a bypassed merge): it NEVER merges directly into `develop` on its own authority. An unattended
+ * loop cannot safely determine "does this remote require review" from local state alone, so the safe
+ * default -- exactly the one this project already applies to its own human-driven demands -- is to always
+ * prefer opening a real, reviewable PR via `gh`, and to never fabricate success when it cannot.
+ *
+ * Idempotent (safe to call again from `--continue` after a prior run already opened the PR): checks for
+ * an existing PR for this branch FIRST via `gh pr view`, so a resumed run never opens a duplicate.
+ *
+ * Fail-closed on the reporting side, never on the git side: the branch is already pushed by this point
+ * (every approved gate's own `pushBranch` call in the loop above), so a `gh` failure here never loses
+ * work -- it only means `runAuto` must NOT claim `"landed"` (the caller, `runAuto`, converts a `landing.ok
+ * === false` into a `needs-human` stop, never a silently false "landed" claim -- the exact defect this
+ * finding names).
+ */
+export function landOnDevelop(
+	cwd: string,
+	branch: string,
+): { ok: true; detail: string } | { ok: false; reason: string } {
+	const existing = safeGh(cwd, ["pr", "view", branch, "--json", "url"]);
+	if (existing !== null) {
+		try {
+			const parsed: unknown = JSON.parse(existing);
+			const url =
+				parsed !== null && typeof parsed === "object" && "url" in parsed
+					? (parsed as { url: unknown }).url
+					: undefined;
+			if (typeof url === "string" && url.length > 0) {
+				return { ok: true, detail: `PR already open: ${url}` };
+			}
+		} catch {
+			// Not proof of an existing PR either way -- fall through to attempting creation below.
+		}
+	}
+	const created = safeGh(cwd, [
+		"pr",
+		"create",
+		"--base",
+		"develop",
+		"--head",
+		branch,
+		"--title",
+		`conductor auto: ${branch}`,
+		"--body",
+		"Opened automatically by `conductor auto` -- every applicable gate on this branch is approved. Review and merge per this project's gitflow (CLAUDE.md).",
+	]);
+	if (created !== null && created.trim().length > 0) {
+		return { ok: true, detail: `PR created: ${created.trim()}` };
+	}
+	return {
+		ok: false,
+		reason:
+			"could not open a PR via `gh` (missing/unauthenticated gh CLI, no GitHub remote, or a network failure) -- the branch is already pushed; land it manually (gh pr create --base develop --head " +
+			branch +
+			")",
+	};
+}
+
 /** §10.2/FR-1: best-effort branch creation for a NEW, authorized run -- convenience, not load-bearing
  * for any fail-closed guarantee in this file (a git-unavailable cwd simply keeps `resolveGateGitContext`
  * on its own already-established "no-branch" degrade). */
@@ -413,13 +517,24 @@ function stopRun(io: CliIO, slug: string, snapshot: GateStatusSnapshot, gate: nu
  * signature. `RunAutoOptions`/`CliIO` (ADR §16, reproduced verbatim, no fields added by this Gate 6)
  * carry no Task-tool/session handle at all -- only `cwd`/`stdout`/`stderr`/`tty`. This Gate 6 does not
  * invent one (the ADR's own header flags the collaborator-injection shape for subagent delegation as an
- * open question this Gate 5 explicitly declined to guess). Concretely: a non-mandatory gate is
- * auto-approved without any subagent-produced evidence (legal -- `approveAuto`/N1 never required
- * evidence, only mandatory gates do, per `hasSufficientEvidenceForMandatoryGate`), and a mandatory gate
- * is opened but never reaches a state where genuine evidence could be attached, so it always stops as
- * `needs-human` at the approval step -- never a silent, undetectable skip of FR-8/BR-6's evidence floor.
- * A future phase that threads a session/Task handle through `CliIO` can fill step (c) in without
- * changing anything else this function does.
+ * open question this Gate 5 explicitly declined to guess).
+ *
+ * **Gate 8 loop-back, finding 1 (corrects this paragraph's own prior claim):** a non-mandatory gate is
+ * NOT auto-approved without evidence -- `approveAuto`/N1's real implementation (`gate-store.ts`) now
+ * refuses (throws) when a gate's attached evidence is empty, and this function's own catch at step (f)
+ * converts that refusal into the same `needs-human` stop a mandatory gate's headless confirm already
+ * produces. Concretely, until step (c) above actually exists: EVERY gate this function opens -- mandatory
+ * or not -- stops as `needs-human` at its own approval step, because no evidence is ever attached without
+ * a subagent to attach it. This is intentional and honest, not a regression: the alternative (the prior
+ * behavior) silently recorded `method:"auto"` completions for gates that received zero real work, which
+ * is precisely the hollow-completion defect Gate 8 found. A future phase that threads a session/Task
+ * handle through `CliIO` (filling step (c) in, which would also let subagents call `runGateEvidence`)
+ * is what makes non-mandatory auto-approval possible again -- this function does not fake that step in
+ * the meantime.
+ *
+ * **Gate 8 loop-back, finding 3 (also disclosed, not silently implemented):** `RunStopReason`'s own
+ * `"context-limit"` member (FR-13) is likewise structurally unreachable by this function today, for the
+ * SAME root cause -- see that type's own doc comment and ADR 0009 §20 for the full disclosure.
  *
  * Also disclosed: FR-6 (every classification is a registered, auditable `Decision`) is NOT written to
  * the diary from inside this function. `RunAutoOptions`/`CliIO` provide no `homeDir` test seam (unlike
@@ -479,6 +594,11 @@ export async function runAuto(options: RunAutoOptions): Promise<number> {
 		repoId: gitContext.repoId,
 		branch: gitContext.branch,
 		modelResolutionPort,
+		// D3 layer 2 (Gate 8 loop-back finding 5): the SAME real production witness `cli.ts`'s own
+		// composition root passes to `gate approve` -- `conductor auto` is headless by construction (this
+		// file's own header, D3 layer 1), so this always evaluates false for a real autonomous invocation,
+		// independently of whatever the injected confirm channel resolves.
+		isInteractive: defaultInteractivityWitness,
 	});
 	// D3 layer 1: the SAME sink every other headless caller uses -- this function never constructs a
 	// `ConfirmChannel` of its own (R56/T75).
@@ -556,7 +676,20 @@ export async function runAuto(options: RunAutoOptions): Promise<number> {
 
 		// (f) approve
 		if (MANDATORY_GATES.has(gate)) {
-			snapshot = await runGateApprove({ cwd: io.cwd, demandId, store, gate, confirm, source: "conductor-auto" });
+			// Error handling gap found and fixed alongside the Gate 8 loop-back (this branch had NO
+			// try/catch at all, unlike its non-mandatory sibling below): `runGateApprove` -> `store.approve`
+			// throws a `GateCommandError` for reasons entirely orthogonal to the confirm channel itself
+			// (e.g. insufficient evidence, R25/BR-6, or the gate never having been started) -- left
+			// uncaught, that would crash the whole run instead of stopping gracefully, the exact "never a
+			// crash reaching the user" discipline BR-4 already requires for budget exhaustion and every
+			// other step in this loop.
+			try {
+				snapshot = await runGateApprove({ cwd: io.cwd, demandId, store, gate, confirm, source: "conductor-auto" });
+			} catch (error) {
+				io.stderr.write(`conductor auto: gate ${gate} could not be approved: ${describeError(error)}\n`);
+				stopRun(io, demandId, store.status(demandId), gate, "needs-human");
+				return EXIT_STOPPED;
+			}
 			const record = snapshot.gates.find((g) => g.gate === gate);
 			if (record?.status !== "approved") {
 				// FR-14/T75/R56: headless -> the injected channel resolves false -> needs-human. The run
@@ -578,8 +711,17 @@ export async function runAuto(options: RunAutoOptions): Promise<number> {
 		pushBranch(io.cwd, snapshot.branch);
 	}
 
-	// 5. every applicable gate approved -> land.
-	io.stdout.write(`conductor auto: all applicable gates approved for "${demandId}" -- landed.\n`);
+	// 5. every applicable gate approved -> land for real (Gate 8 loop-back, finding 4: never a bare
+	// stdout claim -- see landOnDevelop's own header for why this never auto-merges).
+	const landing = landOnDevelop(io.cwd, snapshot.branch);
+	if (!landing.ok) {
+		io.stderr.write(
+			`conductor auto: all applicable gates approved for "${demandId}", but landing on develop failed -- ${landing.reason}\n`,
+		);
+		stopRun(io, demandId, snapshot, TOTAL_FLOW_GATES, "needs-human");
+		return EXIT_STOPPED;
+	}
+	io.stdout.write(`conductor auto: all applicable gates approved for "${demandId}" -- landed (${landing.detail}).\n`);
 	return EXIT_LANDED;
 }
 

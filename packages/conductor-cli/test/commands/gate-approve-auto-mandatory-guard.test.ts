@@ -58,10 +58,14 @@ describe("GateStateStoreView.approveAuto — N1: guarded by MANDATORY_GATES, nev
 		},
 	);
 
-	it("the NON-mandatory happy path (gate 1) genuinely mints an auto approval -- RED today via the stub's uncaught throw, since store.approveAuto is called directly (not wrapped in toThrow)", () => {
+	it("the NON-mandatory happy path (gate 1) genuinely mints an auto approval once evidence is attached -- RED today via the stub's uncaught throw, since store.approveAuto is called directly (not wrapped in toThrow)", () => {
 		const store = createFakeGateStore();
 		store.start(DEMAND, 1);
 		expect(MANDATORY_GATES.has(1)).toBe(false);
+		// Gate 8 loop-back, finding 1: approveAuto now refuses a HOLLOW completion (zero evidence) even
+		// for a non-mandatory gate -- see the describe block below. This happy path attaches evidence
+		// first, exactly what a real subagent-produced completion would have done.
+		store.attachEvidence(DEMAND, 1, { ref: { kind: "file", path: "README.md" }, provenance: "author-declared" });
 
 		const snapshot = store.approveAuto(DEMAND, 1);
 
@@ -69,6 +73,31 @@ describe("GateStateStoreView.approveAuto — N1: guarded by MANDATORY_GATES, nev
 		// happy path: a genuine method:"auto" Approval is minted and persisted.
 		expect(snapshot.gates.find((g) => g.gate === 1)?.status).toBe("approved");
 		expect(snapshot.gates.find((g) => g.gate === 1)?.approvalsCount).toBe(1);
+	});
+});
+
+describe("GateStateStoreView.approveAuto — Gate 8 loop-back, finding 1: never a hollow completion, even for a non-mandatory gate", () => {
+	it("refuses to auto-approve a started, non-mandatory gate with ZERO attached evidence, naming the reason", () => {
+		const store = createFakeGateStore();
+		store.start(DEMAND, 1);
+		expect(MANDATORY_GATES.has(1)).toBe(false);
+
+		// Before this fix: approveAuto minted method:"auto" here unconditionally, recording a gate as
+		// genuinely "approved" despite representing zero real work -- exactly the defect this run:
+		// no subagent delegation exists yet (auto.ts's own header), so a run that reached this point
+		// today would otherwise silently fabricate a completion for every non-mandatory gate it touched.
+		expect(() => store.approveAuto(DEMAND, 1)).toThrow(/no evidence attached/i);
+		expect(store.status(DEMAND).gates.find((g) => g.gate === 1)?.status).toBe("in-progress");
+	});
+
+	it("succeeds once at least one evidence item is attached, however weak (author-declared is enough for a NON-mandatory gate -- only the mandatory floor requires runtime-derived/git-commit specifically)", () => {
+		const store = createFakeGateStore();
+		store.start(DEMAND, 1);
+		store.attachEvidence(DEMAND, 1, { ref: { kind: "file", path: "README.md" }, provenance: "author-declared" });
+
+		const snapshot = store.approveAuto(DEMAND, 1);
+
+		expect(snapshot.gates.find((g) => g.gate === 1)?.status).toBe("approved");
 	});
 });
 

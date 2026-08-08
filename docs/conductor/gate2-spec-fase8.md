@@ -279,6 +279,15 @@ registrado.**
 > When o gate corrente termina seu trabalho,
 > Then, NESTA ORDEM: o run checkpoint é escrito, a parada é registrada no diário, a branch recebe push, e o
 > run para — nunca uma parada no MEIO de um gate deixando evidência parcial não commitada.
+>
+> **[Nota Gate 8 loop-back, 2026-08-08 — acréscimo datado, não uma reescrita da FR]** Esta FR permanece o
+> comportamento ESPECIFICADO; a implementação (Gate 6) ainda não a alcança — estruturalmente, não por
+> descuido: nenhum handle de sessão/contexto de subagente vivo existe hoje em `RunAutoOptions`/`CliIO`
+> (a mesma lacuna já nomeada pelo passo (c) do loop, ADR 0009 §3.2 — delegação a subagentes). Ver ADR
+> 0009 §20 para a disclosure completa e o porquê de uma proxy via `SharedBudget` ter sido considerada e
+> rejeitada (mede orçamento do RUN inteiro, não a janela de contexto de UMA sessão). `RunStopReason`
+> mantém as 4 variantes; `"context-limit"` só passa a ser produzido quando a fase que preenche o passo (c)
+> também dá a este orquestrador um handle real de contexto para observar.
 
 **FR-14 — Sign-off necessário para o run como `needs-human`.**
 > Given o `ConfirmChannel` de um gate obrigatório resolve para `false`/nega (headless, sem TTY),

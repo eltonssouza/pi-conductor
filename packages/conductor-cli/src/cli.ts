@@ -36,6 +36,7 @@ import {
 	type EvidenceAttachment,
 	type EvidenceRef,
 	formatGateStatusReport,
+	type InteractivityWitness,
 	runGateApprove,
 	runGateCalibrate,
 	runGateEvidence,
@@ -43,7 +44,11 @@ import {
 	runGateStart,
 	runGateStatus,
 } from "./commands/gate.ts";
-import { createPersistedGateStateStore, resolveGateGitContext } from "./commands/gate-store.ts";
+import {
+	createPersistedGateStateStore,
+	defaultInteractivityWitness,
+	resolveGateGitContext,
+} from "./commands/gate-store.ts";
 import { describeInitOutcome, initExitCode, runInit } from "./commands/init.ts";
 import {
 	DEFAULT_CAPTURE_CONFIG,
@@ -98,6 +103,26 @@ export interface CliIO {
 	 * default). Production wiring (`bin/conductor.js`) never sets it either.
 	 */
 	homeDir?: string;
+	/**
+	 * D3 layer 2 (Gate 8 loop-back, ADR 0009 §5.3, finding 5): a TEST SEAM ONLY, threaded straight
+	 * through to `createPersistedGateStateStore`'s `isInteractive` option inside `runGateCommand` --
+	 * mirrors `homeDir`/`tty` above's exact optional/backward-compatible shape. Production wiring
+	 * (`bin/conductor.js`) never sets this, so it always falls back to the REAL production witness
+	 * (`gate-store.ts`'s `defaultInteractivityWitness`, reading `process.stdin`/`process.stdout` directly).
+	 *
+	 * Why this exists, separate from `tty` above: `tty` is D3 LAYER 1 (which `ConfirmChannel` gets
+	 * constructed -- an in-memory `TtyStreams` double is enough to simulate a real interactive prompt for
+	 * that layer). `isInteractive` is the INDEPENDENT layer 2 witness, deliberately reading the real
+	 * process's own TTY state rather than the injected `tty` streams (ADR §5.3's own "a code path
+	 * distinct from `io.tty`" requirement) -- which means a test that only fakes `tty` (simulating a real
+	 * human answering "y" at a real terminal) is, correctly, still blocked by layer 2 under a test runner
+	 * that has no real TTY of its own (`process.stdin.isTTY` is `undefined` under `vitest`). A test whose
+	 * SUBJECT is the genuine interactive happy path (not layer 2 itself) states that explicitly by passing
+	 * `isInteractive: () => true` here -- the same "double a real, out-of-process dependency" discipline
+	 * `createModelRuntime`/`createCredentialStore` below already establish, applied to a second
+	 * per-process (not per-workspace) piece of real state.
+	 */
+	isInteractive?: InteractivityWitness;
 	/**
 	 * GATE 8 loop-back (Fase 7): TEST SEAMS ONLY for the four model/credential commands, in the exact
 	 * optional/backward-compatible shape `tty`/`homeDir` above already established, and mirroring
@@ -414,6 +439,11 @@ async function runGateCommand(args: string[], io: CliIO): Promise<number> {
 		repoId: gitContext.repoId,
 		branch: gitContext.branch,
 		modelResolutionPort,
+		// D3 layer 2 (Gate 8 loop-back finding 5): `io.isInteractive` (CliIO's own doc comment) is a TEST
+		// SEAM ONLY -- production (`bin/conductor.js`) never sets it, so this always falls back to the
+		// REAL production witness, reading the process's own TTY state via a code path distinct from
+		// `io.tty`/`resolveConfirmChannel(io.tty)` above (layer 1).
+		isInteractive: io.isInteractive ?? defaultInteractivityWitness,
 	});
 	// `io.homeDir` (test seam, CliIO's own header): defaults to the real per-machine home in production,
 	// exactly like every other `resolveJournalContext` call site.

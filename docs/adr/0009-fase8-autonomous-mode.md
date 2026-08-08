@@ -836,3 +836,47 @@ corpus (majoritariamente arquitetura/engenharia geral) não cobre em profundidad
    fora do alvo). É fundamentada no **precedente de código deste monorepo** (a disciplina fail-closed de
    `confirmOrDeny`/`SharedBudget.reserve`/`mintHumanApproval`, o matcher único de `@conductor/secrets`) e nos
    achados lidos no código (N1, o secret-scan não-fiado) — não numa citação fabricada.
+
+---
+
+## 20. Loop-back do Gate 8 — FR-13 (contexto ~90%) é estruturalmente inatingível hoje, honestamente declarado
+
+Mesmo padrão de emenda que o ADR 0008 §21 já usou para seu próprio loop-back: este ADR não é reaberto nem
+reescrito (§0, "ADRs são imutáveis"); esta seção **acrescenta** o que o Gate 8 (validação FR-a-FR) encontrou
+depois da implementação, sem tocar nenhuma decisão D1-D8 acima.
+
+**O achado.** `RunStopReason` (§8/D6, §16) declara `"context-limit"` como uma das 4 condições de parada
+exaustivas (FR-13/BR-9). A implementação real de `runAuto` (Gate 6) **nunca produz esse valor** — nenhum
+código-caminho neste arquivo o atribui. Isto não foi um esquecimento silencioso do Gate 6 original nem deste
+loop-back: é a **mesma causa-raiz** já declarada em voz alta pelo próprio cabeçalho de `runAuto` para o passo
+(c) do loop (§3.2) — "delegar trabalho aos subagentes de papel (Task)" não tem call site alcançável a partir
+da assinatura atual de `RunAutoOptions`/`CliIO` (§16, reproduzida verbatim, sem campos novos). FR-13 pede que
+o run detecte "uso de contexto cruzando ~90% da janela do modelo" — mas não existe, hoje, nenhum handle de
+sessão/contexto de subagente vivo que este orquestrador possa ler; `SharedBudget` mede um **orçamento de
+tokens do RUN inteiro** (um teto acumulado ao longo de todos os gates e chamadas, FR-11/12), uma medida
+fundamentalmente diferente da **janela de contexto de UMA sessão de subagente** (um limite por-chamada, ex.
+200k tokens de UM turno) que FR-13 realmente pede. Uma proxy ingênua (ex.: "orçamento restante < 10%") foi
+considerada e rejeitada: substituiria uma lacuna honesta por um número que parece plausível mas mede a coisa
+errada — trocaria "não implementado, declarado" por "implementado incorretamente, não declarado", uma troca
+pior, não melhor (o mesmo raciocínio que já rejeitou, em §6.3, um model call para a classificação de risco: um
+número/sinal que parece a coisa certa mas não é vale menos que a ausência honesta dele).
+
+**Por que isto não falsifica H-Fase8 nem regride nenhum invariante.** O SLI/SLO §11 item 17 ("`budget-exceeded`/
+contexto/`needs-human` parando graciosamente, nunca crash") permanece verdadeiro — vacuamente, para o ramo de
+contexto, já que esse ramo nunca executa; não é uma violação, é uma cláusula que ainda não tem chamador. As
+outras 3 condições de parada (`needs-human`, `budget-exceeded`, `landed`) são REAIS e testadas de ponta a
+ponta (`test/commands/auto-run.test.ts`). O falsificador de H-Fase8 (cabeçalho) não é tocado: isto não é um
+segundo mutador nem um segundo caminho de aprovação — é, simplesmente, uma cláusula do contrato ainda sem
+implementação, agora nomeada em vez de silenciosa.
+
+**Resolução.** `RunStopReason` mantém as 4 variantes (o contrato do §16 não muda — BR-9 continua "exaustivo"
+sobre o CONJUNTO de motivos possíveis, não sobre quais já têm implementação hoje). O código
+(`src/commands/auto.ts`, doc comment de `RunStopReason` e do cabeçalho de `runAuto`) declara explicitamente
+esta lacuna, nomeando-a como bloqueada pela MESMA fiação de subagente/sessão que o passo (c) do loop já
+espera de uma fase futura — não uma lacuna nova, a MESMA lacuna raiz vista de um segundo ângulo. Nenhuma spec
+nem código finge que FR-13 está ao vivo hoje; `docs/conductor/gate2-spec-fase8.md` recebe uma nota equivalente
+junto de FR-13 (não uma reescrita da FR, um acréscimo datado, mesmo padrão desta seção).
+
+**Fecha:** Gate 8 loop-back, finding 3 (validação FR-a-FR pós-Gate-6). **Segue aberto para:** a mesma fase
+futura que preenche o passo (c) do loop (threading de um handle de sessão/Task através de `CliIO`) — nenhuma
+nova fase é criada só para isto; é o MESMO follow-up já nomeado pelo cabeçalho de `runAuto`.

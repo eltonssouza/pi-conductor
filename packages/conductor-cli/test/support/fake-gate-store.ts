@@ -193,6 +193,13 @@ export function createFakeGateStore(options: { branch?: string } = {}): FakeGate
 			if (record.status === "approved") {
 				return snapshot(demandId);
 			}
+			// Gate 8 loop-back, finding 1: mirrors the real store's own guard (gate-store.ts) -- an
+			// auto-approved gate is never a hollow completion, even when non-mandatory.
+			if (record.evidenceCount === 0) {
+				throw new GateCommandError(
+					`cannot auto-approve gate ${gate}: no evidence attached -- an auto-approved gate can never be a hollow completion, even when non-mandatory (Gate 8 loop-back finding 1)`,
+				);
+			}
 			record.status = "approved";
 			record.completedAt = new Date().toISOString();
 			record.approvalsCount += 1;
