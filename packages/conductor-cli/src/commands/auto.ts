@@ -45,7 +45,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { BUILTIN_GATE_ROLES, MANDATORY_GATES } from "@conductor/config";
 import { openJournalReader, readRecordedJournalEntryIds } from "@conductor/diary";
@@ -756,6 +756,11 @@ export async function runAuto(options: RunAutoOptions): Promise<number> {
 			sharedBudget: budget,
 			effectivePolicyInput,
 			auditTrailWriter,
+			// Gate 8 loop-back, defect 1 (FR-3): demandId is the same slug this whole run is keyed by;
+			// branch is re-read fresh from the snapshot `runGateStart` (step b, just above) returned --
+			// never a stale value cached before this gate opened.
+			demandId,
+			branch: snapshot.branch,
 			recordDelegationSessionId: (sessionId) => {
 				delegationSessionIds.add(sessionId);
 			},
@@ -922,6 +927,22 @@ export interface GateDelegationOptions {
 	sharedBudget: SharedBudget;
 	effectivePolicyInput: EffectivePolicyInput;
 	auditTrailWriter: AuditTrailWriter;
+	/**
+	 * Gate 8 loop-back, defect 1 (FR-3/ADR 0010 §6/D4): two of the delegation prompt's own NEUTRAL
+	 * REFERENCES -- the demand's own slug (the SAME `demandId` `runAuto`'s own `slugify(options.demand)`
+	 * already produced) and the demand branch name (`snapshot.branch`, re-derived fresh at every gate
+	 * boundary from the real `GateStatusSnapshot`, never cached). `runGateDelegation` appends both (plus a
+	 * best-effort spec-path reference it derives itself -- `resolveSpecReferencePath` below) to the fixed
+	 * per-gate template (FR-3) -- REQUIRED, never optional/defaulted, so a caller cannot silently omit
+	 * them (the same "no hardcoded assumption, no silent fallback" discipline `buildDelegationSpawnInput`'s
+	 * own 4 security invariants already established, GAP-D). Prior to this fix `GateDelegationOptions`
+	 * carried neither field and the prompt was only `template.instruction + "Gate: N\nLead role: X"` --
+	 * this untrusted-content boundary is UNCHANGED by this addition: both fields are neutral, author- or
+	 * git-controlled strings, never the raw demand text or diff content (see `GATE_DELEGATION_TEMPLATES`'s
+	 * own header on the data/instruction delimiter, FR-3b/GAP-C, which this fix does not touch).
+	 */
+	demandId: string;
+	branch: string;
 	/** D7/GAP-A: adds to the in-process-only `Set` this file's own future `runAuto` wiring owns --
 	 * NEVER a disk-backed writer (see `@conductor/runtime`'s `gate-evidence.ts`'s own doc comment on
 	 * `runtimeRecordedDelegationSessionIds` for the full GAP-A rationale). */
@@ -1029,6 +1050,28 @@ const DELEGATION_TOKEN_RESERVE_ESTIMATE = 4_000;
 
 const ZERO_DELEGATION_USAGE = { input: 0, output: 0, total: 0 };
 
+/**
+ * Gate 8 loop-back, defect 1 (FR-3/ADR 0010 §6/D4): a best-effort NEUTRAL reference to the demand's own
+ * spec file, following this project's own established `docs/conductor/gate2-spec-<slug>.md` naming
+ * convention -- the SAME pattern every existing demand's spec already follows (`gate2-spec-fase7.md`,
+ * `gate2-spec-fase8.md`, `gate2-spec-auto-subagent-delegation.md` itself). `demandId` is re-slugified
+ * here (idempotent for an already-valid slug, since `runAuto`'s own `demandId` is always
+ * `slugify(options.demand)` to begin with) so this function can never be tricked into a path outside
+ * `docs/conductor/` even if a future, non-`runAuto` caller passes something that never went through
+ * `slugify` itself -- R62(iv)/secure-default 73's own rule that `slugify` stays the ONLY producer of a
+ * path-safe slug, reapplied here rather than trusted implicitly.
+ *
+ * Returns `undefined` (never a fabricated path) when the conventional file does not actually exist on
+ * disk -- the SAME "degrade gracefully, never assert falsely" discipline this file's own
+ * `readCheckpointHint`/`safeGit` already follow: pointing the delegated subagent at a spec path that does
+ * not exist would be worse than omitting the reference entirely.
+ */
+function resolveSpecReferencePath(cwd: string, demandId: string): string | undefined {
+	const safeSlug = slugify(demandId);
+	const relPath = `docs/conductor/gate2-spec-${safeSlug}.md`;
+	return existsSync(join(cwd, "docs", "conductor", `gate2-spec-${safeSlug}.md`)) ? relPath : undefined;
+}
+
 /** D9 -- every `runGateDelegation` failure returns this shape; never a throw the loop could crash on. */
 function delegationStop(reason: RunStopReason, exitCode: number, detail: string): GateDelegationOutcome {
 	return { kind: "stop", reason, exitCode, detail };
@@ -1097,7 +1140,20 @@ export async function runGateDelegation(options: GateDelegationOptions): Promise
 				`gate ${options.gate}: no delegation prompt template is configured -- delegation refused`,
 			);
 		}
-		const prompt = `${template.instruction}\n\nGate: ${options.gate}\nLead role: ${leadRoleSlug}`;
+		// Gate 8 loop-back, defect 1 (FR-3/ADR 0010 §6/D4): NEUTRAL references appended after the fixed
+		// template -- gate number/lead role (unchanged), plus the demand's own slug, its branch name, and
+		// (best-effort, never fabricated) the demand's spec path. Never the raw demand string/diff -- that
+		// untrusted-content boundary is untouched by this addition (see this function's own header and
+		// `GATE_DELEGATION_TEMPLATES`'s own data/instruction delimiter, FR-3b/GAP-C).
+		const specPath = resolveSpecReferencePath(options.io.cwd, options.demandId);
+		const referenceLines = [
+			`Gate: ${options.gate}`,
+			`Lead role: ${leadRoleSlug}`,
+			`Demand: ${options.demandId}`,
+			`Branch: ${options.branch}`,
+			...(specPath !== undefined ? [`Spec: ${specPath}`] : []),
+		].join("\n");
+		const prompt = `${template.instruction}\n\n${referenceLines}`;
 
 		// D6/FR-4b: reserve BEFORE spawning, settle exactly once (success or failure) -- mirrors
 		// `runTask`'s own reserve/settle discipline, a SECOND checkpoint distinct from the loop's own

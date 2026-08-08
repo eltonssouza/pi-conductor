@@ -30,6 +30,8 @@
  */
 
 import { join } from "node:path";
+import { MANDATORY_GATES } from "@conductor/config";
+import type { ResolutionRefusal } from "@conductor/providers";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createScratchProject, type ScratchProject } from "../support/scratch.ts";
@@ -39,6 +41,11 @@ import { createScratchProject, type ScratchProject } from "../support/scratch.ts
 // via the hoisted `state` object below, following task-child-model-inheritance.test.ts's own pattern.
 const state = vi.hoisted(() => ({
 	captured: undefined as { model?: unknown; tools?: string[] } | undefined,
+	// Gate 8 loop-back, defect 1 (FR-3): the actual prompt text passed to `session.prompt(...)` -- NOT
+	// part of `createAgentSession`'s own options (the prompt is a SEPARATE call,
+	// `session.prompt(input.prompt)`, per `@conductor/runtime`'s `tools/task.ts`), so it needs its own
+	// capture point, distinct from `captured` above.
+	capturedPrompt: undefined as string | undefined,
 	createAgentSessionCalls: 0,
 	tokenUsage: { input: 0, output: 0, total: 0 },
 	finalText: "delegated work done",
@@ -54,7 +61,8 @@ vi.mock("@earendil-works/pi-coding-agent", async (importOriginal) => {
 			state.createAgentSessionCalls += 1;
 			return {
 				session: {
-					prompt: async () => {
+					prompt: async (promptText: string) => {
+						state.capturedPrompt = promptText;
 						if (state.promptShouldThrow) {
 							throw new Error("simulated model/provider failure during delegation");
 						}
@@ -76,7 +84,7 @@ vi.mock("@earendil-works/pi-coding-agent", async (importOriginal) => {
 const { buildDelegationSpawnInput, CONTEXT_LIMIT_FRACTION, runGateDelegation } = await import(
 	"../../src/commands/auto.ts"
 );
-const { createAuditTrailWriter, createSharedBudget } = await import("@conductor/runtime");
+const { createAuditTrailWriter, createSharedBudget, describeRefusal } = await import("@conductor/runtime");
 const { loadRealRoleRegistryAndSkills, toTaskRoleRegistryView } = await import(
 	"../../src/commands/chat/role-resolution.ts"
 );
@@ -114,6 +122,34 @@ function alwaysResolves(model: Model<Api>) {
 	};
 }
 
+/**
+ * Gate 8 loop-back, defect 2 (FR-2b/D3/N2): a `ModelResolutionPort` that resolves EVERY purpose except
+ * `"delegation"`, which it refuses with the given `refusal` -- proves `runGateDelegation`'s own
+ * `purpose:"delegation"` resolution (a SEPARATE call from the gate-open precondition that already passed
+ * before `runGateDelegation` was ever invoked) is what is actually exercised, not a stand-in for a
+ * precondition that never had a chance to refuse.
+ */
+function refusesDelegationPurpose(model: Model<Api>, refusal: ResolutionRefusal) {
+	return {
+		resolveForGate: (request: { gate: number; purpose: string }) => {
+			if (request.purpose === "delegation") {
+				return {
+					resolved: false as const,
+					refusal,
+					trace: { gate: request.gate, at: new Date().toISOString(), steps: [] },
+				};
+			}
+			return {
+				resolved: true as const,
+				model,
+				ref: { provider: model.provider, modelId: model.id },
+				effectiveRank: 3,
+				trace: { gate: request.gate, at: new Date().toISOString(), steps: [] },
+			};
+		},
+	};
+}
+
 /** A fixture `RoleRegistryView` whose one entry is under the caller's control -- deliberately NOT the
  * real 37-role catalog for the success-path/D8/D9/GAP-D tests below: N1/GAP-2 (Fase 3) means every
  * REAL built-in role resolves with `tools:[]` today (confirmed live by this file's own N1 test below),
@@ -133,6 +169,7 @@ let project: ScratchProject;
 beforeEach(() => {
 	project = createScratchProject();
 	state.captured = undefined;
+	state.capturedPrompt = undefined;
 	state.createAgentSessionCalls = 0;
 	state.tokenUsage = { input: 0, output: 0, total: 0 };
 	state.finalText = "delegated work done";
@@ -168,6 +205,8 @@ describe("runGateDelegation -- N1/D2/GAP-2: refuses fail-closed against the REAL
 			sharedBudget: createSharedBudget(1_000_000),
 			effectivePolicyInput: {},
 			auditTrailWriter: createAuditTrailWriter(join(project.root, ".conductor", "audit.jsonl")),
+			demandId: "demand-1",
+			branch: "feature/demand-1",
 			recordDelegationSessionId: vi.fn(),
 			attachDelegationEvidence: vi.fn(),
 		});
@@ -200,6 +239,11 @@ describe("runGateDelegation -- genuine delegation success path (fixture role WIT
 			sharedBudget: createSharedBudget(1_000_000),
 			effectivePolicyInput: {},
 			auditTrailWriter: createAuditTrailWriter(join(project.root, ".conductor", "audit.jsonl")),
+			// Gate 8 loop-back, defect 1 (FR-3): distinctive, non-default values -- proving the assertions
+			// below on `state.capturedPrompt` are observing THESE fields flow through, not a coincidental
+			// hardcoded default somewhere in the prompt-building code.
+			demandId: "adicionar-recuperacao-de-senha",
+			branch: "feature/adicionar-recuperacao-de-senha",
 			recordDelegationSessionId,
 			attachDelegationEvidence,
 		});
@@ -223,6 +267,18 @@ describe("runGateDelegation -- genuine delegation success path (fixture role WIT
 		// GAP-5 (inherited invariant from tools/task.ts): the model resolved for THIS delegation (never
 		// omitted, never an environment/ambient fallback) is what reaches the Pi SDK boundary.
 		expect(state.captured?.model).toBeDefined();
+
+		// Gate 8 loop-back, defect 1 (FR-3/ADR 0010 §6/D4): the prompt actually delivered to the child
+		// session (`session.prompt(...)`, captured above) carries the demand slug and the branch name as
+		// NEUTRAL references, appended after the fixed per-gate template -- never interpolated as if they
+		// were the raw demand string itself (this fixture's `demandId`/`branch` are plain, author-supplied
+		// strings here, not the untrusted demand text -- that boundary is untouched by this assertion).
+		expect(state.capturedPrompt).toBeDefined();
+		const prompt = state.capturedPrompt as string;
+		expect(prompt).toContain("adicionar-recuperacao-de-senha");
+		expect(prompt).toContain("feature/adicionar-recuperacao-de-senha");
+		expect(prompt).toContain("Gate: 6");
+		expect(prompt).toContain("Lead role: software-engineer");
 	});
 });
 
@@ -283,6 +339,8 @@ describe("runGateDelegation -- D8: context-limit is measured per-call against th
 			sharedBudget: createSharedBudget(1_000_000),
 			effectivePolicyInput: {},
 			auditTrailWriter: createAuditTrailWriter(join(project.root, ".conductor", "audit.jsonl")),
+			demandId: "demand-1",
+			branch: "feature/demand-1",
 			recordDelegationSessionId: vi.fn(),
 			attachDelegationEvidence: vi.fn(),
 		});
@@ -302,6 +360,8 @@ describe("runGateDelegation -- D8: context-limit is measured per-call against th
 			sharedBudget,
 			effectivePolicyInput: {},
 			auditTrailWriter: createAuditTrailWriter(join(project.root, ".conductor", "audit.jsonl")),
+			demandId: "demand-1",
+			branch: "feature/demand-1",
 			recordDelegationSessionId: vi.fn(),
 			attachDelegationEvidence: vi.fn(),
 		});
@@ -329,6 +389,8 @@ describe("runGateDelegation -- D9/FR-7: a thrown/rejected spawn degrades to {kin
 			sharedBudget: createSharedBudget(1_000_000),
 			effectivePolicyInput: {},
 			auditTrailWriter: createAuditTrailWriter(join(project.root, ".conductor", "audit.jsonl")),
+			demandId: "demand-1",
+			branch: "feature/demand-1",
 			recordDelegationSessionId: vi.fn(),
 			attachDelegationEvidence: vi.fn(),
 		});
@@ -339,5 +401,52 @@ describe("runGateDelegation -- D9/FR-7: a thrown/rejected spawn degrades to {kin
 			expect(typeof outcome.exitCode).toBe("number");
 			expect(outcome.detail.length).toBeGreaterThan(0);
 		}
+	});
+});
+
+// =================================================================================================
+// Gate 8 loop-back, defect 2 (FR-2b/D3/N2): the model-resolution port refuses for `purpose:"delegation"`
+// specifically -- a combined-tier-floor refusal on the LEAD ROLE's persona -- distinct from the
+// gate-open precondition (`purpose:"gate-open"`, no persona) that already passed BEFORE `runAuto` ever
+// called `runGateDelegation`. Previously this branch (`auto.ts`'s `!resolution.resolved` check) was
+// correct by inspection only, with zero test anywhere in the codebase exercising it.
+// =================================================================================================
+describe("runGateDelegation -- FR-2b/D3/N2: the model-resolution port refuses for purpose:'delegation' even though the gate-open precondition already passed", () => {
+	it("degrades to {kind:'stop', reason:'needs-human'}, with detail built via the SAME describeRefusal formatter every other refusal in this codebase already uses -- never a second, ad-hoc formatter -- and never attempts a spawn", async () => {
+		const refusal: ResolutionRefusal = {
+			kind: "below-tier-floor",
+			gate: 6,
+			requiredRank: 3,
+			bestRank: 1,
+			candidate: { provider: "conductor-fixture", modelId: "fixture-model-1" },
+		};
+		const recordDelegationSessionId = vi.fn();
+		const attachDelegationEvidence = vi.fn();
+
+		const outcome = await runGateDelegation({
+			gate: 6,
+			io: { cwd: project.root, stdout: NOOP_WRITER, stderr: NOOP_WRITER },
+			roleRegistry: fixtureRoleRegistry("software-engineer", ["read", "write"]),
+			modelResolutionPort: refusesDelegationPurpose(fixtureModel(), refusal),
+			sharedBudget: createSharedBudget(1_000_000),
+			effectivePolicyInput: {},
+			auditTrailWriter: createAuditTrailWriter(join(project.root, ".conductor", "audit.jsonl")),
+			demandId: "demand-1",
+			branch: "feature/demand-1",
+			recordDelegationSessionId,
+			attachDelegationEvidence,
+		});
+
+		expect(outcome.kind).toBe("stop");
+		if (outcome.kind === "stop") {
+			expect(outcome.reason).toBe("needs-human");
+			// Proves the SAME formatter, not a coincidentally-similar second implementation: the exact
+			// string `describeRefusal` itself produces for this refusal must appear verbatim in the detail.
+			expect(outcome.detail).toContain(describeRefusal(refusal, MANDATORY_GATES));
+		}
+		// Refused before any spawn was ever attempted, and before either side-effecting callback fired.
+		expect(state.createAgentSessionCalls).toBe(0);
+		expect(recordDelegationSessionId).not.toHaveBeenCalled();
+		expect(attachDelegationEvidence).not.toHaveBeenCalled();
 	});
 });

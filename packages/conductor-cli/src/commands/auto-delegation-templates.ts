@@ -6,10 +6,12 @@
  * `GATE_DELEGATION_TEMPLATES` is REAL data, not a Gate 5 stub — a frozen, author-written record keyed
  * by gate number (1-14), matching `@conductor/config`'s `BUILTIN_GATE_ROLES` domain exactly (this
  * module never invents a gate number `BUILTIN_GATE_ROLES` does not already have). `commands/auto.ts`'s
- * `runGateDelegation` (Gate 6) is the only intended reader: it looks up `GATE_DELEGATION_TEMPLATES[gate]`
+ * `runGateDelegation` (Gate 6, and Gate 8 loop-back defect 1 for the demand-id/branch/spec-path piece
+ * specifically) is the only intended reader: it looks up `GATE_DELEGATION_TEMPLATES[gate]`
  * for the gate it is about to delegate, and composes the final prompt as (1) this template's fixed
- * `instruction` text + (2) NEUTRAL references (the demand's `slugify`-d id, the spec's repo path, the
- * branch name) it appends itself — never the other way around. This file itself never sees a demand
+ * `instruction` text + (2) NEUTRAL references (the demand's `slugify`-d id, the demand branch name, and
+ * a best-effort reference to the spec's repo path, `docs/conductor/gate2-spec-<slug>.md` -- omitted,
+ * never fabricated, when that file is not found on disk) it appends itself — never the other way around. This file itself never sees a demand
  * string, a diff, or any other untrusted input; every `instruction` below is 100% author-written,
  * static text (R62(i): "nunca concatenação de texto bruto — apenas template fixo + referências").
  *

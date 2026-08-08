@@ -59,6 +59,8 @@ describe("runGateDelegation -- FR-1b/D2: the lead role slug is not registered at
 				sharedBudget: createSharedBudget(1_000_000),
 				effectivePolicyInput: {},
 				auditTrailWriter: createAuditTrailWriter(join(project.root, ".conductor", "audit.jsonl")),
+				demandId: "demand-1",
+				branch: "feature/demand-1",
 				recordDelegationSessionId,
 				attachDelegationEvidence,
 			});
@@ -107,6 +109,8 @@ describe("runGateDelegation -- FR-7b/D6/D9: the per-delegation budget reservatio
 				sharedBudget: createSharedBudget(0),
 				effectivePolicyInput: {},
 				auditTrailWriter: createAuditTrailWriter(join(project.root, ".conductor", "audit.jsonl")),
+				demandId: "demand-1",
+				branch: "feature/demand-1",
 				recordDelegationSessionId,
 				attachDelegationEvidence,
 			});
