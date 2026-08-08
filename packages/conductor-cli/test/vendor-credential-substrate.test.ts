@@ -70,24 +70,27 @@ describe("F2(a) -- @earendil-works/pi-coding-agent must export AuthStorage (D8's
 describe("F2(b) -- RuntimeCredentials.removeRuntimeApiKey only clears its in-memory overlay (the ghost-credential bug, T72)", () => {
 	// it.fails: this assertion is EXPECTED to fail against today's vendor code -- the test suite reports
 	// GREEN as long as it keeps failing for this reason. See the file header for why this isn't a normal it().
-	it.fails("leaves the credential in the WRAPPED store after removeRuntimeApiKey, proving the overlay is the only thing cleared", async () => {
-		const provider = "anthropic";
-		const wrapped = new InMemoryCredentialStore();
-		await wrapped.modify(provider, async () => ({ type: "api_key", key: "sk-ant-should-be-gone" }));
+	it.fails(
+		"leaves the credential in the WRAPPED store after removeRuntimeApiKey, proving the overlay is the only thing cleared",
+		async () => {
+			const provider = "anthropic";
+			const wrapped = new InMemoryCredentialStore();
+			await wrapped.modify(provider, async () => ({ type: "api_key", key: "sk-ant-should-be-gone" }));
 
-		const runtimeCredentials = new RuntimeCredentials(wrapped);
-		runtimeCredentials.setRuntimeApiKey(provider, "sk-ant-runtime-override");
-		expect(runtimeCredentials.hasRuntimeApiKey(provider)).toBe(true);
+			const runtimeCredentials = new RuntimeCredentials(wrapped);
+			runtimeCredentials.setRuntimeApiKey(provider, "sk-ant-runtime-override");
+			expect(runtimeCredentials.hasRuntimeApiKey(provider)).toBe(true);
 
-		runtimeCredentials.removeRuntimeApiKey(provider);
+			runtimeCredentials.removeRuntimeApiKey(provider);
 
-		// The in-memory overlay is correctly cleared...
-		expect(runtimeCredentials.hasRuntimeApiKey(provider)).toBe(false);
+			// The in-memory overlay is correctly cleared...
+			expect(runtimeCredentials.hasRuntimeApiKey(provider)).toBe(false);
 
-		// ...but the assertion this test exists for: a fresh read from the underlying, wrapped store --
-		// bypassing RuntimeCredentials entirely, exactly what a real logout must guarantee -- should also
-		// be gone. It is NOT, today: this assertion fails, and the failure diff (still showing the
-		// "sk-ant-should-be-gone" credential) IS the proof T72/FR-3/BR-9 are written against.
-		await expect(wrapped.read(provider)).resolves.toBeUndefined();
-	});
+			// ...but the assertion this test exists for: a fresh read from the underlying, wrapped store --
+			// bypassing RuntimeCredentials entirely, exactly what a real logout must guarantee -- should also
+			// be gone. It is NOT, today: this assertion fails, and the failure diff (still showing the
+			// "sk-ant-should-be-gone" credential) IS the proof T72/FR-3/BR-9 are written against.
+			await expect(wrapped.read(provider)).resolves.toBeUndefined();
+		},
+	);
 });
