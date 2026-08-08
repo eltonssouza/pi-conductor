@@ -198,6 +198,20 @@ incerteza.**
 > prossegue. *Grounding:* §8.1 (Router with Unclear Lane — "mandatory unclear route wired to a conservative
 > handler or human").
 
+**FR-3b/FR-4b — [GAP-8A, Gate 3 T74/R55] O veto é REJECT-ONLY; não-casar nunca é lido como aceite, e o
+sinal de diff/caminho pesa mais que a descrição.**
+> Given uma demanda cuja descrição evade o ruleset estático (linguagem evasiva, perífrase, idioma diferente)
+> mas cujo diff real materializa mudanças em caminhos sensíveis (`auth`, `credentials`, `*.pem`, `.env`, ou
+> qualquer padrão do veto estático),
+> When o diff passa a existir (a cada fronteira de gate, conforme o trabalho avança),
+> Then o veto é RE-avaliado sobre o diff e dispara `needs-human` mesmo que a descrição original tivesse
+> passado — "não casou na descrição" nunca vira "logo, baixo risco" (um blocklist decide bem o lado
+> rejeitar, nunca o lado aceitar). **A classificação nunca é a defesa final**: mesmo que a evasão passe
+> intacta por todas as fronteiras, `{3,5,7,8,9}` são estruturalmente incolapsáveis (R24) — o Gate 3/9 sempre
+> dispara sobre o diff real antes de qualquer merge. Este é o backstop estrutural que limita o pior caso de
+> uma evasão a "run autônomo desperdiçado", nunca "merge não-revisado". *Grounding:* Gate 3 T74/R55 (Secure
+> Code Review §1.2/§1.12/§2.2, top 0.635).
+
 **FR-5 — Uma flag `--risk=low` explícita é honrada só onde não conflita com o veto, e é registrada distinta
 de uma auto-avaliação.**
 > Given `conductor auto --risk=low "adicionar filtro de busca"` sem casar o ruleset estático (FR-3),
@@ -300,7 +314,17 @@ registrado.**
 > Given o Gate N é aprovado e produziu mudanças de arquivo,
 > When a aprovação é registrada,
 > Then um commit `gate <N>: <resumo>` é criado na branch da demanda — nunca deferido para um commit
-> agregador no final do run.
+> agregador no final do run. O commit é escopado ao diff do gate — nunca um `git add -A` cego sobre tudo
+> que o working tree acumulou.
+
+**FR-18b — [GAP-8B, Gate 3 T77/R58] Um secret-scan pré-push fail-closed é pré-condição de qualquer push
+automático.**
+> Given um gate aprovado está prestes a ser commitado e a branch da demanda vai receber push,
+> When o orquestrador roda o secret-scan (gitleaks/trivy, o mesmo motor que o Gate 7 já invoca no CI) sobre
+> o diff staged,
+> Then um segredo detectado BLOQUEIA o push, converte o run em `needs-human`, e nunca "empurra e conserta
+> depois" — defesa em profundidade com o scan do CI (Gate 7), não em vez dele; a redação de sinks da Fase 6
+> protege logs/transcript/diário, NÃO o working tree, então este passo não é redundante com ela.
 
 **FR-19 — Um gate que não mudou nenhum arquivo não é commitado.**
 > Given o Gate N é aprovado mas não produziu nenhuma mudança de arquivo,
@@ -326,12 +350,17 @@ registrado.**
 
 ### Grupo H — Canal de sign-off (G8, decisão flagada #5, alvo do Gate 9)
 
-**FR-22 — O `ConfirmChannel` do modo autônomo é vinculado ao MESMO sink `confirmOrDeny` da Fase 4.**
+**FR-22 — O `ConfirmChannel` do modo autônomo é vinculado ao MESMO sink `confirmOrDeny` da Fase 4, e a
+garantia é ESTRUTURAL, não convencional [GAP-8D, Gate 3 T75/R56].**
 > Given `conductor auto` roda headless (sem TTY),
 > When ele alcança o passo de aprovação de um gate obrigatório,
 > Then o `ConfirmChannel` que ele passa para `runGateApprove` é o MESMO canal apoiado em `confirmOrDeny` que
-> qualquer outro chamador headless usa (`!hasUI → deny`) — nunca um canal que `conductor auto` constrói por
-> conta própria e que poderia resolver `true` sem uma interação humana real.
+> qualquer outro chamador headless usa (`!hasUI → deny`) — `conductor auto` NUNCA constrói um `ConfirmChannel`
+> próprio (recebe um já construído por injeção do composition root). **Camada 2, defesa em profundidade:** o
+> caminho de mint (`mintHumanApproval`/`store.approve`) cruza o `hasUI`/TTY real do processo, de modo que um
+> processo sem UI seja estruturalmente incapaz de cunhar `Approval{method:"human"}` — mesmo que um `true`
+> sintético chegue ao canal por algum bug de fiação. Fabricar um sign-off passa a exigir DUAS falhas
+> independentes (canal comprometido E `hasUI` spoofado), nunca uma única linha de fiação errada.
 
 **FR-23 — Esta costura é um alvo nomeado do Gate 9 desta demanda.**
 > Given a condição vinculante de FR-22,
@@ -350,7 +379,7 @@ registrado.**
 | **BR-2** | O veto do ruleset estático (auth/PII/tokens/APIs externas) é absoluto — nenhuma flag do usuário o sobrepõe. Mesmo critério mínimo que o `CLAUDE.md` já usa como piso do Gate 3, nunca redecidido aqui. | `CLAUDE.md`, regra não-negociável 2 | FR-3, FR-5 |
 | **BR-3** | `--budget` semeia/vincula a MESMA instância de `SharedBudget` compartilhada pelos subagentes do run — nunca um segundo contador paralelo de tokens. Reuso sobre duplicação (precedente ADR 0004 §5, "nenhum filho recebe cota própria"). | `shared-budget.ts`; Pragmatic Programming Practices §1.4 (§8.2) | FR-10 |
 | **BR-4** | Esgotamento de orçamento para o run graciosamente — nunca continua silenciosamente além de uma reserva negada, e nunca deixa um `BudgetExhaustedError` não capturado chegar ao usuário como crash (mesma disciplina que `task.ts` já aplica na borda de delegação). | `shared-budget.ts`; `tools/task.ts` (Fase 3) | FR-11, FR-16 |
-| **BR-5** | O run checkpoint é DICA, nunca evidência e nunca autoritativo. Em `--continue`, o orquestrador SEMPRE relê o `GateState` real primeiro; um descompasso é resolvido a favor do `GateState`, e um checkpoint ausente/corrompido nunca bloqueia a retomada. | Achado (b)/(e) do Gate 1; Secure and Reliable Systems Design §2.12 "When not to rely on recovery as the control" (§8.3) | FR-7, FR-8, FR-9 |
+| **BR-5** | O run checkpoint é DICA, nunca evidência e nunca autoritativo — **em TODOS os seus campos, não só `last_gate`/`next_gate`** [GAP-8C, Gate 3 T78/R59]. Em `--continue`, o orquestrador SEMPRE relê o `GateState` real primeiro; `demand_branch`, `depth_calibration`, e o conjunto de sign-offs pendentes são RE-DERIVADOS do `GateState` autoritativo (`GateStatusSnapshot.branch`/`.calibration`/`.gates[].status`), nunca lidos do checkpoint como se fossem confiáveis. Um descompasso é resolvido a favor do `GateState` e reportado (fail-closed, nunca avança cegamente); um checkpoint ausente/corrompido nunca bloqueia a retomada. | Achado (b)/(e) do Gate 1; Gate 3 T78/R59; Secure and Reliable Systems Design §2.12 "When not to rely on recovery as the control" (§8.3) | FR-7, FR-8, FR-9 |
 | **BR-6** | "Run checkpoint" (Fase 8) e "session checkpoint" (Pi, glossário pré-existente da Fase 0) são conceitos DISTINTOS — nenhum texto/código/journal desta fase usa "checkpoint" desacompanhado do qualificador onde os dois poderiam ser confundidos. | Achado (e) do Gate 1; Domain-Driven Design §1.1/§1.12 (§4) | Glossário; todo o Grupo C |
 | **BR-7** | A resolução de modelo/papel por gate reusa `resolveModelForGate`/`evaluateModelPrecondition` (ADR 0008) — `conductor auto` nunca implementa uma segunda lógica de seleção; um gate cuja pré-condição de modelo recusa fail-closed produz a MESMA recusa que um `gate start` manual já produziria. | ADR 0008 D4 | FR-20, FR-21 |
 | **BR-8** | O `ConfirmChannel` do modo autônomo é construído vinculado ao MESMO `confirmOrDeny` que a Fase 4 já estabeleceu — nunca um canal sintético. É isto (não uma convenção de prompt) que torna auto-aprovação de um gate obrigatório ESTRUTURALMENTE impossível para o loop autônomo. | ADR 0005 §6 (herdado, §8.5) | FR-22, FR-23 |
