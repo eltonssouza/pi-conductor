@@ -20,15 +20,16 @@
  *     forbid: gone from the runtime's in-process view, still on disk. Exercised here directly against
  *     the REAL class -- no mocking.
  *
- * Both tests assert the CORRECT/intended behavior (never the current buggy one), so both fail for a real
- * reason today (Gate 5 discipline: every new test is RED before Gate 6 exists) rather than passively
- * documenting the bug as a green characterization test would. (a) turns GREEN once the vendor package
- * widens its export. (b) is a permanent regression guard proving *why* `runLogout` (Gate 6) must never
- * compose on `RuntimeCredentials`/`ModelRuntime.removeRuntimeApiKey` alone -- see `commands/logout.test.ts`'s
- * own F2(b2) test for the corresponding assertion against the not-yet-existing `runLogout` itself, which
- * is the test that actually needs to go green at Gate 6 (this file's (b) test exercises vendor code this
- * repo does not own and is not expected to fix; it exists to make the reason `runLogout` must be composed
- * differently undeniable, not to be "fixed" itself).
+ * Both tests assert the CORRECT/intended behavior (never the current buggy one). (a) turns GREEN once the
+ * vendor package widens its export -- this repo's own Gate 6 fix, so it is a normal `it()`. (b) is a
+ * *permanent* regression guard proving *why* `runLogout` (Gate 6) must never compose on
+ * `RuntimeCredentials`/`ModelRuntime.removeRuntimeApiKey` alone -- see `commands/logout.test.ts`'s own
+ * F2(b2) test for the corresponding assertion against `runLogout` itself, which is the one that actually
+ * needed to go green at Gate 6. (b) exercises vendor code this repo does not own and is not expected to
+ * fix, so per Gate 7's "pipeline must be green, no exceptions" it is written with vitest's `it.fails` --
+ * the suite reports GREEN today (the bug is confirmed present) and would flip RED, on purpose, the day the
+ * vendor fixes `RuntimeCredentials` upstream -- at which point this file (not `runLogout`, which is already
+ * correct) is what needs revisiting.
  */
 
 import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
@@ -67,7 +68,9 @@ describe("F2(a) -- @earendil-works/pi-coding-agent must export AuthStorage (D8's
 });
 
 describe("F2(b) -- RuntimeCredentials.removeRuntimeApiKey only clears its in-memory overlay (the ghost-credential bug, T72)", () => {
-	it("leaves the credential in the WRAPPED store after removeRuntimeApiKey, proving the overlay is the only thing cleared", async () => {
+	// it.fails: this assertion is EXPECTED to fail against today's vendor code -- the test suite reports
+	// GREEN as long as it keeps failing for this reason. See the file header for why this isn't a normal it().
+	it.fails("leaves the credential in the WRAPPED store after removeRuntimeApiKey, proving the overlay is the only thing cleared", async () => {
 		const provider = "anthropic";
 		const wrapped = new InMemoryCredentialStore();
 		await wrapped.modify(provider, async () => ({ type: "api_key", key: "sk-ant-should-be-gone" }));

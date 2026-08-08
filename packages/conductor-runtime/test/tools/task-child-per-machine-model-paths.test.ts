@@ -156,5 +156,5 @@ it("D10/F3: the child's ModelRuntime is constructed with authPath/modelsPath OUT
 	// per-machine default apply" fix) passes this check by construction, since it never resolves
 	// into workspaceRoot in the first place.
 	expect(authPath === undefined || !isWithinRoot(authPath, workspace.root)).toBe(true);
-	expect(modelsPath === undefined || !isWithinRoot(modelsPath, workspace.root)).toBe(true);
+	expect(modelsPath == null || !isWithinRoot(modelsPath, workspace.root)).toBe(true);
 }, 20_000);

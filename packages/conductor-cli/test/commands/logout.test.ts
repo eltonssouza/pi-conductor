@@ -70,7 +70,10 @@ describe("runLogout <provider> -- edge case 3-adjacent, never throws on a mid-fl
 	/** A `CredentialStore` whose `delete` always rejects -- models a lock timeout / disk failure /
 	 * interrupted write mid-logout without needing a real OAuth flow to interrupt. */
 	class ThrowingDeleteStore implements CredentialStore {
-		constructor(private readonly inner: CredentialStore) {}
+		private readonly inner: CredentialStore;
+		constructor(inner: CredentialStore) {
+			this.inner = inner;
+		}
 		read(providerId: string, options?: AuthOperationOptions): Promise<Credential | undefined> {
 			return this.inner.read(providerId, options);
 		}

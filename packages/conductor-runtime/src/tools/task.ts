@@ -540,9 +540,21 @@ export function createGovernedChildSessionSpawner(
 	return async (input: SpawnChildSessionInput): Promise<SpawnChildSessionResult> => {
 		const agentDir = join(input.workspaceRoot, ".conductor-agent");
 
+		// D10/F3 (Fase 7, docs/adr/0008-fase7-model-routing-and-providers.md §1.1 finding F3, §2 D10,
+		// §14.2, §15 S2; gate3-addendum-fase7.md secure-default 65): the child's model
+		// credential/catalog paths must NEVER resolve inside `workspaceRoot` -- a hostile clone could
+		// plant `.conductor-agent/models.json` declaring an `openai-compatible` provider with an
+		// attacker `baseUrl` + inline `apiKey` (both permitted by the vendor's model-config.ts schema),
+		// which was harmless only while GAP-5's by-reference model inheritance kept this file
+		// unconsulted for model SELECTION -- it stops being harmless the moment per-role resolution
+		// reads it. Fix: omit `authPath`/`modelsPath` entirely, exactly like `chat.ts`'s own
+		// `defaultCreateModelRuntime` already does for the PARENT session -- `ModelRuntime.create` then
+		// falls back to its own per-machine defaults (`getAgentDir()/auth.json`,
+		// `getAgentDir()/models.json`), never a workspace-scoped path. `agentDir` itself is unaffected
+		// and still used below for the child's session/extension/skill loading (DefaultResourceLoader,
+		// createAgentSession) -- an unrelated, legitimately workspace-scoped concern this fix does not
+		// touch.
 		const baseModelRuntime = await ModelRuntime.create({
-			authPath: join(agentDir, "auth.json"),
-			modelsPath: join(agentDir, "models.json"),
 			allowModelNetwork: false,
 		});
 		// ADR §5.1: every model turn the child makes is itself budget-guarded, not just the one

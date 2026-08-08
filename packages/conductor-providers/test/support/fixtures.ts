@@ -55,6 +55,17 @@ export interface CandidateFixture {
 	ref: ModelRefFixture;
 	rank: number;
 	declaredIn: "project-policy" | "user-policy" | "builtin-default";
+	/** Embedded per-CANDIDATE (not looked up later from the flat `credentials`/`availability` maps below)
+	 * -- deliberately, so two candidates sharing a provider (e.g. resolution-two-floor-fallback.test.ts's
+	 * "claude-primary" vs. a healthy same-provider alternate) can carry genuinely different statuses. In
+	 * real production this pair is always consistent (one provider, one reachability fact -- `buildResolutionContext`
+	 * copies the SAME provider-level status onto every candidate of that provider), but the fixture's own
+	 * flat, provider-KEYED maps below would silently OVERWRITE an earlier candidate's status when a second
+	 * candidate for the same provider is registered -- exactly the footgun a "same provider, different
+	 * current state" test needs to avoid. See this module's own top-of-file comment: "Gate 6 is free to
+	 * reshape the CONTAINER... as long as it keeps producing the same OBSERVABLE resolutions". */
+	credential: CredentialStatusFixture;
+	availability: AvailabilityStatusFixture;
 }
 
 export interface ResolutionContextFixture {
@@ -127,7 +138,17 @@ export function registerCandidate(
 		ctx.bindingsByRole[role] = [];
 	}
 	const list = ctx.bindingsByRole[role];
-	list.push({ ref, rank: candidate.rank, declaredIn: candidate.declaredIn });
+	list.push({
+		ref,
+		rank: candidate.rank,
+		declaredIn: candidate.declaredIn,
+		credential: candidate.credential,
+		availability: candidate.availability,
+	});
+	// Flat, provider-keyed maps: kept for the R46/T65 canary shape (a provider with a VISIBLE credential
+	// but NO binding at all -- resolution-env-credential-canary.test.ts sets these directly without ever
+	// calling registerCandidate). Not consulted by the selection algorithm itself, which reads only the
+	// per-candidate fields embedded above.
 	ctx.credentials[candidate.provider] = candidate.credential;
 	ctx.availability[candidate.provider] = candidate.availability;
 	ctx.catalog[catalogKey(candidate.provider, candidate.modelId)] = fixtureModel({
