@@ -22,6 +22,7 @@ import { join } from "node:path";
 import { createGateStateStore } from "@conductor/runtime";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createPersistedGateStateStore } from "../../src/commands/gate-store.ts";
+import { alwaysInteractiveWitness } from "../support/interactivity-witness.ts";
 import { alwaysSatisfiedModelResolutionPort } from "../support/model-resolution-port.ts";
 import { createScratchProject, type ScratchProject } from "../support/scratch.ts";
 
@@ -46,12 +47,16 @@ function gatesDir(): string {
 function makeCliStore() {
 	// `modelResolutionPort` is required since ADR 0008 §21/D11 -- see test/support/model-resolution-port.ts
 	// for why this stub is a statement of scope, not a disabled check. This file's subject is what
-	// `reject()` writes as a Decision `kind`, not model routing.
+	// `reject()` writes as a Decision `kind`, not model routing. `isInteractive` is required since Gate 8
+	// loop-back finding 5 -- this file's subject is `reject()`, not `approve()`'s D3 layer 2, so an
+	// "interactive" double is the correct explicit statement of scope (see
+	// test/support/interactivity-witness.ts).
 	return createPersistedGateStateStore({
 		gatesDir: gatesDir(),
 		repoId: REPO_ID,
 		branch: BRANCH,
 		modelResolutionPort: alwaysSatisfiedModelResolutionPort(),
+		isInteractive: alwaysInteractiveWitness(),
 	});
 }
 

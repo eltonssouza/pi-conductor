@@ -28,6 +28,7 @@ import { type ResolveEvidenceRefContext, TOTAL_FLOW_GATES } from "@conductor/run
 import type { CredentialStore } from "@earendil-works/pi-ai";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { runAuthStatus } from "./commands/auth.ts";
+import { runAuto } from "./commands/auto.ts";
 import { runChat } from "./commands/chat.ts";
 import { runConfigGet, runConfigSet, runConfigShow } from "./commands/config.ts";
 import { doctorExitCode, formatDoctorReport, runDoctor } from "./commands/doctor.ts";
@@ -35,6 +36,7 @@ import {
 	type EvidenceAttachment,
 	type EvidenceRef,
 	formatGateStatusReport,
+	type InteractivityWitness,
 	runGateApprove,
 	runGateCalibrate,
 	runGateEvidence,
@@ -42,7 +44,11 @@ import {
 	runGateStart,
 	runGateStatus,
 } from "./commands/gate.ts";
-import { createPersistedGateStateStore, resolveGateGitContext } from "./commands/gate-store.ts";
+import {
+	createPersistedGateStateStore,
+	defaultInteractivityWitness,
+	resolveGateGitContext,
+} from "./commands/gate-store.ts";
 import { describeInitOutcome, initExitCode, runInit } from "./commands/init.ts";
 import {
 	DEFAULT_CAPTURE_CONFIG,
@@ -98,6 +104,26 @@ export interface CliIO {
 	 */
 	homeDir?: string;
 	/**
+	 * D3 layer 2 (Gate 8 loop-back, ADR 0009 §5.3, finding 5): a TEST SEAM ONLY, threaded straight
+	 * through to `createPersistedGateStateStore`'s `isInteractive` option inside `runGateCommand` --
+	 * mirrors `homeDir`/`tty` above's exact optional/backward-compatible shape. Production wiring
+	 * (`bin/conductor.js`) never sets this, so it always falls back to the REAL production witness
+	 * (`gate-store.ts`'s `defaultInteractivityWitness`, reading `process.stdin`/`process.stdout` directly).
+	 *
+	 * Why this exists, separate from `tty` above: `tty` is D3 LAYER 1 (which `ConfirmChannel` gets
+	 * constructed -- an in-memory `TtyStreams` double is enough to simulate a real interactive prompt for
+	 * that layer). `isInteractive` is the INDEPENDENT layer 2 witness, deliberately reading the real
+	 * process's own TTY state rather than the injected `tty` streams (ADR §5.3's own "a code path
+	 * distinct from `io.tty`" requirement) -- which means a test that only fakes `tty` (simulating a real
+	 * human answering "y" at a real terminal) is, correctly, still blocked by layer 2 under a test runner
+	 * that has no real TTY of its own (`process.stdin.isTTY` is `undefined` under `vitest`). A test whose
+	 * SUBJECT is the genuine interactive happy path (not layer 2 itself) states that explicitly by passing
+	 * `isInteractive: () => true` here -- the same "double a real, out-of-process dependency" discipline
+	 * `createModelRuntime`/`createCredentialStore` below already establish, applied to a second
+	 * per-process (not per-workspace) piece of real state.
+	 */
+	isInteractive?: InteractivityWitness;
+	/**
 	 * GATE 8 loop-back (Fase 7): TEST SEAMS ONLY for the four model/credential commands, in the exact
 	 * optional/backward-compatible shape `tty`/`homeDir` above already established, and mirroring
 	 * `ChatOptions.createModelRuntime` (`commands/chat.ts:106`) one-for-one. Production wiring
@@ -122,6 +148,8 @@ Usage:
   conductor config get <key>
   conductor config set <key> <value>
   conductor chat
+  conductor auto "<demand>" [--budget <N>] [--risk=low]
+  conductor auto --continue <slug> [--budget <N>]
   conductor roles list
   conductor skills list
   conductor gate status  [--demand <id>]
@@ -411,6 +439,11 @@ async function runGateCommand(args: string[], io: CliIO): Promise<number> {
 		repoId: gitContext.repoId,
 		branch: gitContext.branch,
 		modelResolutionPort,
+		// D3 layer 2 (Gate 8 loop-back finding 5): `io.isInteractive` (CliIO's own doc comment) is a TEST
+		// SEAM ONLY -- production (`bin/conductor.js`) never sets it, so this always falls back to the
+		// REAL production witness, reading the process's own TTY state via a code path distinct from
+		// `io.tty`/`resolveConfirmChannel(io.tty)` above (layer 1).
+		isInteractive: io.isInteractive ?? defaultInteractivityWitness,
 	});
 	// `io.homeDir` (test seam, CliIO's own header): defaults to the real per-machine home in production,
 	// exactly like every other `resolveJournalContext` call site.
@@ -727,6 +760,72 @@ async function runModelCommand(rest: string[], io: CliIO): Promise<number> {
 	return runModelsList({ io, ctx, ...(activeProvider !== undefined ? { activeProvider } : {}) });
 }
 
+/**
+ * Fase 8 (ADR 0009-fase8-autonomous-mode.md §3.1/§16): `conductor auto <demand>` / `--continue [slug]`
+ * / `--budget <N>` / `--risk=low` -- the composition root for `runAuto`, following this file's own
+ * flag-parsing convention (`parseFlags`) with one addition: `--risk=low` uses `--flag=value` syntax
+ * (matching the CLI grammar the ADR/spec locked, `--risk=low`, not `--risk low`), so it is parsed
+ * separately from the space-separated flags `parseFlags` already handles.
+ */
+async function runAutoCommand(args: string[], io: CliIO): Promise<number> {
+	let continueSlug: string | undefined;
+	let budgetTokens: number | undefined;
+	let riskLow = false;
+	const demandParts: string[] = [];
+
+	let index = 0;
+	if (args[0] === "--continue") {
+		const maybeSlug = args[1];
+		if (maybeSlug === undefined || maybeSlug.startsWith("--")) {
+			io.stderr.write("conductor auto: --continue requires a slug. Usage: conductor auto --continue <slug>\n");
+			return 1;
+		}
+		continueSlug = maybeSlug;
+		index = 2;
+	}
+
+	for (; index < args.length; index++) {
+		const arg = args[index];
+		if (arg === "--budget") {
+			const raw = args[index + 1];
+			const parsed = raw === undefined ? Number.NaN : Number(raw);
+			if (!Number.isFinite(parsed) || parsed <= 0) {
+				io.stderr.write(`conductor auto: --budget must be a positive number (got "${raw ?? ""}")\n`);
+				return 1;
+			}
+			budgetTokens = parsed;
+			index++;
+		} else if (arg === "--risk=low") {
+			riskLow = true;
+		} else if (arg?.startsWith("--")) {
+			io.stderr.write(`conductor auto: unrecognized flag "${arg}"\n`);
+			return 1;
+		} else if (arg !== undefined) {
+			demandParts.push(arg);
+		}
+	}
+
+	if (continueSlug === undefined && demandParts.length === 0) {
+		io.stderr.write(
+			'conductor auto: usage: conductor auto "<demand>" [--budget <N>] [--risk=low] | conductor auto --continue <slug> [--budget <N>]\n',
+		);
+		return 1;
+	}
+
+	try {
+		return await runAuto({
+			demand: demandParts.join(" "),
+			...(budgetTokens !== undefined ? { budgetTokens } : {}),
+			...(riskLow ? { riskLow: true } : {}),
+			...(continueSlug !== undefined ? { continueSlug } : {}),
+			io: { cwd: io.cwd, stdout: io.stdout, stderr: io.stderr, ...(io.tty !== undefined ? { tty: io.tty } : {}) },
+		});
+	} catch (error) {
+		io.stderr.write(`conductor auto: ${describeError(error)}\n`);
+		return 1;
+	}
+}
+
 export async function runCli(argv: string[], io: CliIO): Promise<number> {
 	const [command, ...rest] = argv;
 
@@ -744,6 +843,8 @@ export async function runCli(argv: string[], io: CliIO): Promise<number> {
 				return await runSkillsCommand(rest, io);
 			case "gate":
 				return await runGateCommand(rest, io);
+			case "auto":
+				return await runAutoCommand(rest, io);
 			case "library":
 				return await runLibraryCommand(rest, io);
 			case "journal":

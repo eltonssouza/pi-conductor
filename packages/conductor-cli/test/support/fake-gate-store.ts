@@ -18,6 +18,12 @@
  * constant, `builtin-roles-data.ts` — ADR 0005 §4/R23/BR-10, `{3,5,7,8,9}`), now re-exported from that
  * package's `src/index.ts` barrel — the single source of truth this fake mirrors rather than
  * hardcodes, so it can never silently drift from the real floor.
+ *
+ * FASE 8 GATE 5 (docs/adr/0009-fase8-autonomous-mode.md §14/§16, N1): `approveAuto` below is an
+ * unconditional Gate-5 throw, matching `../../src/commands/gate.ts`'s own `GateStateStoreView`
+ * extension — this fake stays a stub for that one method until Gate 6 wires its real
+ * `MANDATORY_GATES`-guarded behavior (see `test/commands/gate-approve-auto-mandatory-guard.test.ts`),
+ * even though this file's other six methods below are already a genuinely working fake.
  */
 
 import { MANDATORY_GATES } from "@conductor/config";
@@ -168,6 +174,36 @@ export function createFakeGateStore(options: { branch?: string } = {}): FakeGate
 
 		getRaw(demandId) {
 			return demands.get(demandId);
+		},
+
+		approveAuto(demandId, gate) {
+			// Fase 8 / N1, GATE 6: mirrors createPersistedGateStateStore's own approveAuto -- the
+			// MANDATORY_GATES guard is checked FIRST, before any demand/gate state is even touched (the
+			// it.each in gate-approve-auto-mandatory-guard.test.ts never calls start() first).
+			if (MANDATORY_GATES.has(gate)) {
+				throw new GateCommandError(
+					`cannot auto-approve gate ${gate}: it is a mandatory gate (N1/R55) -- a mandatory gate is never auto-cunhado, only a genuine human sign-off can close it`,
+				);
+			}
+			const demand = ensureDemand(demandId);
+			const record = demand.gates.get(gate);
+			if (!record || record.status === "not-started" || record.status === "rejected") {
+				throw new GateCommandError(`cannot auto-approve gate ${gate}: it was never started (or is rejected)`);
+			}
+			if (record.status === "approved") {
+				return snapshot(demandId);
+			}
+			// Gate 8 loop-back, finding 1: mirrors the real store's own guard (gate-store.ts) -- an
+			// auto-approved gate is never a hollow completion, even when non-mandatory.
+			if (record.evidenceCount === 0) {
+				throw new GateCommandError(
+					`cannot auto-approve gate ${gate}: no evidence attached -- an auto-approved gate can never be a hollow completion, even when non-mandatory (Gate 8 loop-back finding 1)`,
+				);
+			}
+			record.status = "approved";
+			record.completedAt = new Date().toISOString();
+			record.approvalsCount += 1;
+			return snapshot(demandId);
 		},
 	};
 }

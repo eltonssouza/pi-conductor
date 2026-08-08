@@ -18,6 +18,7 @@ import { openJournalReader } from "@conductor/diary";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { runCli } from "../../src/cli.ts";
 import { resolveJournalContext } from "../../src/commands/journal.ts";
+import { alwaysInteractiveWitness } from "../support/interactivity-witness.ts";
 import { createCapturingIo } from "../support/io.ts";
 import { createScratchProject, type ScratchProject } from "../support/scratch.ts";
 import { createScratchHome, type ScratchHome } from "../support/scratch-home.ts";
@@ -344,7 +345,11 @@ describe("conductor gate (end-to-end dispatch) -- substantive behavior, against 
 describe("conductor gate approve -- REAL TTY confirmation channel (Gate 6 loop-back, decision 1)", () => {
 	it('a simulated TTY answering "y" drives a NON-mandatory gate (Gate 1) all the way to a genuine status:"approved" -- the positive path that did not exist before this loop-back', async () => {
 		const fake = fakeTtyStreams();
-		const { io, stdout } = createCapturingIo(project.root, fake.streams);
+		// D3 layer 2 (Gate 8 loop-back finding 5): `fake.streams` only simulates LAYER 1 (which
+		// ConfirmChannel gets built); the independent layer 2 witness reads the real process's own TTY
+		// state, which vitest's own process never has -- this test's SUBJECT is the genuine interactive
+		// happy path (not layer 2 itself), so it states that explicitly.
+		const { io, stdout } = createCapturingIo(project.root, fake.streams, undefined, alwaysInteractiveWitness());
 
 		const approvePromise = runCli(["gate", "approve", "--gate", "1"], io);
 		fake.answer("y");
@@ -422,7 +427,14 @@ describe("conductor gate approve -- REAL TTY confirmation channel (Gate 6 loop-b
 		expect(evidenceCode).toBe(0);
 
 		const fake = fakeTtyStreams();
-		const { io: approveIo, stdout: approveStdout } = createCapturingIo(project.root, fake.streams);
+		// D3 layer 2 (Gate 8 loop-back finding 5) -- see the sibling "REAL TTY confirmation channel" test
+		// above for why this seam is required for a genuine approved outcome under a test runner.
+		const { io: approveIo, stdout: approveStdout } = createCapturingIo(
+			project.root,
+			fake.streams,
+			undefined,
+			alwaysInteractiveWitness(),
+		);
 		const approvePromise = runCli(["gate", "approve", "--gate", "3"], approveIo);
 		fake.answer("y");
 		const approveCode = await approvePromise;
@@ -597,7 +609,10 @@ describe("conductor gate approve/reject -- gate-concluded diary capture (Gate 6 
 		expect(startCode).toBe(0);
 
 		const fake = fakeTtyStreams();
-		const approveIo = createCapturingIo(project.root, fake.streams, home.dir);
+		// D3 layer 2 (Gate 8 loop-back finding 5) -- this test's SUBJECT is the diary capture that fires
+		// on a genuinely-approved gate, not layer 2 itself; see "REAL TTY confirmation channel"'s own
+		// first test for the full rationale.
+		const approveIo = createCapturingIo(project.root, fake.streams, home.dir, alwaysInteractiveWitness());
 		const approvePromise = runCli(["gate", "approve", "--gate", "1"], approveIo.io);
 		fake.answer("y");
 		const approveCode = await approvePromise;
