@@ -134,6 +134,31 @@ export const UNIVERSAL_FALLBACK_RANK: number = Math.max(
 	...Object.values(MODEL_ROLE_RANK),
 );
 
+/**
+ * GATE 9 (pentest Fase 7, achado F-G9-1 / T67 / R48) -- the TOFU pin subject for a DOWNWARD
+ * `gate -> GateModelRole` remap, and the single place its hash is computed.
+ *
+ * ADR 0008 §8.2's table required this pin from the start; `parseModelPolicy` even computed the
+ * `downward-gate-remap-requires-pin` diagnostic correctly. Nothing ever CONSUMED that diagnostic (the
+ * Gate 9 pentest confirmed it empirically: a repo-supplied `.conductor/config.json` remapping all five
+ * mandatory gates to `@smol` was honoured in full, floor and all), so the rule existed only as text.
+ * Enforcement now happens HERE, at the same border that already gates untrusted endpoints
+ * (`classifyBindingTrust`) -- one trust store, one place a pin is checked.
+ *
+ * The subject is `(gate, declared role)` and NOT the whole policy document on purpose: pinning the
+ * document would invalidate every pin on any unrelated edit (a new binding, a formatting change),
+ * which trains people to re-grant blindly -- the failure mode that makes TOFU ceremonial. Pinning the
+ * specific authority being granted keeps the grant meaningful and narrow (least privilege, Secure and
+ * Reliable Systems Design §3.2).
+ */
+export function gateRoleRemapPinSubject(gate: number, declared: GateModelRole): string {
+	return `gate-role-remap::${gate}::${declared}`;
+}
+
+export function gateRoleRemapPinHash(gate: number, declared: GateModelRole): string {
+	return createHash("sha256").update(gateRoleRemapPinSubject(gate, declared)).digest("hex");
+}
+
 export interface BuildResolutionContextOptions {
 	workspaceRoot: string;
 	modelRuntime: ModelRuntime;
@@ -154,14 +179,47 @@ export async function buildResolutionContext(options: BuildResolutionContextOpti
 
 	const gateModelRoles: Record<
 		number,
-		{ role: GateModelRole; source: "builtin" | "project-policy"; pinned?: boolean }
+		{
+			role: GateModelRole;
+			source: "builtin" | "project-policy";
+			pinned?: boolean;
+			unpinnedOverride?: GateModelRole;
+		}
 	> = {};
 	for (const [gateKey, role] of Object.entries(DEFAULT_GATE_MODEL_ROLES)) {
 		gateModelRoles[Number(gateKey)] = { role, source: "builtin" };
 	}
 	if (policy?.gateRoles) {
 		for (const [gateKey, role] of Object.entries(policy.gateRoles)) {
-			gateModelRoles[Number(gateKey)] = { role, source: "project-policy" };
+			const gate = Number(gateKey);
+			const builtin = DEFAULT_GATE_MODEL_ROLES[gate];
+			// F-G9-1/T67/R48, ADR 0008 §8.2 rows 1-2. An UPWARD (or equal-rank) remap can only make the
+			// floor stricter, so it opens nothing and needs no pin. A DOWNWARD remap is T67 realized by
+			// configuration -- a repo file lowering the tier a gate demands, mandatory gates included --
+			// and is honoured only against a TOFU pin. Rank comparison, never name plausibility (§8.2's own
+			// `@plan`-for-Gate-8 worked example is a downward remap that "sounds" reasonable).
+			const isDowngrade =
+				builtin !== undefined && DEFAULT_GATE_MODEL_ROLE_RANK[role] < DEFAULT_GATE_MODEL_ROLE_RANK[builtin];
+			if (!isDowngrade) {
+				gateModelRoles[gate] = { role, source: "project-policy" };
+				continue;
+			}
+			let pinned = false;
+			try {
+				pinned = trust.isTrusted(gateRoleRemapPinHash(gate, role));
+			} catch {
+				pinned = false; // R49(iii): a throwing trust store degrades to "not pinned", never to "pinned".
+			}
+			if (pinned) {
+				gateModelRoles[gate] = { role, source: "project-policy", pinned: true };
+				continue;
+			}
+			// §8.2 verbatim: "Sem pin, o default built-in prevalece e a divergência é reportada." Both
+			// halves matter -- silently dropping the override would delete the very fact a user needs to
+			// understand why their policy did nothing (Managing Software Complexity §3.12, the same
+			// grounding §21 already leans on).
+			const current = gateModelRoles[gate];
+			if (current) gateModelRoles[gate] = { ...current, unpinnedOverride: role };
 		}
 	}
 

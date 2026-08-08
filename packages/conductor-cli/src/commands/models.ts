@@ -36,12 +36,24 @@ export interface CliIO {
 	stderr: { write(chunk: string): void };
 }
 
-export interface RunModelsListOptions {
+/**
+ * F-G9-3/T66/R47 (Gate 9 pentest): the project's OWN provider (from the flat `provider.model`), which
+ * anchors the same-provider egress floor (BR6). It was never supplied by any production caller, which
+ * left `resolveModelForGate`'s stage-7 region B (`crossProviderAtTier`) permanently empty and made a
+ * repo-supplied policy able to route a mandatory gate to a DIFFERENT provider with no `consent-required`
+ * refusal at all. Optional here only so the ADR-§16 signatures stay source-compatible for the
+ * fixture-driven unit tests; every production call site passes it.
+ */
+interface ActiveProviderOption {
+	activeProvider?: string;
+}
+
+export interface RunModelsListOptions extends ActiveProviderOption {
 	io: CliIO;
 	ctx: ResolutionContext;
 }
 
-export interface RunModelsWhyOptions {
+export interface RunModelsWhyOptions extends ActiveProviderOption {
 	io: CliIO;
 	ctx: ResolutionContext;
 	gate: number;
@@ -50,8 +62,11 @@ export interface RunModelsWhyOptions {
 /** The real pipeline (ADR §5/D3), per gate. `purpose: "report"` is §16's own value for exactly this
  * caller: a visibility command, never a work-authorization point (those are P1/P2/P3, D4 §6.1).
  * `resolveModelForGate` is pure and never throws (R49(i)) -- there is nothing here to guard. */
-function resolutionFor(ctx: ResolutionContext, gate: number): ModelResolution {
-	return resolveModelForGate({ gate, purpose: "report" }, ctx);
+function resolutionFor(ctx: ResolutionContext, gate: number, activeProvider?: string): ModelResolution {
+	return resolveModelForGate(
+		{ gate, purpose: "report", ...(activeProvider !== undefined ? { activeProvider } : {}) },
+		ctx,
+	);
 }
 
 /** Sanitizes every string reachable from `value` (secure-default 66 / S3) -- applied universally
@@ -78,8 +93,15 @@ const s = sanitizeForTerminal;
  * repo-supplied, untrusted policy (T73). */
 function formatResolutionStep(step: ResolutionStep): string {
 	switch (step.stage) {
-		case "gate-role":
-			return `  [gate-role] role=${s(step.role)} source=${s(step.source)}${step.pinned ? " (pinned)" : ""}`;
+		case "gate-role": {
+			// F-G9-1/T67/R48 (Gate 9 pentest): ADR 0008 §8.2's "a divergência é reportada" half. Without
+			// this the user sees a policy that silently did nothing and has no way to learn why.
+			const refused =
+				step.unpinnedOverride !== undefined
+					? ` unpinned-override=${s(step.unpinnedOverride)} (downward remap ignored -- built-in default prevails; a TOFU pin is required)`
+					: "";
+			return `  [gate-role] role=${s(step.role)} source=${s(step.source)}${step.pinned ? " (pinned)" : ""}${refused}`;
+		}
 		case "floor":
 			return `  [floor] gateRank=${step.gateRank}${step.personaRank !== undefined ? ` personaRank=${step.personaRank}` : ""} effective=${step.effective}`;
 		case "bindings":
@@ -167,14 +189,14 @@ function hasCredential(resolution: ModelResolution): boolean {
 /** FR-12: a 14-gate table; edge case 1 (zero providers configured anywhere) gets an explicit
  * `conductor login` pointer, never a silently blank/empty table. */
 export function runModelsList(options: RunModelsListOptions): number {
-	const { io, ctx } = options;
+	const { io, ctx, activeProvider } = options;
 	const rows: string[] = [];
 	let anyResolved = false;
 	let anyCredentialed = false;
 	let allResolvedViaFallback = true;
 
 	for (let gate = 1; gate <= TOTAL_FLOW_GATES; gate++) {
-		const resolution = resolutionFor(ctx, gate);
+		const resolution = resolutionFor(ctx, gate, activeProvider);
 		const label = `gate ${String(gate).padStart(2, "0")}`;
 		if (resolution.resolved) {
 			anyResolved = true;
@@ -210,14 +232,14 @@ export function runModelsList(options: RunModelsListOptions): number {
  * rejected by argument validation ALONE, before `ctx` is ever consulted (the ADR's own fail-closed
  * ordering: cheap, argument-level checks first). */
 export function runModelsWhy(options: RunModelsWhyOptions): number {
-	const { io, ctx, gate } = options;
+	const { io, ctx, gate, activeProvider } = options;
 
 	if (!Number.isInteger(gate) || gate < 1 || gate > TOTAL_FLOW_GATES) {
 		io.stderr.write(`gate ${gate} is out of range -- valid gates are 1-${TOTAL_FLOW_GATES}.\n`);
 		return 1;
 	}
 
-	const resolution = resolutionFor(ctx, gate);
+	const resolution = resolutionFor(ctx, gate, activeProvider);
 	const lines = [`Resolution trace for gate ${gate}:`, ...resolution.trace.steps.map(formatResolutionStep)];
 
 	if (resolution.resolved) {

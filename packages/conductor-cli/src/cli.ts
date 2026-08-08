@@ -58,6 +58,7 @@ import {
 	createGateModelResolutionPort,
 	defaultCreateCredentialStore,
 	defaultCreateModelRuntime,
+	resolveActiveProvider,
 } from "./commands/model-context.ts";
 import { runModelsList, runModelsWhy } from "./commands/models.ts";
 import { formatRolesListReport, runRolesList } from "./commands/roles.ts";
@@ -401,6 +402,9 @@ async function runGateCommand(args: string[], io: CliIO): Promise<number> {
 	const modelResolutionPort = await createGateModelResolutionPort({
 		workspaceRoot: io.cwd,
 		createModelRuntime: io.createModelRuntime ?? defaultCreateModelRuntime,
+		// F-G9-2 (Gate 9 pentest): o trust store do pin TOFU mora POR-MÁQUINA agora, então este
+		// caminho precisa do mesmo seam `homeDir` que o diário já usa -- em produção, o home real.
+		...(io.homeDir !== undefined ? { homeDir: io.homeDir } : {}),
 	});
 	const store = createPersistedGateStateStore({
 		gatesDir: join(io.cwd, ".conductor", "gates"),
@@ -696,7 +700,14 @@ async function runModelCommand(rest: string[], io: CliIO): Promise<number> {
 		return await runLogin({ ...(provider ? { provider } : {}), io, credentials, modelRuntime });
 	}
 
-	const ctx = await buildCliResolutionContext({ workspaceRoot: io.cwd, modelRuntime });
+	const ctx = await buildCliResolutionContext({
+		workspaceRoot: io.cwd,
+		modelRuntime,
+		...(io.homeDir !== undefined ? { homeDir: io.homeDir } : {}),
+	});
+	// F-G9-3 (Gate 9 pentest): `models`/`models why` tem que ancorar o piso do mesmo-provedor no
+	// MESMO valor que `gate start` usa, senão o diagnostico mente sobre a decisao de autorizacao.
+	const activeProvider = resolveActiveProvider(io.cwd);
 
 	if (args[0] === "why") {
 		const raw = args[1];
@@ -707,13 +718,13 @@ async function runModelCommand(rest: string[], io: CliIO): Promise<number> {
 			io.stderr.write(`conductor models why: expected a gate number 1-${TOTAL_FLOW_GATES}, got "${raw ?? ""}".\n`);
 			return 1;
 		}
-		return runModelsWhy({ io, ctx, gate });
+		return runModelsWhy({ io, ctx, gate, ...(activeProvider !== undefined ? { activeProvider } : {}) });
 	}
 	if (args.length > 0) {
 		io.stderr.write(`conductor models: unknown subcommand "${args[0]}". Usage: models | models why <N>\n`);
 		return 1;
 	}
-	return runModelsList({ io, ctx });
+	return runModelsList({ io, ctx, ...(activeProvider !== undefined ? { activeProvider } : {}) });
 }
 
 export async function runCli(argv: string[], io: CliIO): Promise<number> {

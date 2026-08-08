@@ -38,6 +38,8 @@
  * direção fail-closed correta (R54(ii): um endpoint não-oficial sem pin nunca é usado).
  */
 
+import { realpathSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import {
 	ConfigNotFoundError,
@@ -46,6 +48,7 @@ import {
 	readConfig,
 	resolveProjectModelPolicy,
 } from "@conductor/config";
+import { computeProjectId } from "@conductor/library";
 import {
 	type AvailabilityCache,
 	buildResolutionContext,
@@ -154,16 +157,49 @@ export function loadProjectModelInputs(workspaceRoot: string): ProjectModelInput
 	return { policy: resolved.policy, policyUnreadable: undefined, sessionModel };
 }
 
+/**
+ * **GATE 9 (pentest da Fase 7) — achado F-G9-2 / T73 / R54(ii): o pin não pode morar dentro do
+ * repositório que ele existe para desconfiar.**
+ *
+ * Até este fix o trust store de produção era `<workspaceRoot>/.conductor/model-policy-trust.json` —
+ * dentro do workspace, não coberto pelo `.conductor/.gitignore` (que só ignora `/sessions/`) e
+ * portanto **commitável e clonável**. O pentest provou o resultado end-to-end: um clone que planta a
+ * política hostil planta junto a própria aprovação dela, e `models why 9` passa a resolver para o
+ * endpoint do atacante. Um pin controlado pelo mesmo ator de quem ele deveria proteger não é um
+ * controle — é decoração. (Pior ainda: era o ÚNICO trust store do Conductor ausente de
+ * `defaultProtectedPaths()`, então as próprias ferramentas `write`/`edit` do agente podiam
+ * auto-concedê-lo — corrigido junto, em `workspace-policy.ts`.)
+ *
+ * O caminho passa a ser **por-máquina e por-projeto**, reusando LITERALMENTE a convenção que a Fase 6
+ * já estabeleceu para o diário (`resolveJournalContext`: `computeProjectId(realpathSync(cwd))` +
+ * `~/.conductor/<subsistema>/projects/<projectId>/`) — nenhuma convenção nova é inventada aqui, e o
+ * `~/.conductor/providers` inteiro entra em `defaultProtectedPaths()` exatamente como
+ * `~/.conductor/{library,diary}` já estão. Isto também alinha o código ao que o ADR 0008 §8.1 já
+ * dizia por escrito ("catálogo e credencial ... **por-máquina**") e ao que o cabeçalho deste próprio
+ * módulo já afirmava ("o trust store é lido do caminho por-máquina irmão do da política") — a
+ * divergência era entre a prosa e a implementação, e o pentest a encontrou pelo lado da prosa.
+ *
+ * Nenhum pin existente é quebrado por esta mudança: não há (nem nunca houve) comando que conceda um
+ * pin, então o conjunto de pins legítimos em produção é vazio por construção.
+ */
+export function resolveModelPolicyTrustStorePath(workspaceRoot: string, homeDir: string = homedir()): string {
+	const projectId = computeProjectId(realpathSync(workspaceRoot));
+	return join(homeDir, ".conductor", "providers", "projects", projectId, "model-policy-trust.json");
+}
+
 export interface BuildCliResolutionContextOptions {
 	workspaceRoot: string;
 	modelRuntime: ModelRuntime;
-	/** Test seam; produção resolve para `<workspaceRoot>/.conductor/model-policy-trust.json`. */
+	/** Test seam; produção resolve para o caminho POR-MÁQUINA de
+	 * `resolveModelPolicyTrustStorePath` (F-G9-2 — nunca mais um caminho dentro do workspace). */
 	trustStorePath?: string;
+	/** Test seam (mesma convenção de `CliIO.homeDir`); produção usa o home real da máquina. */
+	homeDir?: string;
 }
 
 export async function buildCliResolutionContext(options: BuildCliResolutionContextOptions): Promise<ResolutionContext> {
 	const trustStorePath =
-		options.trustStorePath ?? join(options.workspaceRoot, ".conductor", "model-policy-trust.json");
+		options.trustStorePath ?? resolveModelPolicyTrustStorePath(options.workspaceRoot, options.homeDir);
 	const { policy, policyUnreadable, sessionModel } = loadProjectModelInputs(options.workspaceRoot);
 	const ctx = await buildResolutionContext({
 		workspaceRoot: options.workspaceRoot,
@@ -187,8 +223,31 @@ export async function buildCliResolutionContext(options: BuildCliResolutionConte
  * `resolveForGate` é SÍNCRONO por contrato (§16), e é por isso que o `ResolutionContext` é construído
  * antes, na borda async: D3's "I/O nas bordas, política no meio", de ponta a ponta.
  */
-export function createCliModelResolutionPort(ctx: ResolutionContext): ModelResolutionPort {
-	return { resolveForGate: (request) => resolveModelForGate(request, ctx) };
+export function createCliModelResolutionPort(ctx: ResolutionContext, activeProvider?: string): ModelResolutionPort {
+	return {
+		// F-G9-3/T66/R47 (Gate 9 pentest): `activeProvider` anchors the same-provider egress floor
+		// (BR6). It was absent here, so stage 7's cross-provider region was permanently empty and a
+		// repo-supplied policy could route a MANDATORY gate to another provider -- satisfied by a merely
+		// ambient `source:"environment"` credential, the literal shape of the DEEPSEEK_API_KEY incident
+		// -- with no `consent-required` refusal. The request-level default must never be "no anchor":
+		// with no anchor there is no boundary to cross, and BR6 silently evaporates.
+		resolveForGate: (request) => {
+			// An explicit `activeProvider` on the request always wins; the injected one is the default a
+			// caller that does not know the project (e.g. `evaluateModelPrecondition`, whose contract is
+			// `{gate, purpose}` only) would otherwise leave empty.
+			const anchor = request.activeProvider ?? activeProvider;
+			return resolveModelForGate({ ...request, ...(anchor !== undefined ? { activeProvider: anchor } : {}) }, ctx);
+		},
+	};
+}
+
+/**
+ * O provedor que o projeto realmente escolheu (`provider.model` da Fase 1), que ancora o piso do
+ * mesmo-provedor (BR6/R47). Lido pela mesma função que o resto deste módulo já usa, de modo que
+ * "qual é o provedor ativo" tem uma definição só.
+ */
+export function resolveActiveProvider(workspaceRoot: string): string | undefined {
+	return loadProjectModelInputs(workspaceRoot).sessionModel?.provider;
 }
 
 /**
@@ -204,11 +263,19 @@ export function createCliModelResolutionPort(ctx: ResolutionContext): ModelResol
 export async function createGateModelResolutionPort(options: {
 	workspaceRoot: string;
 	createModelRuntime: () => Promise<ModelRuntime>;
+	/** Test seam (`CliIO.homeDir`); produção usa o home real — onde o trust store por-máquina vive. */
+	homeDir?: string;
 }): Promise<ModelResolutionPort> {
 	try {
 		const modelRuntime = await options.createModelRuntime();
-		const ctx = await buildCliResolutionContext({ workspaceRoot: options.workspaceRoot, modelRuntime });
-		return createCliModelResolutionPort(ctx);
+		const ctx = await buildCliResolutionContext({
+			workspaceRoot: options.workspaceRoot,
+			modelRuntime,
+			...(options.homeDir !== undefined ? { homeDir: options.homeDir } : {}),
+		});
+		// F-G9-3: `gate start` é o ponto de autorização (D4 P1) — é exatamente onde o piso do
+		// mesmo-provedor precisa de âncora, não só o comando de relatório.
+		return createCliModelResolutionPort(ctx, resolveActiveProvider(options.workspaceRoot));
 	} catch (error) {
 		const detail = error instanceof Error ? error.message : String(error);
 		return {

@@ -167,12 +167,25 @@ export function defaultProtectedPaths(workspaceRoot?: string): string[] {
 		join(home, ".conductor", "diary"),
 		// D10/S1 (Fase 7, secure-default 64) -- see this function's own doc comment above.
 		getAgentDir(),
+		// GATE 9 (pentest Fase 7, achado F-G9-2 / T73 / R54(ii)): the per-machine home of the model-policy
+		// TOFU trust store (`~/.conductor/providers/projects/<projectId>/model-policy-trust.json`, see
+		// conductor-cli's `resolveModelPolicyTrustStorePath`). This store decides whether a non-catalog
+		// provider endpoint and a downward mandatory-gate remap are authorized at all, so an agent able to
+		// write it could grant ITSELF the very trust the store exists to withhold -- the same
+		// confused-deputy reasoning that already protects `policy-trust.json`, `audit.jsonl` and
+		// `.conductor/gates/`, applied to the one trust store that was missing from this list.
+		join(home, ".conductor", "providers"),
 	];
 	if (workspaceRoot) {
 		paths.push(
 			join(workspaceRoot, ".conductor", "config.json"),
 			join(workspaceRoot, ".conductor", "policy.json"),
 			join(workspaceRoot, ".conductor", "policy-trust.json"),
+			// F-G9-2 (Gate 9 pentest, Fase 7): the LEGACY in-workspace location of the model-policy trust
+			// store. The store itself moved per-machine (entry above) precisely because a repo-supplied pin
+			// is no pin at all; this entry is defense in depth, so that a future call site reintroducing a
+			// workspace-scoped pointer cannot also make the file agent-writable.
+			join(workspaceRoot, ".conductor", "model-policy-trust.json"),
 			join(workspaceRoot, ".conductor", "audit.jsonl"),
 			// Fase 4 (ADR 0005 §9.1, gate3-addendum-fase4.md R28/T44): the GateState governance store
 			// is a NEW security boundary the store's own on-disk location exposes, not a new

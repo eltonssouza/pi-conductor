@@ -76,7 +76,21 @@ export interface CandidateView {
 }
 
 export type ResolutionStep =
-	| { stage: "gate-role"; role: GateModelRole; source: "builtin" | "project-policy"; pinned?: boolean }
+	| {
+			stage: "gate-role";
+			role: GateModelRole;
+			source: "builtin" | "project-policy";
+			pinned?: boolean;
+			/**
+			 * GATE 9 (pentest Fase 7, achado F-G9-1 / T67 / R48). ADR 0008 §8.2 row 2 requires a TOFU pin
+			 * for a DOWNWARD gate->role remap and states the fallback behaviour literally: "Sem pin, o
+			 * default built-in prevalece **e a divergência é reportada**". This field IS that report: the
+			 * `role`/`source` above are the built-in ones that prevailed, and this names the lower-ranked
+			 * role the (repo-supplied, untrusted) policy asked for and did not get. Present ONLY on that
+			 * refusal path -- a honoured remap (upward, or downward WITH a pin) never sets it.
+			 */
+			unpinnedOverride?: GateModelRole;
+	  }
 	| { stage: "floor"; gateRank: number; personaRank?: number; effective: number }
 	| { stage: "bindings"; role: GateModelRole; candidates: readonly CandidateView[] }
 	| {
@@ -138,7 +152,16 @@ export interface ResolvedCandidate {
 
 export interface ResolutionContext {
 	gateModelRoles: Readonly<
-		Record<number, { role: GateModelRole; source: "builtin" | "project-policy"; pinned?: boolean }>
+		Record<
+			number,
+			{
+				role: GateModelRole;
+				source: "builtin" | "project-policy";
+				pinned?: boolean;
+				/** F-G9-1/T67/R48 -- see the identically-named field on `ResolutionStep`'s `gate-role` variant. */
+				unpinnedOverride?: GateModelRole;
+			}
+		>
 	>;
 	bindingsByRole: Partial<Record<GateModelRole, readonly ResolvedCandidate[]>>;
 	/** Keyed by `${provider}::${modelId}` (see `catalogKey` in resolve.ts). */

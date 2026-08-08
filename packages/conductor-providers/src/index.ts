@@ -13,6 +13,8 @@ export { resolvePriceProvenance } from "./price-provenance.ts";
 export {
 	type BuildResolutionContextOptions,
 	buildResolutionContext,
+	gateRoleRemapPinHash,
+	gateRoleRemapPinSubject,
 	UNIVERSAL_FALLBACK_RANK,
 } from "./resolution-context.ts";
 export { resolveModelForGate } from "./resolve.ts";

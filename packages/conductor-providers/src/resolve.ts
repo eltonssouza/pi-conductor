@@ -206,6 +206,9 @@ export function resolveModelForGate(request: ResolveModelRequest, ctx: Resolutio
 		role: gateRoleEntry.role,
 		source: gateRoleEntry.source,
 		...(gateRoleEntry.pinned !== undefined ? { pinned: gateRoleEntry.pinned } : {}),
+		// F-G9-1/T67/R48: carries the REFUSED downward remap through to `models why`, so "the built-in
+		// prevailed" is visible rather than inferred from the absence of a change.
+		...(gateRoleEntry.unpinnedOverride !== undefined ? { unpinnedOverride: gateRoleEntry.unpinnedOverride } : {}),
 	});
 
 	// Stage 2: floor = max(rank(gate), rank(persona)) (D1.5) -- never refuses, only produces a number.
