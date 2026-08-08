@@ -1145,6 +1145,16 @@ export async function runGateDelegation(options: GateDelegationOptions): Promise
 		// (best-effort, never fabricated) the demand's spec path. Never the raw demand string/diff -- that
 		// untrusted-content boundary is untouched by this addition (see this function's own header and
 		// `GATE_DELEGATION_TEMPLATES`'s own data/instruction delimiter, FR-3b/GAP-C).
+		//
+		// Gate 9 INFO-1 (considered, deliberately NOT "fixed" with slugify): on a fresh run `options.branch`
+		// is always `feature/<slug>` (created by `ensureDemandBranch`, already safe -- confirmed live). On
+		// `--continue` it's the operator's real git branch, which git's own ref-name rules already forbid
+		// newlines/spaces in (cannot forge a new instruction line) -- unlike `demandId`/`specPath`, this
+		// value is never re-slugified before interpolation. Tried `slugify(options.branch)` here for
+		// consistency with that discipline; reverted -- it breaks the reference's own purpose (case-
+		// sensitive, `/`-structured git branch names collapse to a lowercase-hyphenated string a reader
+		// can no longer `git checkout`), degrading correctness for a residual the Gate 9 pentest itself
+		// rated negligible/optional (operator-controlled, not attacker-derived from untrusted content).
 		const specPath = resolveSpecReferencePath(options.io.cwd, options.demandId);
 		const referenceLines = [
 			`Gate: ${options.gate}`,
