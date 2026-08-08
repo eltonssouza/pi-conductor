@@ -83,6 +83,11 @@ export {
 	TOTAL_FLOW_GATES,
 } from "./gate-state-store.ts";
 export {
+	evaluateModelPrecondition,
+	type ModelPreconditionVerdict,
+	type ModelResolutionPort,
+} from "./model-precondition.ts";
+export {
 	decide,
 	type EffectivePolicyInput,
 	type EngineOutcome,

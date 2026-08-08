@@ -1,0 +1,26 @@
+{
+	"name": "@conductor/providers",
+	"version": "0.0.0",
+	"private": true,
+	"description": "Model routing engine (docs/adr/0008-fase7-model-routing-and-providers.md D2/D3/D5/D7/D9): resolveModelForGate/buildResolutionContext as a pure function over an already-read snapshot (never lanca, sempre devolve um ResolutionTrace); AvailabilityCache (probe sob demanda, em memoria, nunca no caminho quente -- D7); UsageLedgerWriter/UsageLedgerReader (molde grounding-ledger.ts, priced decidido pela PROVENIENCIA do catalogo do vendor, nunca pelo valor de Model.cost -- D9/F1). Depends on @conductor/config for ModelPolicy/GateModelRole (pure data, D1) and on @earendil-works/pi-ai + @earendil-works/pi-coding-agent for the vendor catalog/ModelRuntime this engine composes over (D2 -- never a second provider-HTTP implementation).",
+	"type": "module",
+	"main": "./src/index.ts",
+	"types": "./src/index.ts",
+	"scripts": {
+		"test": "vitest --run"
+	},
+	"dependencies": {
+		"@conductor/config": "0.0.0",
+		"@earendil-works/pi-ai": "^0.83.0",
+		"@earendil-works/pi-coding-agent": "^0.83.0"
+	},
+	"devDependencies": {
+		"@types/node": "24.12.4",
+		"@vitest/coverage-v8": "4.1.9",
+		"typescript": "5.9.3",
+		"vitest": "4.1.9"
+	},
+	"engines": {
+		"node": ">=22.19.0"
+	}
+}

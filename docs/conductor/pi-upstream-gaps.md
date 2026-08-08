@@ -224,6 +224,67 @@ concurrency need is met by one RPC subprocess per demand.
 
 ---
 
+## Gap 9 — `AuthStorage` (the hardened credential store) is not part of `pi-coding-agent`'s public API surface
+
+**Missing.** `packages/coding-agent/src/core/auth-storage.ts` defines `AuthStorage` (`:228`) — a
+mature, production `CredentialStore` implementation: per-provider atomic writes, `proper-lockfile`
+locking, `chmodSync(0o600)` on the file and `0700` on its directory, file-revision-aware caching. It
+is already used internally by this same package's own interactive TUI login dialog
+(`components/login-dialog.ts`/`oauth-selector.ts`). But `packages/coding-agent/src/index.ts` (the
+package's public entrypoint) re-exported only `readStoredCredential` — a neighboring, read-only,
+one-off helper from that *same source file* — never the `AuthStorage` class itself (confirmed by
+Fase 7 Gate 5's own characterization test,
+`packages/conductor-cli/test/vendor-credential-substrate.test.ts`'s F2(a): `typeof
+(await import("@earendil-works/pi-coding-agent")).AuthStorage === "undefined"`, RED before this fix).
+There was, before this fix, no *public* path from outside the vendor package to the hardened,
+persistent credential store — only to a one-shot synchronous reader of it.
+
+**Why it matters generically.** This is not a Conductor-specific need. Any embedder composing
+credential storage on top of `pi-coding-agent` — headless CLI commands that need to persist a login
+outside of the interactive TUI (`conductor login`/`logout`, ADR 0008 D8), a different frontend, a
+test harness that wants to exercise the real hardened store rather than reimplement it — hits the
+same wall: the *only* production-grade, atomic, locked, permission-hardened `CredentialStore` this
+package ships is invisible from outside it. The sole alternative available to any such embedder is
+implementing a second `CredentialStore` from scratch (its own lock file, its own `chmod`, its own
+atomic-write discipline) and handing it to `ModelRuntime.create({ credentials })` — reintroducing
+exactly the anti-pattern this same package's own dev-tool script (`packages/ai/src/cli.ts`,
+`writeFileSync("auth.json", ...)` in the CWD, no lock, no `chmod`) already demonstrates is unsafe.
+Composing on the vendor's own hardened primitive is strictly better than that alternative for every
+embedder in this position, not just this one.
+
+**Route: (b) small, genuinely-upstreamable Pi API addition.** A single-line, purely-additive,
+zero-logic-change export in the public barrel:
+
+```ts
+// packages/coding-agent/src/index.ts (already exports readStoredCredential from the same file)
+export { AuthStorage, readStoredCredential } from "./core/auth-storage.ts";
+```
+
+No new API surface is designed here — `AuthStorage` already exists, is already stable enough to back
+this package's own production TUI login flow, and this change only widens what is re-exported from a
+module already partially public. **§7.6 process applies in full going forward:** this monorepo-internal
+fork applies the one-line patch now (Fase 7 Gate 6, `packages/coding-agent/src/index.ts`) and composes
+`conductor login`/`logout` (ADR 0008 D8) directly over the now-exported class — never a second,
+parallel credential-storage implementation (BR-1/R50 of `gate3-addendum-fase7.md` forbid exactly
+that). The real upstream issue → PR → adopt → remove-patch cycle has not been filed yet (this remains a
+monorepo-internal divergence, documented honestly here per the pattern of Gaps 1–8 above, not hidden as
+already resolved upstream).
+
+**Also closes, downstream of this export, F2 (`gate3-addendum-fase7.md` T72, a real defect Gate 4/5
+found reading the code, not a hypothetical):** `RuntimeCredentials.removeRuntimeApiKey`
+(`packages/coding-agent/src/core/runtime-credentials.ts`) only clears an in-memory overlay `Map` —it
+never calls through to the wrapped, real `CredentialStore` — so a `logout` composed on
+`ModelRuntime.removeRuntimeApiKey` *alone* would leave the credential readable on disk after
+"removal" (a ghost credential). `runtime-credentials.ts` is deliberately **not** patched a second time
+for this (that would be a second, larger, non-additive vendor change beyond this Gap's one-liner);
+instead, now that `AuthStorage` is reachable, `conductor logout` (`packages/conductor-cli/src/commands/
+logout.ts`) calls the injected `CredentialStore`'s own `delete(provider)` method directly — the real,
+persistent removal path every `CredentialStore` (this one included) already implements — and only
+afterwards, best-effort, asks `ModelRuntime` to drop its in-process overlay too. Verified directly
+against the real vendor class (no mock) by `vendor-credential-substrate.test.ts`'s F2(b) test.
+
+---
+
 ## Additional gaps (not in the recon list — surfaced by the feature matrix)
 
 These are **Conductor-internal plan omissions**, not Pi shortfalls — route **(c)**, no Pi concern.
@@ -245,12 +306,13 @@ These are **Conductor-internal plan omissions**, not Pi shortfalls — route **(
 | Route | Gaps |
 |---|---|
 | **(a) Conductor-only, no Pi change** | 1, 4, 6 (now-layer), 7 |
-| **(b) upstreamable Pi API (with §7.6)** | 2 (tool metadata pass-through — clean, small, do it), 8 (default `PiServerService` — only if a daemon is needed) |
+| **(b) upstreamable Pi API (with §7.6)** | 2 (tool metadata pass-through — clean, small, do it), 8 (default `PiServerService` — only if a daemon is needed), 9 (`AuthStorage` public export — clean, small, **already patched**, Fase 7 Gate 6) |
 | **(c) Conductor-only forever** | 3, 5, A1, A2 |
 
-**Read of the whole list:** only **one** gap (#2) is a small, clearly-worth-doing upstream
-contribution; one more (#8) is upstreamable but premature. Everything else is either Conductor's own
-governance domain (c) or buildable on Pi's existing hooks with no upstream dependency (a). That is a
-healthy adopt-by-composition profile — it means the plan's "composition before fork" stance
-(plan §3.2, §7.6) is achievable without a standing fork, **provided Gap 6 is handled with the
-anti-corruption adapter and not by building on the stubbed `AgentHarness` v2.**
+**Read of the whole list:** two gaps (#2, #9) are small, clearly-worth-doing upstream contributions
+(#9 already applied as the sanctioned monorepo-internal patch, per Fase 7's ADR 0008 §14.2); one more
+(#8) is upstreamable but premature. Everything else is either Conductor's own governance domain (c) or
+buildable on Pi's existing hooks with no upstream dependency (a). That is a healthy adopt-by-composition
+profile — it means the plan's "composition before fork" stance (plan §3.2, §7.6) is achievable without a
+standing fork, **provided Gap 6 is handled with the anti-corruption adapter and not by building on the
+stubbed `AgentHarness` v2.**
