@@ -204,15 +204,18 @@ concatenação direta de texto não confiável como instrução ao vivo.**
 > demanda/diff pelas MESMAS ferramentas (`read`/`grep`) que qualquer subagente de `/cdt` já usa para ler
 > contexto do workspace — nunca por injeção direta no prompt.
 
-**FR-3b — [Flagado para Gate 3/4, não resolvido aqui] O prompt de delegação continua sendo um sink de
-prompt-injection genuíno, mesmo com o template fixo do FR-3.**
+**FR-3b — [GAP-C, Gate 3 T81/R62 — resolvido, não mais um residual nomeado sem postura] O prompt de
+delegação continua sendo um sink de prompt-injection genuíno mesmo com o template fixo do FR-3, e o
+template DEVE delimitar explicitamente dado de instrução como defesa em profundidade.**
 > Given a distinção de FR-3 (template fixo vs. referência) já reduz a superfície,
-> When o Gate 3 desta demanda modela ameaças,
-> Then ele deve tratar `SpawnChildSessionInput.prompt` como um sink de confused-deputy/prompt-injection real
-> (achado 2 do Gate 1) — o subagente ainda lê arquivos do workspace (que podem conter texto adversarial
-> plantado por um clone hostil, um PR malicioso, ou o próprio conteúdo da demanda) através de suas próprias
-> ferramentas. FR-3 não é uma defesa completa contra isso — apenas evita a forma mais óbvia (concatenação
-> direta). Esta FR existe para que a spec não finja resolver o que só nomeia.
+> When o template é escrito (Gate 4/6),
+> Then ele inclui delimitação EXPLÍCITA entre a instrução do template (confiável, autoral) e qualquer
+> conteúdo que o subagente venha a ler do workspace via suas próprias ferramentas (`read`/`grep`) — o mesmo
+> conteúdo pode incluir texto adversarial plantado por um clone hostil, um PR malicioso, ou a própria
+> demanda — e o template deve instruir o subagente a tratar esse conteúdo lido como DADO, nunca como
+> instrução do operador. Isto NÃO fecha o sink (`SpawnChildSessionInput.prompt` continua um sink de
+> confused-deputy real, achado 2 do Gate 1/T81) — é defesa em profundidade; a defesa DECISIVA é o backstop
+> herdado da Fase 8 (Gate 3/8/9 incolapsáveis sobre o diff real, nunca aterrissa sem humano) — R62.
 
 ### Grupo D — Spawn real via `createGovernedChildSessionSpawner`, nunca via `runTask`, nunca uma reimplementação (G4)
 
@@ -228,6 +231,17 @@ de autorização role-a-role de `runTask`, nunca um terceiro call site de `creat
 > ADR 0009 — nunca `--yes` implícito), `model` (FR-2), `sessionManager` (uma `SessionManager.create(...)` nova
 > disc-backed) — e chama `createGovernedChildSessionSpawner(sharedBudget)(spawnInput)`, a MESMA função
 > exportada que `session.ts`'s `createTaskTool` já injeta como colaborador `spawnChildSession`.
+>
+> **[GAP-D, Gate 3 T82/R63] `model`, `yesFlagActive:false`, `effectivePolicy` e `auditTrailWriter` são
+> INVARIANTES DE SEGURANÇA deste FR, não detalhe de fiação que o Gate 4/6 possa deixar cair em silêncio.**
+> `runAuto` é o ÚNICO populador de `SpawnChildSessionInput` (o bypass de `runTask` do FR-4 transfere essa
+> responsabilidade inteira pra ele) — omitir `model` reabre a auto-descoberta ambiental de credencial
+> (GAP-5 da Fase 3: `findInitialModel` do Pi cai pro "primeiro modelo com API key no ambiente", egress não
+> consentido); `yesFlagActive:true` por engano faria o filho auto-aprovar tools destrutivos; um
+> `effectivePolicy`/`auditTrailWriter` permissivo faria o gate do filho deixar de negar/auditar. Nenhum dos
+> 4 campos tem valor default seguro por omissão — a implementação (Gate 6) deve tornar os 4 obrigatórios no
+> tipo (nunca opcionais com fallback silencioso), e o Gate 8 deve verificar cada um explicitamente contra o
+> código real, não só contra os testes.
 >
 > `runAuto` **NÃO** chama `runTask`: a autorização `canSpawn(callerRole, targetRole)`/o cap de profundidade que
 > `runTask` impõe respondem à pergunta "um MODELO pode escolher delegar para este alvo?" — uma pergunta que
@@ -279,6 +293,17 @@ um set que só o observador real popula.**
 > para `gate evidence` manual) popula esse set com os `sessionId`s que ELE MESMO observou de
 > `createGovernedChildSessionSpawner` NESTA MESMA invocação de processo — nunca um `--ref` digitado por um
 > humano ou alegado por um modelo (edge case 7, §7).
+>
+> **[GAP-A, Gate 3 T83/R64 — a clarificação mais importante do loop-back] Em `--continue`, evidência de
+> delegação de gates ANTERIORES nunca é reconstruída por disco.** `runtimeRecordedDelegationSessionIds` é
+> populado SOMENTE pelo que a invocação de processo ATUAL observou de `createGovernedChildSessionSpawner` —
+> um `--continue` que retoma um run interrompido NÃO varre `.conductor-agent/sessions/tasks/` (ou qualquer
+> outro diretório disc-backed) pra "recuperar" `sessionId`s de spawns de uma invocação anterior, mesmo que
+> pareça conveniente. Esse diretório é gravável por um clone hostil ANTES do resume — proibir a
+> reconstrução fecha esse vetor por construção, não por disciplina de código lembrada depois. O `GateState`
+> persistido continua o registro autoritativo do que já foi APROVADO; gates cuja evidência de delegação não
+> sobreviveu ao fim do processo original simplesmente REFAZEM a delegação ao serem re-abertos (mesmo padrão
+> "retomar refaz o que não foi persistido pela via correta" do resto do FR-7/ADR 0009 §4).
 
 **FR-5b — `hasSufficientEvidenceForMandatoryGate` passa a reconhecer `ref.kind === "delegation"` no branch
 runtime-derived — sem tocar o branch `git-commit` já existente (Gate-8-loop-back da Fase 8).**
@@ -288,6 +313,15 @@ runtime-derived — sem tocar o branch `git-commit` já existente (Gate-8-loop-b
 > Then o check passa a `item.ref.kind === "test-run" || item.ref.kind === "delegation"` — o MESMO padrão de
 > extensão pontual que o Gate-8-loop-back já aplicou ao adicionar `git-commit` como fallback separado, nunca
 > uma reescrita da função inteira.
+>
+> **[GAP-B, Gate 3 T83/R64] Em voz alta, não só implícito: `{kind:"delegation"}` satisfaz o PRÉ-REQUISITO de
+> evidência, NUNCA a aprovação em si.** O invariante que `auto.ts:678-699` já garante (herdado da Fase 8,
+> intocado por esta demanda) continua valendo sem exceção: um gate MANDATÓRIO permanece `needs-human` quando
+> headless, independentemente de quanta evidência de delegação genuína esteja anexada — nenhuma fiação desta
+> demanda pode ligar "evidência suficiente" a "aprovação automática" para `{3,5,7,8,9}`. `{kind:"delegation"}`
+> só afeta se `hasSufficientEvidenceForMandatoryGate` retorna `true` (a PRÉ-CONDIÇÃO pra `approve()` tentar
+> mintar); o MINT em si continua exigindo `confirmResult===true ∧ isInteractive()===true` (D3, ADR 0009) ou
+> `approveAuto`/N1 pro ramo não-mandatório.
 
 **FR-5c — Gates não-mandatórios recebem a MESMA evidência genuína — fechando o workaround do Gate-8-loop-back
 (hollow-completion).**
