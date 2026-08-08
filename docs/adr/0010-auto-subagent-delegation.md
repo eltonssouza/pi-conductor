@@ -140,7 +140,7 @@ resolvido, fechando o §20 do ADR 0009.**
 | **D4** | **Templates de prompt por-gate num módulo `auto-delegation-templates.ts`; delimitação explícita dado/instrução (GAP-C).** | FR-3/3b | **R62** |
 | **D5** | **`SpawnChildSessionInput` construído por um builder `buildDelegationSpawnInput` que hardcoda `yesFlagActive:false` e DERIVA `effectivePolicy`/`auditTrailWriter` internamente — os 4 invariantes de segurança viram impossíveis de omitir *ou* afrouxar (GAP-D).** | FR-4 | **R63** |
 | **D6** | **Spawn direto via `createGovernedChildSessionSpawner(sharedBudget)`; reserve/settle por-delegação espelhando `runTask`, direção fail-safe na contabilidade (nunca `runTask`, nunca 2ª `SharedBudget`, nunca 3º `createAgentSession`).** | FR-4/4b | R66 |
-| **D7** | **5º `EvidenceRef` kind `{kind:"delegation",sessionId,role}`; `runtimeRecordedDelegationSessionIds` = `Set` mutável só-in-process de `runAuto`; `resolveEvidenceRef` novo case; `hasSufficientEvidenceForMandatoryGate` estendido a `test-run\|\|journal-entry\|\|delegation` (fechando junto a assimetria pré-existente de `journal-entry`).** | FR-5/5a/5b/5c | **R64** |
+| **D7** | **5º `EvidenceRef` kind `{kind:"delegation",sessionId,role}`; `runtimeRecordedDelegationSessionIds` = `Set` mutável só-in-process de `runAuto`; `resolveEvidenceRef` novo case; `hasSufficientEvidenceForMandatoryGate` estendido a `test-run\|\|delegation` — `journal-entry` PERMANECE excluído (ADR 0007 D2/T59/R40, correção deste ADR — ver §9).** | FR-5/5a/5b/5c | **R64** |
 | **D8** | **`"context-limit"` produzido pela 1ª vez: `result.tokenUsage.total ≥ 0.9 × model.contextWindow`, por-chamada, na fronteira do gate — nunca `sharedBudget.remaining()`.** | FR-6; **fecha ADR 0009 §20** | R66 |
 | **D9** | **Degradação: `runGateDelegation` é envolvida de modo que toda falha (recusa, tools-vazias, exceção de spawn, budget null) roteia pelo `stopRun` já existente → `needs-human`/`budget-exceeded`, nunca um caminho de parada novo, nunca um crash.** | FR-7/7b/7c | R66 |
 
@@ -417,19 +417,32 @@ outros dois sets runtime-derived). O doc comment de `resolveEvidenceRef` ("exata
 hostil). O registro autoritativo do que já foi APROVADO é o `GateState` persistido; gates cuja evidência de
 delegação não sobreviveu ao processo original simplesmente **refazem** a delegação ao reabrir (R64(ii)/T83).
 
-**FR-5b + a assimetria pré-existente (§9 Q2 / R64).** A linha 209 hoje é `provenance==="runtime-derived" &&
-ref.kind==="test-run"` — omite `journal-entry` apesar de o próprio arquivo tratá-los como equivalentes. O Gate 3
-addendum §5 avisou explicitamente: "não introduzir uma **terceira** assimetria ao adicionar `delegation`". Logo
-a **decisão** é estender a **todos os três** runtime-derived, fechando a assimetria de `journal-entry` na mesma
-linha:
+**FR-5b — CORREÇÃO deste ADR (achada pelo Gate 5, não uma decisão original correta).** A redação original
+desta seção chamava a exclusão de `journal-entry` do ramo runtime-derived de "assimetria pré-existente" e
+mandava fechá-la junto com `delegation`. **Isso estava ERRADO — não é uma assimetria acidental, é uma
+decisão de segurança DELIBERADA já tomada e testada:** ADR 0007 §4.2 D2 (Fase 6, fechando GAP-6A/T59/R40)
+decidiu exatamente o oposto — `journal-entry` prova **existência** de uma escrita, nunca **trabalho** real
+feito, e por isso NUNCA pode sozinho fechar um gate obrigatório (`journal-entry.append("fiz o trabalho")`
+sem nenhum trabalho real por trás é literalmente o ataque T59 que esse ADR existe para impedir). A exclusão
+é guardada por 3 testes travados, incluindo uma regressão de pentest do Gate 9 (`gate9-pentest.test.ts`:
+um journal-entry FORJADO nunca pode fechar gate obrigatório). O sdet do Gate 5 corretamente RECUSOU
+implementar a extensão de 3 ramos como escrito aqui e implementou só `test-run || delegation` — a correção
+certa. `journal-entry` PERMANECE excluído, exatamente como o ADR 0007 já decidiu:
 
 ```ts
 export function hasSufficientEvidenceForMandatoryGate(evidence: readonly EvidenceProvenanceInfo[]): boolean {
   if (evidence.some((i) => i.provenance === "runtime-derived" &&
-      (i.ref.kind === "test-run" || i.ref.kind === "journal-entry" || i.ref.kind === "delegation"))) return true;
+      (i.ref.kind === "test-run" || i.ref.kind === "delegation"))) return true;   // journal-entry NUNCA aqui (ADR0007 D2/T59)
   return evidence.some((i) => i.provenance === "author-declared" && i.ref.kind === "git-commit");  // fallback intocado
 }
 ```
+
+`delegation` entra na MESMA classe que `test-run` porque `DelegationEvidence` é observação do runtime de
+TRABALHO real (arquivos tocados, tokens gastos, transcript de sessão) — não é uma "escrita descritiva"
+como `journal-entry`. A analogia certa nunca foi "os 3 tipos runtime-derived são equivalentes", foi
+"`delegation` prova trabalho como `test-run` prova; `journal-entry` prova só existência de texto, sempre
+excluído". O Gate 3 addendum §5 (que esta seção citava incorretamente como base) na verdade nunca mandou
+fundir os 3 — essa leitura era um erro de interpretação deste ADR, não do addendum.
 
 **GAP-B estruturalmente enforced (não documentado):** `{kind:"delegation"}` só afeta se
 `hasSufficientEvidenceForMandatoryGate` retorna `true` — a **pré-condição** que `gate-store.ts:352` consulta.
@@ -538,7 +551,7 @@ backstop desta demanda — o que GAP-A/GAP-B existem para garantir.
 |---|---|---|
 | **R62** (prompt = template fixo + referências neutras; conteúdo lido é dado; backstop mandatório decisivo) | §6/D4 — módulo `auto-delegation-templates.ts`; delimitação dado/instrução explícita; `slugify` a única produtora de slug; residual aceito, limitado pelo backstop (e nem se abre sob GAP-2/D2) | **Confirmada** |
 | **R63** (`runAuto` único populador; reusa colaboradores, nunca omite/afrouxa um campo) | §7/D5 — builder hardcoda `yesFlagActive:false`/`depth:1`, deriva policy/audit dos MESMOS de `chat.ts`, `model` obrigatório do D3; sole-constructor preservado | **Confirmada** |
-| **R64** (evidência runtime-derived só-in-process; `--continue` não reconstrói; evidência ≠ aprovação) | §9/D7 — Set sem leitor de disco (GAP-A estrutural); `GateState` autoritativo; mint de mandatório intocado (GAP-B estrutural); assimetria `journal-entry` fechada para não criar uma terceira | **Confirmada** |
+| **R64** (evidência runtime-derived só-in-process; `--continue` não reconstrói; evidência ≠ aprovação) | §9/D7 — Set sem leitor de disco (GAP-A estrutural); `GateState` autoritativo; mint de mandatório intocado (GAP-B estrutural); `journal-entry` PERMANECE excluído (ADR 0007 D2/T59/R40, nunca uma "assimetria" a fechar) | **Confirmada** |
 | **R65** (resolução de delegação herda R46-R49/R61 sem relaxamento; cross-provider bloqueado no loop) | §5/D3 — mesmo `ModelResolutionPort`/âncora de provedor; `model` sempre populado; recusa → `needs-human` (fail-closed); cross-provider para o run, nunca cruza sozinho | **Confirmada** |
 | **R66** (seleção indexada por inteiro; bypass de `canSpawn` só no hop raiz→depth-1 tabelado; `SharedBudget` único; contabilidade reconciliada) | §4/§8/D2/D6 — `BUILTIN_GATE_ROLES[gate][0]` por inteiro; `depth:1`; instância única por referência; reserve/settle fail-safe; `context-limit` contra o `contextWindow` resolvido | **Confirmada** |
 
@@ -570,7 +583,8 @@ export interface ResolveEvidenceRefContext {
   runtimeRecordedDelegationSessionIds: ReadonlySet<string>;             // FR-5a — só-in-process (GAP-A)
 }
 // resolveEvidenceRef: + case "delegation" → runtime-derived sse ∈ set, senão ok:false
-// hasSufficientEvidenceForMandatoryGate: runtime-derived branch = test-run || journal-entry || delegation (FR-5b)
+// hasSufficientEvidenceForMandatoryGate: runtime-derived branch = test-run || delegation (FR-5b)
+// journal-entry PERMANECE excluído -- ADR 0007 D2/T59/R40, decisao deliberada, nunca "assimetria" a fechar
 
 // ===== @conductor/runtime — model-precondition.ts (N2: exportação aditiva) ============================
 export function describeRefusal(refusal: ResolutionRefusal, mandatoryGates: ReadonlySet<number>): string;  // era privado
@@ -611,7 +625,7 @@ export const CONTEXT_LIMIT_FRACTION = 0.9;   // D8 — default declarado, overri
 | spec FR-6 (Grupo F) | `context-limit` por-chamada | §10/D8 |
 | spec FR-7/7b/7c (Grupo G) | degradação graciosa | §11/D9 |
 | Gate 3 T81-T85 / R62-R66 | as 5 regras vinculantes | §13 |
-| spec §9 Q2 (assimetria `journal-entry`) | fechada junto ao 5º kind | §9/D7 |
+| spec §9 Q2 (assimetria `journal-entry`) | CORRIGIDO: não é assimetria, é ADR 0007 D2/T59 deliberado -- permanece excluído | §9/D7 |
 | spec §9 Q5 (doc "4 kinds") | atualizado para 5 | §9/D7 |
 | **Achados novos deste gate** | N1 (GAP-2 tools-vazias → recusa), N2 (`describeRefusal` privado → export) | §1.2, §4/D2, §5/D3 |
 
@@ -655,5 +669,8 @@ sessão: ADR 0010 fechado (proposto), 9 decisões (D1-D9), 2 achados novos de le
 papel-líder tools-vazias → delegação recusa fail-closed, "fiada mas inerte até GAP-2", paralelo honesto ao ADR
 0009 §20; N2: `describeRefusal` privado → exportação aditiva para satisfizer FR-2b), reconciliação R62-R66
 confirmada sem retorno ao Gate 3, 4 SLOs + 10 invariantes de error-budget zero. Fecha o §20 do ADR 0009
-(`context-limit` produzido por-chamada). Assimetria pré-existente `journal-entry` (§9 Q2) fechada junto ao 5º
-kind para não criar uma terceira.
+(`context-limit` produzido por-chamada). **Correção pós-Gate-5 registrada nesta revisão:** a redação original
+desta seção tratava a exclusão de `journal-entry` como "assimetria pré-existente" a fechar junto ao 5º kind
+— errado; é a decisão deliberada ADR 0007 D2/T59/R40 (Fase 6), guardada por regressão de pentest do Gate 9.
+O sdet do Gate 5 recusou implementar a extensão de 3 ramos como escrito, implementou corretamente só
+`test-run || delegation`. `journal-entry` permanece excluído.
